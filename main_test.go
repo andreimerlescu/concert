@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -73,7 +74,7 @@ func (u *fakeUpstream) handle(w http.ResponseWriter, r *http.Request) {
 	u.mu.Unlock()
 
 	switch r.URL.Path {
-	case "/slow":
+	case "/slow", "/assets/slow":
 		u.entered <- struct{}{}
 		select {
 		case <-u.release:
@@ -116,23 +117,30 @@ var testClient = &http.Client{
 
 func testConfig(upstream string) config {
 	return config{
-		listen:        "127.0.0.1:0",
-		upstream:      upstream,
-		capacity:      10,
-		maxQueue:      100,
-		reaper:        30 * time.Second,
-		cookiePath:    "/",
-		preserveHost:  true,
-		headerTimeout: 5 * time.Second,
-		apiJSON:       true,
-		retryAfter:    5,
-		accessLog:     io.Discard,
+		listen:           "127.0.0.1:0",
+		upstream:         upstream,
+		capacity:         10,
+		maxQueue:         100,
+		reaper:           30 * time.Second,
+		cookiePath:       "/",
+		preserveHost:     true,
+		headerTimeout:    5 * time.Second,
+		apiJSON:          true,
+		retryAfter:       5,
+		assetWait:        2 * time.Second,
+		assetUserCapH1:   8,
+		assetUserCapH2:   128,
+		assetUserWait:    2 * time.Second,
+		admitTTL:         10 * time.Minute,
+		admitSecret:      []byte("concert-test-secret-0123456789abcdef"),
+		accessLogEnabled: false,
+		accessLog:        io.Discard,
 	}
 }
 
 // newTestApp builds the app and fronts it with an httptest server.
 // The upstream is released before the front server closes so that
-// Close never blocks on a parked /slow request.
+// Close never blocks on a parked request.
 func newTestApp(t *testing.T, cfg config, up *fakeUpstream) (*app, *httptest.Server) {
 	t.Helper()
 	a, err := newApp(cfg)
@@ -148,11 +156,18 @@ func newTestApp(t *testing.T, cfg config, up *fakeUpstream) (*app, *httptest.Ser
 	return a, front
 }
 
-// fillSlot parks one request on the upstream, occupying a slot.
-func fillSlot(t *testing.T, front *httptest.Server, up *fakeUpstream) {
+// park sends a request that blocks inside the upstream until released.
+func park(t *testing.T, front *httptest.Server, up *fakeUpstream, path string, hdr map[string]string) {
 	t.Helper()
 	go func() {
-		resp, err := testClient.Get(front.URL + "/slow")
+		req, err := http.NewRequest(http.MethodGet, front.URL+path, nil)
+		if err != nil {
+			return
+		}
+		for k, v := range hdr {
+			req.Header.Set(k, v)
+		}
+		resp, err := testClient.Do(req)
 		if err == nil {
 			_, _ = io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
@@ -161,8 +176,14 @@ func fillSlot(t *testing.T, front *httptest.Server, up *fakeUpstream) {
 	select {
 	case <-up.entered:
 	case <-time.After(5 * time.Second):
-		t.Fatal("slow request never reached the upstream")
+		t.Fatalf("%s never reached the upstream", path)
 	}
+}
+
+// fillSlot parks one gated request, occupying a room slot.
+func fillSlot(t *testing.T, front *httptest.Server, up *fakeUpstream) {
+	t.Helper()
+	park(t, front, up, "/slow", nil)
 }
 
 func doReq(t *testing.T, c *http.Client, method, url string, hdr map[string]string, body io.Reader) (*http.Response, []byte) {
@@ -204,13 +225,47 @@ func eventually(t *testing.T, d time.Duration, cond func() bool, msg string) {
 	t.Fatal(msg)
 }
 
-func hasCookie(resp *http.Response, name string) bool {
+func cookieValue(resp *http.Response, name string) (string, bool) {
 	for _, c := range resp.Cookies() {
 		if c.Name == name {
-			return true
+			return c.Value, true
 		}
 	}
-	return false
+	return "", false
+}
+
+func hasCookie(resp *http.Response, name string) bool {
+	_, ok := cookieValue(resp, name)
+	return ok
+}
+
+// admitPass loads a gated page and returns the concert_admit value it issued.
+func admitPass(t *testing.T, front *httptest.Server) string {
+	t.Helper()
+	resp, _ := get(t, front.URL+"/page", map[string]string{"Accept": "text/html"})
+	v, ok := cookieValue(resp, admitCookie)
+	if !ok {
+		t.Fatalf("admitted page did not issue %s (status %d)", admitCookie, resp.StatusCode)
+	}
+	return v
+}
+
+func withPass(pass string, extra map[string]string) map[string]string {
+	hdr := map[string]string{"Cookie": admitCookie + "=" + pass}
+	for k, v := range extra {
+		hdr[k] = v
+	}
+	return hdr
+}
+
+func getStats(t *testing.T, front *httptest.Server) map[string]any {
+	t.Helper()
+	_, body := get(t, front.URL+"/_room/stats", nil)
+	var s map[string]any
+	if err := json.Unmarshal(body, &s); err != nil {
+		t.Fatalf("stats not JSON: %q", body)
+	}
+	return s
 }
 
 // clearConcertEnv unsets every CONCERT_* variable for the duration of the
@@ -263,11 +318,26 @@ func TestParseConfig_Defaults(t *testing.T) {
 		{"apiJSON", cfg.apiJSON, true},
 		{"retryAfter", cfg.retryAfter, 5},
 		{"adminToken", cfg.adminToken, ""},
+		{"assets", cfg.assets, ""},
+		{"assetPublic", cfg.assetPublic, ""},
+		{"assetCap", cfg.assetCap, 0},
+		{"assetWait", cfg.assetWait, 2 * time.Second},
+		{"assetUserCapH1", cfg.assetUserCapH1, 8},
+		{"assetUserCapH2", cfg.assetUserCapH2, 128},
+		{"assetUserWait", cfg.assetUserWait, 2 * time.Second},
+		{"admitTTL", cfg.admitTTL, 10 * time.Minute},
+		{"clientProtoHeader", cfg.clientProtoHeader, ""},
+		{"accessLogEnabled", cfg.accessLogEnabled, true},
+		{"admitSecretGenerated", cfg.admitSecretGenerated, true},
+		{"effectiveAssetCap", cfg.effectiveAssetCap(), 500 * 128},
 	}
 	for _, c := range checks {
 		if c.got != c.want {
 			t.Errorf("%s: got %v, want %v", c.name, c.got, c.want)
 		}
+	}
+	if len(cfg.admitSecret) != minSecretLen {
+		t.Errorf("generated secret length: got %d, want %d", len(cfg.admitSecret), minSecretLen)
 	}
 	if cfg.target == nil || cfg.target.Host != "127.0.0.1:3000" {
 		t.Errorf("target not derived from upstream: %v", cfg.target)
@@ -281,6 +351,8 @@ func TestParseConfig_EnvOverridesDefaults(t *testing.T) {
 	t.Setenv("CONCERT_REAPER", "45s")
 	t.Setenv("CONCERT_API_JSON", "false")
 	t.Setenv("CONCERT_ADMIN_TOKEN", "s3cret")
+	t.Setenv("CONCERT_ASSET_USER_CAP_H2", "64")
+	t.Setenv("CONCERT_ADMIT_SECRET", strings.Repeat("k", 40))
 
 	cfg, _, err := parseConfig(newFlagSet(), nil)
 	if err != nil {
@@ -300,6 +372,12 @@ func TestParseConfig_EnvOverridesDefaults(t *testing.T) {
 	}
 	if cfg.adminToken != "s3cret" {
 		t.Errorf("adminToken: got %q", cfg.adminToken)
+	}
+	if cfg.effectiveAssetCap() != 42*64 {
+		t.Errorf("derived asset cap: got %d, want %d", cfg.effectiveAssetCap(), 42*64)
+	}
+	if cfg.admitSecretGenerated || string(cfg.admitSecret) != strings.Repeat("k", 40) {
+		t.Error("CONCERT_ADMIT_SECRET was not used")
 	}
 }
 
@@ -338,12 +416,21 @@ func TestParseConfig_UnknownFlag(t *testing.T) {
 
 func TestParseConfig_Invalid(t *testing.T) {
 	cases := map[string][]string{
-		"no scheme":     {"-upstream", "not a url"},
-		"ftp scheme":    {"-upstream", "ftp://files.example"},
-		"no host":       {"-upstream", "http://"},
-		"zero cap":      {"-cap", "0"},
-		"negative cap":  {"-cap", "-5"},
-		"overflows i32": {"-cap", "3000000000"},
+		"no scheme":           {"-upstream", "not a url"},
+		"ftp scheme":          {"-upstream", "ftp://files.example"},
+		"no host":             {"-upstream", "http://"},
+		"zero cap":            {"-cap", "0"},
+		"negative cap":        {"-cap", "-5"},
+		"overflows i32":       {"-cap", "3000000000"},
+		"negative asset cap":  {"-asset-cap", "-1"},
+		"zero h1 user cap":    {"-asset-user-cap-h1", "0"},
+		"zero h2 user cap":    {"-asset-user-cap-h2", "0"},
+		"negative asset wait": {"-asset-wait", "-1s"},
+		"short admit ttl":     {"-admit-ttl", "5s"},
+		"catch-all bypass":    {"-bypass", "/*"},
+		"reserved asset":      {"-assets", "/_room/*"},
+		"reserved status":     {"-asset-public", "/queue/status"},
+		"duplicate path":      {"-bypass", "/x", "-assets", "/x"},
 	}
 	for name, args := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -352,6 +439,15 @@ func TestParseConfig_Invalid(t *testing.T) {
 				t.Errorf("expected error for %v", args)
 			}
 		})
+	}
+}
+
+func TestParseConfig_ShortSecretRejected(t *testing.T) {
+	clearConcertEnv(t)
+	t.Setenv("CONCERT_ADMIT_SECRET", "too-short")
+
+	if _, _, err := parseConfig(newFlagSet(), nil); err == nil {
+		t.Error("expected error for a secret under 32 bytes")
 	}
 }
 
@@ -366,6 +462,25 @@ func TestNormalize_ClampsRetryAfter(t *testing.T) {
 	}
 }
 
+func TestEffectiveAssetCap(t *testing.T) {
+	cfg := testConfig("http://127.0.0.1:1")
+	cfg.capacity, cfg.assetUserCapH2 = 1200, 200
+	if got := cfg.effectiveAssetCap(); got != 240000 {
+		t.Errorf("derived: got %d, want 240000", got)
+	}
+
+	cfg.assetCap = 7
+	if got := cfg.effectiveAssetCap(); got != 7 {
+		t.Errorf("override: got %d, want 7", got)
+	}
+
+	cfg.assetCap = 0
+	cfg.capacity, cfg.assetUserCapH2 = math.MaxInt32, 128
+	if got := cfg.effectiveAssetCap(); got != math.MaxInt32 {
+		t.Errorf("clamp: got %d, want %d", got, math.MaxInt32)
+	}
+}
+
 func TestNewApp_RejectsInvalidConfig(t *testing.T) {
 	cfg := testConfig("http://127.0.0.1:1")
 	cfg.capacity = 0
@@ -374,13 +489,31 @@ func TestNewApp_RejectsInvalidConfig(t *testing.T) {
 	}
 }
 
+func TestNewApp_RouteConflictIsError(t *testing.T) {
+	cases := map[string]func(*config){
+		"prefix vs exact": func(c *config) { c.bypass, c.assets = "/static/*", "/static/app.js" },
+		"shadows status":  func(c *config) { c.assets = "/queue/*" },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			cfg := testConfig("http://127.0.0.1:1")
+			mutate(&cfg)
+			a, err := newApp(cfg)
+			if err == nil {
+				a.Close()
+				t.Fatal("expected a route conflict error")
+			}
+		})
+	}
+}
+
 // ─── pure helpers ────────────────────────────────────────────────────────────
 
 func TestStripCookies(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set("Cookie", "room_ticket=a; session=keep; room_pass=b; room_probe=1; theme=dark")
+	req.Header.Set("Cookie", "room_ticket=a; session=keep; room_pass=b; room_probe=1; concert_admit=z; theme=dark")
 
-	stripCookies(req, roomCookies...)
+	stripCookies(req, proxyCookies...)
 
 	got := map[string]string{}
 	for _, c := range req.Cookies() {
@@ -393,7 +526,7 @@ func TestStripCookies(t *testing.T) {
 
 func TestStripCookies_NoCookieHeader(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	stripCookies(req, roomCookies...)
+	stripCookies(req, proxyCookies...)
 	if _, ok := req.Header["Cookie"]; ok {
 		t.Error("strip should not add a Cookie header")
 	}
@@ -420,6 +553,138 @@ func TestWantsHTML(t *testing.T) {
 	}
 }
 
+func TestIsMultiplexed(t *testing.T) {
+	const hdr = "X-Client-Proto"
+	cases := []struct {
+		name       string
+		header     string
+		value      string
+		protoMajor int
+		want       bool
+	}{
+		{"h1 connection, no header configured", "", "", 1, false},
+		{"h2 connection, no header configured", "", "", 2, true},
+		{"header says HTTP/1.1", hdr, "HTTP/1.1", 1, false},
+		{"header says HTTP/2.0", hdr, "HTTP/2.0", 1, true},
+		{"header says HTTP/3.0", hdr, "HTTP/3.0", 1, true},
+		{"header beats connection", hdr, "HTTP/1.1", 2, false},
+		{"unrecognised value falls back", hdr, "SPDY", 2, true},
+		{"missing value falls back", hdr, "", 1, false},
+		{"header ignored when not configured", "", "HTTP/2.0", 1, false},
+	}
+	for _, c := range cases {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.ProtoMajor = c.protoMajor
+		if c.value != "" {
+			req.Header.Set(hdr, c.value)
+		}
+		if got := isMultiplexed(req, c.header); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// ─── admission pass ──────────────────────────────────────────────────────────
+
+func TestAdmitter_RoundTrip(t *testing.T) {
+	a := &admitter{secret: []byte(strings.Repeat("s", 32)), ttl: time.Minute}
+	now := time.Now()
+	id := passID{9, 8, 7}
+
+	v := a.mint(id, now)
+	got, exp, ok := a.verify(v, now)
+	if !ok || got != id {
+		t.Fatalf("round trip failed: ok=%v id=%v", ok, got)
+	}
+	if exp.Unix() != now.Add(time.Minute).Unix() {
+		t.Errorf("expiry: got %v", exp)
+	}
+
+	b := []byte(v)
+	if b[5] == 'A' {
+		b[5] = 'B'
+	} else {
+		b[5] = 'A'
+	}
+	if _, _, ok := a.verify(string(b), now); ok {
+		t.Error("tampered pass verified")
+	}
+
+	if _, _, ok := a.verify(v, now.Add(time.Minute)); ok {
+		t.Error("expired pass verified")
+	}
+
+	other := &admitter{secret: []byte(strings.Repeat("x", 32)), ttl: time.Minute}
+	if _, _, ok := other.verify(v, now); ok {
+		t.Error("pass verified under a different secret")
+	}
+
+	for _, junk := range []string{"", "nope", strings.Repeat("A", 54), v + "A"} {
+		if _, _, ok := a.verify(junk, now); ok {
+			t.Errorf("junk %q verified", junk)
+		}
+	}
+}
+
+func TestGate_IssuesPassOnAdmittedPage(t *testing.T) {
+	up := newFakeUpstream(t)
+	_, front := newTestApp(t, testConfig(up.URL()), up)
+
+	resp, _ := get(t, front.URL+"/page", map[string]string{"Accept": "text/html"})
+	var found *http.Cookie
+	for _, c := range resp.Cookies() {
+		if c.Name == admitCookie {
+			found = c
+		}
+	}
+	if found == nil {
+		t.Fatal("admitted page did not issue a pass")
+	}
+	if !found.HttpOnly || found.SameSite != http.SameSiteLaxMode || found.MaxAge != 600 {
+		t.Errorf("pass attributes: HttpOnly=%v SameSite=%v MaxAge=%d", found.HttpOnly, found.SameSite, found.MaxAge)
+	}
+}
+
+func TestGate_PassRefreshedOnlyPastHalfLife(t *testing.T) {
+	up := newFakeUpstream(t)
+	a, front := newTestApp(t, testConfig(up.URL()), up)
+
+	pass := admitPass(t, front)
+	resp, _ := get(t, front.URL+"/page", withPass(pass, nil))
+	if hasCookie(resp, admitCookie) {
+		t.Error("fresh pass should not be re-issued")
+	}
+
+	id, _, ok := a.admit.verify(pass, time.Now())
+	if !ok {
+		t.Fatal("issued pass does not verify")
+	}
+	stale := a.admit.mint(id, time.Now().Add(-a.cfg.admitTTL*3/4))
+	resp, _ = get(t, front.URL+"/page", withPass(stale, nil))
+	renewed, ok := cookieValue(resp, admitCookie)
+	if !ok {
+		t.Fatal("pass past half-life was not refreshed")
+	}
+	if gotID, _, ok := a.admit.verify(renewed, time.Now()); !ok || gotID != id {
+		t.Error("refresh must keep the same pass ID")
+	}
+}
+
+func TestGate_QueuedClientGetsNoPass(t *testing.T) {
+	up := newFakeUpstream(t)
+	cfg := testConfig(up.URL())
+	cfg.capacity = 1
+	_, front := newTestApp(t, cfg, up)
+	fillSlot(t, front, up)
+
+	for _, hdr := range []map[string]string{nil, {"Accept": "text/html"}} {
+		resp, _ := get(t, front.URL+"/page", hdr)
+		if hasCookie(resp, admitCookie) {
+			t.Errorf("queued response (Accept=%q) issued an admission pass", hdr["Accept"])
+		}
+	}
+}
+
 // ─── proxying ────────────────────────────────────────────────────────────────
 
 func TestProxy_ForwardsWhenRoomHasSpace(t *testing.T) {
@@ -435,12 +700,12 @@ func TestProxy_ForwardsWhenRoomHasSpace(t *testing.T) {
 	}
 }
 
-func TestProxy_StripsRoomCookies(t *testing.T) {
+func TestProxy_StripsProxyCookies(t *testing.T) {
 	up := newFakeUpstream(t)
 	_, front := newTestApp(t, testConfig(up.URL()), up)
 
 	get(t, front.URL+"/c", map[string]string{
-		"Cookie": "room_ticket=abc; room_pass=def; room_probe=1; session=keep",
+		"Cookie": "room_ticket=abc; room_pass=def; room_probe=1; concert_admit=xyz; session=keep",
 	})
 
 	_, _, cookie, _ := up.seen()
@@ -674,11 +939,11 @@ func TestQueue_BypassSkipsFullRoom(t *testing.T) {
 	up := newFakeUpstream(t)
 	cfg := testConfig(up.URL())
 	cfg.capacity = 1
-	cfg.bypass = "/static/*, /robots.txt"
+	cfg.bypass = "/webhooks/*, /robots.txt"
 	_, front := newTestApp(t, cfg, up)
 	fillSlot(t, front, up)
 
-	for _, p := range []string{"/static/app.js", "/static/css/site.css", "/robots.txt"} {
+	for _, p := range []string{"/webhooks/stripe", "/webhooks/paypal/ipn", "/robots.txt"} {
 		resp, body := get(t, front.URL+p, nil)
 		if resp.StatusCode != http.StatusOK || string(body) != "ok" {
 			t.Errorf("%s: got %d %q, want upstream 200", p, resp.StatusCode, body)
@@ -688,6 +953,231 @@ func TestQueue_BypassSkipsFullRoom(t *testing.T) {
 	resp, _ := get(t, front.URL+"/gated", nil)
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Errorf("/gated: got %d, want 429", resp.StatusCode)
+	}
+}
+
+// ─── asset tier ──────────────────────────────────────────────────────────────
+
+func TestAssets_DeniedWithoutPass(t *testing.T) {
+	up := newFakeUpstream(t)
+	cfg := testConfig(up.URL())
+	cfg.assets = "/assets/*"
+	_, front := newTestApp(t, cfg, up)
+
+	for name, hdr := range map[string]map[string]string{
+		"no cookie":     nil,
+		"forged cookie": withPass("forged", nil),
+	} {
+		resp, _ := get(t, front.URL+"/assets/app.js", hdr)
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("%s: got %d, want 403", name, resp.StatusCode)
+		}
+	}
+	if up.hitsFor("/assets/app.js") != 0 {
+		t.Error("denied asset request reached the upstream")
+	}
+}
+
+func TestAssets_ServedWithPass(t *testing.T) {
+	up := newFakeUpstream(t)
+	cfg := testConfig(up.URL())
+	cfg.assets = "/assets/*"
+	_, front := newTestApp(t, cfg, up)
+
+	pass := admitPass(t, front)
+	resp, body := get(t, front.URL+"/assets/app.js", withPass(pass, nil))
+	if resp.StatusCode != http.StatusOK || string(body) != "ok" {
+		t.Fatalf("got %d %q", resp.StatusCode, body)
+	}
+	if _, _, cookie, _ := up.seen(); strings.Contains(cookie, admitCookie) {
+		t.Error("admission pass leaked to the upstream")
+	}
+}
+
+func TestAssets_ServedWhileRoomIsFull(t *testing.T) {
+	up := newFakeUpstream(t)
+	cfg := testConfig(up.URL())
+	cfg.capacity = 1
+	cfg.assets = "/assets/*"
+	_, front := newTestApp(t, cfg, up)
+
+	pass := admitPass(t, front)
+	fillSlot(t, front, up)
+
+	resp, _ := get(t, front.URL+"/assets/app.css", withPass(pass, nil))
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("admitted user's asset: got %d, want 200 while page slots are full", resp.StatusCode)
+	}
+}
+
+func TestAssets_PublicNeedsNoPass(t *testing.T) {
+	up := newFakeUpstream(t)
+	cfg := testConfig(up.URL())
+	cfg.assets = "/assets/*"
+	cfg.assetPublic = "/uploads/*"
+	_, front := newTestApp(t, cfg, up)
+
+	resp, _ := get(t, front.URL+"/uploads/og-image.png", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("public asset: got %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestAssets_PerUserLimitHTTP1(t *testing.T) {
+	up := newFakeUpstream(t)
+	cfg := testConfig(up.URL())
+	cfg.assets = "/assets/*"
+	cfg.assetUserCapH1 = 1
+	cfg.assetUserWait = 50 * time.Millisecond
+	_, front := newTestApp(t, cfg, up)
+
+	passA := admitPass(t, front)
+	passB := admitPass(t, front)
+	park(t, front, up, "/assets/slow", withPass(passA, nil))
+
+	resp, _ := get(t, front.URL+"/assets/app.js", withPass(passA, nil))
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("same pass over its cap: got %d, want 429", resp.StatusCode)
+	}
+	if resp.Header.Get("Retry-After") == "" {
+		t.Error("429 missing Retry-After")
+	}
+
+	resp, _ = get(t, front.URL+"/assets/app.js", withPass(passB, nil))
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("other pass: got %d, want 200 (limits are per user)", resp.StatusCode)
+	}
+}
+
+func TestAssets_PerUserLimitHTTP2ViaHeader(t *testing.T) {
+	up := newFakeUpstream(t)
+	cfg := testConfig(up.URL())
+	cfg.assets = "/assets/*"
+	cfg.assetUserCapH1 = 1
+	cfg.assetUserCapH2 = 2
+	cfg.assetUserWait = 50 * time.Millisecond
+	cfg.clientProtoHeader = "X-Client-Proto"
+	_, front := newTestApp(t, cfg, up)
+
+	pass := admitPass(t, front)
+	h2 := withPass(pass, map[string]string{"X-Client-Proto": "HTTP/2.0"})
+	h1 := withPass(pass, map[string]string{"X-Client-Proto": "HTTP/1.1"})
+
+	park(t, front, up, "/assets/slow", h2)
+	park(t, front, up, "/assets/slow", h2) // HTTP/2 rule allows a second
+
+	resp, _ := get(t, front.URL+"/assets/app.js", h2)
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("third HTTP/2 request: got %d, want 429", resp.StatusCode)
+	}
+
+	resp, _ = get(t, front.URL+"/assets/app.js", h1)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("HTTP/1.1 pool should be separate: got %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestAssets_GlobalLimit(t *testing.T) {
+	up := newFakeUpstream(t)
+	cfg := testConfig(up.URL())
+	cfg.assets = "/assets/*"
+	cfg.assetCap = 1
+	cfg.assetWait = 50 * time.Millisecond
+	_, front := newTestApp(t, cfg, up)
+
+	passA := admitPass(t, front)
+	passB := admitPass(t, front)
+	park(t, front, up, "/assets/slow", withPass(passA, nil))
+
+	resp, _ := get(t, front.URL+"/assets/app.js", withPass(passB, nil))
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("global cap reached: got %d, want 503", resp.StatusCode)
+	}
+}
+
+func TestAssets_PublicCountsAgainstGlobalLimit(t *testing.T) {
+	up := newFakeUpstream(t)
+	cfg := testConfig(up.URL())
+	cfg.assets = "/assets/*"
+	cfg.assetPublic = "/uploads/*"
+	cfg.assetCap = 1
+	cfg.assetWait = 50 * time.Millisecond
+	_, front := newTestApp(t, cfg, up)
+
+	pass := admitPass(t, front)
+	park(t, front, up, "/assets/slow", withPass(pass, nil))
+
+	resp, _ := get(t, front.URL+"/uploads/og-image.png", nil)
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("public asset with global cap full: got %d, want 503", resp.StatusCode)
+	}
+}
+
+func TestAssets_Stats(t *testing.T) {
+	up := newFakeUpstream(t)
+	cfg := testConfig(up.URL())
+	cfg.capacity = 3
+	cfg.assetUserCapH2 = 16
+	cfg.assets = "/assets/*"
+	_, front := newTestApp(t, cfg, up)
+
+	get(t, front.URL+"/assets/app.js", nil) // denied
+	pass := admitPass(t, front)
+	get(t, front.URL+"/assets/app.js", withPass(pass, nil)) // served
+
+	s := getStats(t, front)
+	checks := map[string]float64{
+		"asset_cap":          48, // 3 × 16, derived
+		"asset_users":        1,
+		"asset_denied_total": 1,
+		"asset_served_total": 1,
+		"asset_in_flight":    0,
+	}
+	for k, want := range checks {
+		if s[k] != want {
+			t.Errorf("%s: got %v, want %v", k, s[k], want)
+		}
+	}
+}
+
+func TestUserStore_SeparateProtocolSemaphores(t *testing.T) {
+	s := newUserStore(2, 5)
+	id := passID{1}
+
+	h1 := s.slot(id, false, 1)
+	h2 := s.slot(id, true, 1)
+	if h1.Cap() != 2 || h2.Cap() != 5 {
+		t.Errorf("caps: h1=%d h2=%d, want 2 and 5", h1.Cap(), h2.Cap())
+	}
+	if s.slot(id, false, 2) != h1 || s.slot(id, true, 2) != h2 {
+		t.Error("slot must return the same semaphore for the same pass and protocol")
+	}
+	if s.count.Load() != 1 {
+		t.Errorf("count: got %d, want 1", s.count.Load())
+	}
+}
+
+func TestUserStore_SweepEvictsOnlyIdle(t *testing.T) {
+	s := newUserStore(2, 5)
+	idle, busy, recent := passID{1}, passID{2}, passID{3}
+
+	s.slot(idle, false, 100)
+	busySem := s.slot(busy, true, 100)
+	if !busySem.TryAcquire() {
+		t.Fatal("could not acquire")
+	}
+	s.slot(recent, false, 1000)
+
+	if n := s.sweep(500); n != 1 {
+		t.Errorf("evicted %d, want 1", n)
+	}
+	if s.count.Load() != 2 {
+		t.Errorf("remaining: got %d, want 2 (busy and recent)", s.count.Load())
+	}
+
+	_ = busySem.Release()
+	if n := s.sweep(500); n != 1 {
+		t.Errorf("after release evicted %d, want 1", n)
 	}
 }
 
@@ -713,18 +1203,13 @@ func TestOps_Stats(t *testing.T) {
 	_, front := newTestApp(t, cfg, up)
 	fillSlot(t, front, up)
 
-	resp, body := get(t, front.URL+"/_room/stats", nil)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("got %d", resp.StatusCode)
-	}
-	var s map[string]any
-	if err := json.Unmarshal(body, &s); err != nil {
-		t.Fatalf("stats not JSON: %q", body)
-	}
+	s := getStats(t, front)
 	for _, k := range []string{
 		"upstream", "cap", "occupancy", "queue_depth", "live_queue_depth",
 		"max_queue_depth", "utilization", "token_ttl",
 		"queued_total", "evicted_total", "timeouts_total", "promoted_total",
+		"asset_cap", "asset_in_flight", "asset_users", "asset_user_cap_h1", "asset_user_cap_h2",
+		"asset_served_total", "asset_denied_total", "asset_user_throttled_total", "asset_global_throttled_total",
 	} {
 		if _, ok := s[k]; !ok {
 			t.Errorf("stats missing %q", k)
