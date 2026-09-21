@@ -2,6 +2,7 @@
 .idea/
 summaries/
 lemmings/
+bin/
 *.log
 logs/*
 !logs/.keep
