@@ -7,7 +7,7 @@
 [![Built on room](https://img.shields.io/badge/built%20on-room-00d4ff)](https://github.com/andreimerlescu/room)
 [![GitHub Stars](https://img.shields.io/github/stars/andreimerlescu/concert?style=social)](https://github.com/andreimerlescu/concert/stargazers)
 
-![Concert — FIFO Waiting Room Reverse Proxy](concert.png)
+![Concert — FIFO Waiting Room Reverse Proxy](/concert.jpg)
 
 A FIFO waiting room reverse proxy. Put Concert in front of any HTTP origin, such as a PHP site, a WordPress install, or a legacy app that falls over under load. When traffic exceeds what the origin can handle, visitors wait in an orderly queue with a live position instead of getting 502s and timeouts. Admitted visitors load their page's assets through a separate tier that queued and denied visitors can't reach.
 
