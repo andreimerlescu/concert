@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -18,9 +19,11 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,28 +37,51 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// ctxAdmitted is set on the gin.Context the moment a request reaches the
-// proxy handler. Anything written before that point was written by room.
-const ctxAdmitted = "concert.admitted"
+// Context keys.
+const (
+	// ctxAdmitted is set the moment a request reaches the proxy handler.
+	// Anything written before that point was written by room.
+	ctxAdmitted = "concert.admitted"
+	// ctxClientIP holds the resolved client netip.Addr for the request.
+	ctxClientIP = "concert.client_ip"
+)
 
 // shutdownGrace bounds how long in-flight requests get to finish on SIGTERM.
 const shutdownGrace = 30 * time.Second
 
-// Admission pass layout: id(16) | expiry unix seconds(8) | truncated HMAC-SHA256(16),
-// base64url encoded without padding.
+// Admission pass layout:
+//
+//	id(16) | expiry unix seconds(8) | key id(4) | truncated HMAC-SHA256(16)
+//
+// base64url encoded without padding. The key id lets a pass signed by a
+// different secret be recognised as stale rather than forged.
 const (
 	admitCookie  = "concert_admit"
 	passIDLen    = 16
 	passExpLen   = 8
+	passKIDLen   = 4
 	passMACLen   = 16
-	passBodyLen  = passIDLen + passExpLen
+	passExpOff   = passIDLen
+	passKIDOff   = passExpOff + passExpLen
+	passBodyLen  = passKIDOff + passKIDLen
 	passRawLen   = passBodyLen + passMACLen
 	minSecretLen = 32
 )
 
-// userShards must be a power of two. Pass IDs are random, so the first byte
-// distributes users evenly across shards.
-const userShards = 64
+// Shard counts must be powers of two.
+const (
+	userShards  = 64
+	abuseShards = 64
+)
+
+// Strike weights. A client is banned when its strikes within -abuse-window
+// reach -abuse-strikes. Ban paths bypass weights and ban immediately.
+const (
+	strikeForgedPass   = 5 // admission pass with a bad signature under the current key
+	strikeAdminAuth    = 5 // wrong admin token
+	strikeUserThrottle = 1 // per-pass asset pool exhausted
+	strikeTicketChurn  = 1 // queued arrival without a room_ticket cookie
+)
 
 // Cookies owned by concert and room. None of them are forwarded upstream.
 //
@@ -98,11 +124,23 @@ type config struct {
 	clientProtoHeader string
 	accessLogEnabled  bool
 
+	trustedProxies   string
+	abuseEnabled     bool
+	abuseStrikes     int
+	abuseWindow      time.Duration
+	abuseCooldown    time.Duration
+	abuseMaxCooldown time.Duration
+	abuseMaxEntries  int
+	abuseAllow       string
+	banPaths         string
+
 	// Derived / non-flag fields.
-	admitSecret          []byte    // CONCERT_ADMIT_SECRET, or random when unset
-	admitSecretGenerated bool      // true when admitSecret was generated
-	target               *url.URL  // set by normalize
-	accessLog            io.Writer // access log destination; nil means os.Stdout
+	admitSecret          []byte         // CONCERT_ADMIT_SECRET, or random when unset
+	admitSecretGenerated bool           // true when admitSecret was generated
+	target               *url.URL       // set by normalize
+	trusted              []netip.Prefix // parsed -trusted-proxies
+	allow                []netip.Prefix // parsed -abuse-allow
+	accessLog            io.Writer      // access log destination; nil means os.Stdout
 }
 
 type counters struct {
@@ -115,6 +153,11 @@ type counters struct {
 	assetDenied          atomic.Int64
 	assetUserThrottled   atomic.Int64
 	assetGlobalThrottled atomic.Int64
+
+	abuseStrikes  atomic.Int64
+	abuseBans     atomic.Int64
+	abuseRejected atomic.Int64
+	abuseDropped  atomic.Int64
 }
 
 // app is a fully wired proxy that has not yet been bound to a listener.
@@ -124,6 +167,8 @@ type app struct {
 	stats    *counters
 	admit    *admitter
 	assets   *assetGuard
+	abuse    *abuseRegistry // nil when -abuse=false
+	banRules []pathRule
 	forward  gin.HandlerFunc
 	handler  http.Handler
 	stop     chan struct{}
@@ -187,6 +232,15 @@ func parseConfig(fs *flag.FlagSet, args []string) (config, bool, error) {
 	fs.DurationVar(&cfg.admitTTL, "admit-ttl", env.Duration("CONCERT_ADMIT_TTL", 10*time.Minute), "sliding lifetime of the admission pass (min 30s)")
 	fs.StringVar(&cfg.clientProtoHeader, "client-proto-header", env.String("CONCERT_CLIENT_PROTO_HEADER", ""), "header set by a trusted TLS terminator carrying the client's HTTP protocol")
 	fs.BoolVar(&cfg.accessLogEnabled, "access-log", env.Bool("CONCERT_ACCESS_LOG", true), "write an access log line per non-asset request")
+	fs.StringVar(&cfg.trustedProxies, "trusted-proxies", env.String("CONCERT_TRUSTED_PROXIES", "127.0.0.1/32,::1/128"), "comma-separated CIDRs whose X-Forwarded-For and X-Forwarded-Proto are trusted")
+	fs.BoolVar(&cfg.abuseEnabled, "abuse", env.Bool("CONCERT_ABUSE", true), "enable the abuse registry")
+	fs.IntVar(&cfg.abuseStrikes, "abuse-strikes", env.Int("CONCERT_ABUSE_STRIKES", 20), "strike total within -abuse-window that triggers a ban")
+	fs.DurationVar(&cfg.abuseWindow, "abuse-window", env.Duration("CONCERT_ABUSE_WINDOW", time.Minute), "window over which strikes accumulate")
+	fs.DurationVar(&cfg.abuseCooldown, "abuse-cooldown", env.Duration("CONCERT_ABUSE_COOLDOWN", 5*time.Minute), "first ban length; doubles with each repeat ban")
+	fs.DurationVar(&cfg.abuseMaxCooldown, "abuse-max-cooldown", env.Duration("CONCERT_ABUSE_MAX_COOLDOWN", 24*time.Hour), "longest ban; also how long ban history is remembered")
+	fs.IntVar(&cfg.abuseMaxEntries, "abuse-max-entries", env.Int("CONCERT_ABUSE_MAX_ENTRIES", 100000), "max clients tracked at once")
+	fs.StringVar(&cfg.abuseAllow, "abuse-allow", env.String("CONCERT_ABUSE_ALLOW", ""), "comma-separated CIDRs that are never struck or banned")
+	fs.StringVar(&cfg.banPaths, "ban-paths", env.String("CONCERT_BAN_PATHS", ""), "comma-separated paths that ban the client on first hit; suffix /* for a prefix")
 	showVersion := fs.Bool("version", false, "show version")
 
 	if err := fs.Parse(args); err != nil {
@@ -246,6 +300,33 @@ func (c *config) normalize() error {
 		return fmt.Errorf("CONCERT_ADMIT_SECRET must be at least %d bytes", minSecretLen)
 	}
 
+	if c.trusted, err = parsePrefixes(c.trustedProxies); err != nil {
+		return fmt.Errorf("invalid -trusted-proxies: %w", err)
+	}
+	if c.allow, err = parsePrefixes(c.abuseAllow); err != nil {
+		return fmt.Errorf("invalid -abuse-allow: %w", err)
+	}
+
+	if c.abuseEnabled {
+		if c.abuseStrikes < 1 {
+			return fmt.Errorf("invalid -abuse-strikes %d: must be at least 1", c.abuseStrikes)
+		}
+		if c.abuseWindow <= 0 {
+			return fmt.Errorf("invalid -abuse-window %s: must be positive", c.abuseWindow)
+		}
+		if c.abuseCooldown <= 0 {
+			return fmt.Errorf("invalid -abuse-cooldown %s: must be positive", c.abuseCooldown)
+		}
+		if c.abuseMaxCooldown < c.abuseCooldown {
+			return fmt.Errorf("invalid -abuse-max-cooldown %s: must be at least -abuse-cooldown %s", c.abuseMaxCooldown, c.abuseCooldown)
+		}
+		if c.abuseMaxEntries < 1 {
+			return fmt.Errorf("invalid -abuse-max-entries %d: must be at least 1", c.abuseMaxEntries)
+		}
+	} else if len(parsePaths(c.banPaths)) > 0 {
+		return errors.New("-ban-paths requires -abuse")
+	}
+
 	return validateRoutes(c)
 }
 
@@ -260,6 +341,42 @@ func (c config) effectiveAssetCap() int {
 		n = math.MaxInt32
 	}
 	return int(n)
+}
+
+// parsePrefixes reads "10.0.0.0/8, 192.0.2.1, ::1" style lists. Bare
+// addresses become single-address prefixes.
+func parsePrefixes(spec string) ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for _, part := range strings.Split(spec, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if strings.Contains(part, "/") {
+			p, err := netip.ParsePrefix(part)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, p.Masked())
+			continue
+		}
+		a, err := netip.ParseAddr(part)
+		if err != nil {
+			return nil, err
+		}
+		a = a.Unmap()
+		out = append(out, netip.PrefixFrom(a, a.BitLen()))
+	}
+	return out, nil
+}
+
+func containsAddr(prefixes []netip.Prefix, a netip.Addr) bool {
+	for _, p := range prefixes {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return false
 }
 
 // ─── path rules ──────────────────────────────────────────────────────────────
@@ -309,6 +426,7 @@ func validateRoutes(c *config) error {
 		{"-bypass", c.bypass},
 		{"-assets", c.assets},
 		{"-asset-public", c.assetPublic},
+		{"-ban-paths", c.banPaths},
 	}
 	for _, g := range groups {
 		for _, r := range parsePaths(g.spec) {
@@ -329,8 +447,8 @@ func validateRoutes(c *config) error {
 
 // ─── assembly ────────────────────────────────────────────────────────────────
 
-// newApp builds the waiting room, asset tier, proxy, and router without
-// binding a port. Callers must Close the returned app.
+// newApp builds the waiting room, asset tier, abuse registry, proxy, and
+// router without binding a port. Callers must Close the returned app.
 func newApp(cfg config) (*app, error) {
 	if err := cfg.normalize(); err != nil {
 		return nil, err
@@ -353,30 +471,29 @@ func newApp(cfg config) (*app, error) {
 		return nil, fmt.Errorf("asset semaphore: %w", err)
 	}
 
-	admit := &admitter{
-		secret: cfg.admitSecret,
-		ttl:    cfg.admitTTL,
-		path:   cfg.cookiePath,
-		domain: cfg.cookieDomain,
-		secure: cfg.secureCookie,
-	}
+	admit := newAdmitter(cfg.admitSecret, cfg.admitTTL, cfg.cookiePath, cfg.cookieDomain, cfg.secureCookie)
 
 	a := &app{
-		cfg:   cfg,
-		room:  wr,
-		stats: stats,
-		admit: admit,
-		assets: &assetGuard{
-			admit:       admit,
-			users:       newUserStore(cfg.assetUserCapH1, cfg.assetUserCapH2),
-			global:      global,
-			userWait:    cfg.assetUserWait,
-			globalWait:  cfg.assetWait,
-			protoHeader: cfg.clientProtoHeader,
-			stats:       stats,
-		},
-		forward: forwardTo(newProxy(cfg.target, cfg.preserveHost, cfg.headerTimeout)),
-		stop:    make(chan struct{}),
+		cfg:      cfg,
+		room:     wr,
+		stats:    stats,
+		admit:    admit,
+		banRules: parsePaths(cfg.banPaths),
+		forward:  forwardTo(newProxy(cfg.target, cfg.preserveHost, cfg.headerTimeout, cfg.trusted)),
+		stop:     make(chan struct{}),
+	}
+	if cfg.abuseEnabled {
+		a.abuse = newAbuseRegistry(cfg, stats)
+	}
+	a.assets = &assetGuard{
+		admit:       admit,
+		users:       newUserStore(cfg.assetUserCapH1, cfg.assetUserCapH2),
+		global:      global,
+		userWait:    cfg.assetUserWait,
+		globalWait:  cfg.assetWait,
+		protoHeader: cfg.clientProtoHeader,
+		stats:       stats,
+		strike:      a.strike,
 	}
 
 	handler, err := buildRouter(a)
@@ -387,10 +504,13 @@ func newApp(cfg config) (*app, error) {
 	a.handler = handler
 
 	go a.assets.users.janitor(janitorInterval(cfg.admitTTL), cfg.admitTTL, a.stop)
+	if a.abuse != nil {
+		go a.abuse.janitor(janitorInterval(cfg.abuseWindow), a.stop)
+	}
 	return a, nil
 }
 
-// Close stops the janitor and the waiting room's background workers.
+// Close stops the janitors and the waiting room's background workers.
 func (a *app) Close() {
 	a.stopOnce.Do(func() {
 		close(a.stop)
@@ -418,6 +538,10 @@ func run(ctx context.Context, cfg config) error {
 	log.Printf("concert %s -> %s (cap=%d, max-queue=%d, token-ttl=%s, asset-cap=%d%s, asset-user-cap=%d h1 / %d h2)",
 		ln.Addr(), a.cfg.target, a.cfg.capacity, a.cfg.maxQueue, a.room.TokenTTL(),
 		a.assets.global.Cap(), derived, a.cfg.assetUserCapH1, a.cfg.assetUserCapH2)
+	if a.abuse != nil {
+		log.Printf("abuse registry: %d strikes per %s, cooldown %s doubling to %s, %d ban paths",
+			a.cfg.abuseStrikes, a.cfg.abuseWindow, a.cfg.abuseCooldown, a.cfg.abuseMaxCooldown, len(a.banRules))
+	}
 	if a.cfg.admitSecretGenerated {
 		log.Printf("CONCERT_ADMIT_SECRET not set: using a random secret; admission passes reset on restart and are not shared across instances")
 	}
@@ -462,7 +586,8 @@ func newServer(h http.Handler) *http.Server {
 }
 
 // buildRouter wires routes in the order that determines what is guarded:
-// ops, bypass, and asset routes first (outside the room), then the API
+// client identification and ban enforcement first, then ops, bypass, and
+// asset routes (outside the room), then churn detection and the API
 // interceptor, then room's middleware, then the gated proxy catch-all.
 // Route conflicts make gin panic; they are returned as errors instead.
 func buildRouter(a *app) (engine *gin.Engine, err error) {
@@ -481,9 +606,10 @@ func buildRouter(a *app) (engine *gin.Engine, err error) {
 	r.RedirectTrailingSlash = false
 	r.RedirectFixedPath = false
 	r.HandleMethodNotAllowed = false
-	_ = r.SetTrustedProxies(nil)
+	_ = r.SetTrustedProxies(nil) // concert resolves client IPs itself
 
 	r.Use(gin.Recovery())
+	r.Use(a.identify) // before the logger: banned requests are never logged
 	if cfg.accessLogEnabled {
 		out := cfg.accessLog
 		if out == nil {
@@ -501,7 +627,10 @@ func buildRouter(a *app) (engine *gin.Engine, err error) {
 	registerPaths(r, parsePaths(cfg.assets), a.assets.private, a.forward)
 	registerPaths(r, parsePaths(cfg.assetPublic), a.assets.public, a.forward)
 
-	// ---- Runs ahead of room's middleware on gated requests only. ----
+	// ---- Run ahead of room's middleware on gated requests only. ----
+	if a.abuse != nil {
+		r.Use(a.watchChurn)
+	}
 	if cfg.apiJSON {
 		r.Use(apiQueueResponses(cfg.retryAfter))
 	}
@@ -511,7 +640,7 @@ func buildRouter(a *app) (engine *gin.Engine, err error) {
 
 	// ---- Everything else: gated, then proxied. ----
 	// Gin rebuilds the NoRoute chain on every Use(), so this catch-all
-	// inherits Recovery, Logger, the API interceptor, and room's middleware.
+	// inherits every middleware above plus room's.
 	r.NoRoute(a.gated)
 
 	return r, nil
@@ -542,7 +671,9 @@ func accessLogSkipper(cfg config) func(*gin.Context) bool {
 // gated handles requests room has admitted: issue or refresh the admission
 // pass, then proxy.
 func (a *app) gated(c *gin.Context) {
-	a.admit.refresh(c.Writer, c.Request, time.Now())
+	if a.admit.refresh(c.Writer, c.Request, time.Now()) == passForged {
+		a.strike(c, strikeForgedPass)
+	}
 	a.forward(c)
 }
 
@@ -554,11 +685,465 @@ func forwardTo(proxy http.Handler) gin.HandlerFunc {
 	}
 }
 
-func janitorInterval(ttl time.Duration) time.Duration {
-	if iv := ttl / 2; iv > 10*time.Second {
+func janitorInterval(d time.Duration) time.Duration {
+	if iv := d / 2; iv > 10*time.Second {
 		return iv
 	}
 	return 10 * time.Second
+}
+
+// ─── client identity and abuse enforcement ───────────────────────────────────
+
+// identify resolves the client IP, rejects banned clients, and bans clients
+// that touch a ban path. Hot path: one map lookup, no logging.
+func (a *app) identify(c *gin.Context) {
+	ip := clientIP(c.Request, a.cfg.trusted)
+	c.Set(ctxClientIP, ip)
+	if a.abuse == nil {
+		return
+	}
+
+	now := time.Now()
+	if left, banned := a.abuse.banned(ip, now); banned {
+		a.stats.abuseRejected.Add(1)
+		rejectBanned(c, left)
+		return
+	}
+
+	if len(a.banRules) == 0 {
+		return
+	}
+	p := c.Request.URL.Path
+	for _, rule := range a.banRules {
+		if rule.matches(p) {
+			if left, banned := a.abuse.banNow(ip, now); banned {
+				rejectBanned(c, left)
+			}
+			return
+		}
+	}
+}
+
+// watchChurn strikes clients that arrive without a room_ticket and are
+// issued a new one: a script discarding cookies to take fresh places in line.
+func (a *app) watchChurn(c *gin.Context) {
+	if c.FullPath() != "" {
+		c.Next()
+		return
+	}
+	_, err := c.Request.Cookie("room_ticket")
+	hadTicket := err == nil
+
+	c.Next()
+
+	if hadTicket || c.GetBool(ctxAdmitted) {
+		return
+	}
+	for _, v := range c.Writer.Header().Values("Set-Cookie") {
+		if strings.HasPrefix(v, "room_ticket=") {
+			a.strike(c, strikeTicketChurn)
+			return
+		}
+	}
+}
+
+// strike records weighted abuse against the request's client.
+func (a *app) strike(c *gin.Context, weight int) {
+	if a.abuse == nil {
+		return
+	}
+	a.abuse.strike(clientIPFrom(c), weight, time.Now())
+}
+
+func clientIPFrom(c *gin.Context) netip.Addr {
+	if v, ok := c.Get(ctxClientIP); ok {
+		if ip, ok := v.(netip.Addr); ok {
+			return ip
+		}
+	}
+	return netip.Addr{}
+}
+
+func rejectBanned(c *gin.Context, left time.Duration) {
+	secs := int((left + time.Second - 1) / time.Second)
+	if secs < 1 {
+		secs = 1
+	}
+	s := strconv.Itoa(secs)
+	c.Header("Retry-After", s)
+	c.Header("Cache-Control", "no-store")
+	c.Data(http.StatusTooManyRequests, "application/json; charset=utf-8",
+		[]byte(`{"error":"temporarily blocked","retry_after_seconds":`+s+`}`))
+	c.Abort()
+}
+
+func remoteAddr(r *http.Request) (netip.Addr, bool) {
+	if ap, err := netip.ParseAddrPort(r.RemoteAddr); err == nil {
+		return ap.Addr().Unmap(), true
+	}
+	if a, err := netip.ParseAddr(r.RemoteAddr); err == nil {
+		return a.Unmap(), true
+	}
+	return netip.Addr{}, false
+}
+
+// clientIP returns the connection address, or, when the connection comes
+// from a trusted proxy, the right-most X-Forwarded-For entry that is not
+// itself a trusted proxy. Entries left of that point are client-controlled
+// and ignored. Scans right to left without allocating.
+func clientIP(r *http.Request, trusted []netip.Prefix) netip.Addr {
+	remote, ok := remoteAddr(r)
+	if !ok {
+		return netip.Addr{}
+	}
+	if !containsAddr(trusted, remote) {
+		return remote
+	}
+
+	hop := remote
+	vals := r.Header.Values("X-Forwarded-For")
+	for i := len(vals) - 1; i >= 0; i-- {
+		s := vals[i]
+		for s != "" {
+			var part string
+			if j := strings.LastIndexByte(s, ','); j >= 0 {
+				part, s = s[j+1:], s[:j]
+			} else {
+				part, s = s, ""
+			}
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			a, err := netip.ParseAddr(part)
+			if err != nil {
+				return remote // malformed chain: trust nothing in it
+			}
+			a = a.Unmap()
+			if !containsAddr(trusted, a) {
+				return a
+			}
+			hop = a
+		}
+	}
+	return hop // every hop was trusted: internal traffic
+}
+
+// abuseKey maps a client to its registry key: the address itself for IPv4,
+// the /64 prefix for IPv6, where one host can rotate through the whole /64.
+func abuseKey(ip netip.Addr) (netip.Addr, bool) {
+	ip = ip.Unmap()
+	if !ip.IsValid() {
+		return netip.Addr{}, false
+	}
+	if ip.Is6() {
+		return netip.PrefixFrom(ip, 64).Masked().Addr(), true
+	}
+	return ip, true
+}
+
+func displayKey(k netip.Addr) string {
+	if k.Is6() {
+		return netip.PrefixFrom(k, 64).String()
+	}
+	return k.String()
+}
+
+// ─── abuse registry ──────────────────────────────────────────────────────────
+
+// abuseRegistry tracks weighted strikes per client and bans clients whose
+// strikes within a fixed window reach the threshold. Each ban doubles the
+// previous cooldown up to max. History is forgotten after max of good behaviour.
+type abuseRegistry struct {
+	shards     [abuseShards]abuseShard
+	threshold  int
+	window     int64 // nanoseconds
+	base       time.Duration
+	max        time.Duration
+	maxEntries int64
+	exempt     []netip.Prefix // -abuse-allow plus -trusted-proxies
+	count      atomic.Int64
+	stats      *counters
+}
+
+type abuseShard struct {
+	mu sync.Mutex
+	m  map[netip.Addr]*abuseEntry
+}
+
+type abuseEntry struct {
+	strikes     int
+	windowStart int64 // unix nanos
+	bannedUntil int64 // unix nanos; 0 when never banned
+	offenses    int
+}
+
+type banView struct {
+	Client           string    `json:"client"`
+	Until            time.Time `json:"until"`
+	RemainingSeconds int       `json:"remaining_seconds"`
+	Offenses         int       `json:"offenses"`
+}
+
+func newAbuseRegistry(cfg config, stats *counters) *abuseRegistry {
+	exempt := make([]netip.Prefix, 0, len(cfg.allow)+len(cfg.trusted))
+	exempt = append(exempt, cfg.allow...)
+	exempt = append(exempt, cfg.trusted...)
+
+	r := &abuseRegistry{
+		threshold:  cfg.abuseStrikes,
+		window:     int64(cfg.abuseWindow),
+		base:       cfg.abuseCooldown,
+		max:        cfg.abuseMaxCooldown,
+		maxEntries: int64(cfg.abuseMaxEntries),
+		exempt:     exempt,
+		stats:      stats,
+	}
+	for i := range r.shards {
+		r.shards[i].m = make(map[netip.Addr]*abuseEntry)
+	}
+	return r
+}
+
+func (r *abuseRegistry) shard(k netip.Addr) *abuseShard {
+	b := k.As16()
+	return &r.shards[(b[4]^b[5]^b[6]^b[7]^b[12]^b[13]^b[14]^b[15])&(abuseShards-1)]
+}
+
+// trackable returns the key for ip, or false when ip is invalid or exempt.
+func (r *abuseRegistry) trackable(ip netip.Addr) (netip.Addr, bool) {
+	ip = ip.Unmap()
+	if !ip.IsValid() || containsAddr(r.exempt, ip) {
+		return netip.Addr{}, false
+	}
+	return abuseKey(ip)
+}
+
+// entryLocked returns the entry for k, creating it when there is room. When
+// the table is full it evicts one unbanned entry from the same shard, or
+// drops tracking for k. Caller holds sh.mu.
+func (r *abuseRegistry) entryLocked(sh *abuseShard, k netip.Addr, now int64) *abuseEntry {
+	if e := sh.m[k]; e != nil {
+		return e
+	}
+	if r.count.Load() >= r.maxEntries {
+		evicted := false
+		for victim, e := range sh.m {
+			if e.bannedUntil <= now {
+				delete(sh.m, victim)
+				r.count.Add(-1)
+				evicted = true
+				break
+			}
+		}
+		if !evicted {
+			r.stats.abuseDropped.Add(1)
+			return nil
+		}
+	}
+	e := &abuseEntry{windowStart: now}
+	sh.m[k] = e
+	r.count.Add(1)
+	return e
+}
+
+func (r *abuseRegistry) cooldown(offenses int) time.Duration {
+	d := r.base
+	for i := 1; i < offenses; i++ {
+		d *= 2
+		if d >= r.max {
+			return r.max
+		}
+	}
+	if d > r.max {
+		return r.max
+	}
+	return d
+}
+
+// banLocked bans e starting at now. Caller holds the shard lock.
+func (r *abuseRegistry) banLocked(e *abuseEntry, now int64) time.Duration {
+	e.offenses++
+	d := r.cooldown(e.offenses)
+	e.bannedUntil = now + int64(d)
+	e.strikes = 0
+	e.windowStart = now
+	r.stats.abuseBans.Add(1)
+	return d
+}
+
+// banned reports whether ip is banned and for how much longer.
+func (r *abuseRegistry) banned(ip netip.Addr, now time.Time) (time.Duration, bool) {
+	if r == nil {
+		return 0, false
+	}
+	k, ok := abuseKey(ip)
+	if !ok {
+		return 0, false
+	}
+	sh := r.shard(k)
+	sh.mu.Lock()
+	var until int64
+	if e := sh.m[k]; e != nil {
+		until = e.bannedUntil
+	}
+	sh.mu.Unlock()
+
+	if left := until - now.UnixNano(); left > 0 {
+		return time.Duration(left), true
+	}
+	return 0, false
+}
+
+// strike adds weight to ip's strikes and reports whether ip is now banned.
+func (r *abuseRegistry) strike(ip netip.Addr, weight int, now time.Time) bool {
+	if r == nil || weight <= 0 {
+		return false
+	}
+	k, ok := r.trackable(ip)
+	if !ok {
+		return false
+	}
+	r.stats.abuseStrikes.Add(1)
+
+	n := now.UnixNano()
+	sh := r.shard(k)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+
+	e := r.entryLocked(sh, k, n)
+	if e == nil {
+		return false
+	}
+	if e.bannedUntil > n {
+		return true
+	}
+	if n-e.windowStart > r.window {
+		e.windowStart = n
+		e.strikes = 0
+	}
+	e.strikes += weight
+	if e.strikes < r.threshold {
+		return false
+	}
+	r.banLocked(e, n)
+	return true
+}
+
+// banNow bans ip immediately, escalating like any other ban. It returns the
+// remaining ban and false when ip is exempt or cannot be tracked.
+func (r *abuseRegistry) banNow(ip netip.Addr, now time.Time) (time.Duration, bool) {
+	if r == nil {
+		return 0, false
+	}
+	k, ok := r.trackable(ip)
+	if !ok {
+		return 0, false
+	}
+
+	n := now.UnixNano()
+	sh := r.shard(k)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+
+	e := r.entryLocked(sh, k, n)
+	if e == nil {
+		return 0, false
+	}
+	if e.bannedUntil > n {
+		return time.Duration(e.bannedUntil - n), true
+	}
+	return r.banLocked(e, n), true
+}
+
+// unban forgets ip entirely, including its offense history.
+func (r *abuseRegistry) unban(ip netip.Addr) bool {
+	if r == nil {
+		return false
+	}
+	k, ok := abuseKey(ip)
+	if !ok {
+		return false
+	}
+	sh := r.shard(k)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	if _, ok := sh.m[k]; !ok {
+		return false
+	}
+	delete(sh.m, k)
+	r.count.Add(-1)
+	return true
+}
+
+// bans lists currently banned clients, longest remaining first.
+func (r *abuseRegistry) bans(now time.Time) []banView {
+	out := []banView{}
+	if r == nil {
+		return out
+	}
+	n := now.UnixNano()
+	for i := range r.shards {
+		sh := &r.shards[i]
+		sh.mu.Lock()
+		for k, e := range sh.m {
+			if e.bannedUntil > n {
+				out = append(out, banView{
+					Client:           displayKey(k),
+					Until:            time.Unix(0, e.bannedUntil).UTC(),
+					RemainingSeconds: int((time.Duration(e.bannedUntil-n) + time.Second - 1) / time.Second),
+					Offenses:         e.offenses,
+				})
+			}
+		}
+		sh.mu.Unlock()
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Until.After(out[j].Until) })
+	return out
+}
+
+func (r *abuseRegistry) tracked() int64 {
+	if r == nil {
+		return 0
+	}
+	return r.count.Load()
+}
+
+// sweep removes entries that are unbanned, outside their strike window, and
+// either never banned or clean for longer than max.
+func (r *abuseRegistry) sweep(now time.Time) int {
+	n := now.UnixNano()
+	maxNS := int64(r.max)
+	evicted := 0
+	for i := range r.shards {
+		sh := &r.shards[i]
+		sh.mu.Lock()
+		for k, e := range sh.m {
+			if e.bannedUntil > n || n-e.windowStart <= r.window {
+				continue
+			}
+			if e.offenses == 0 || n-e.bannedUntil > maxNS {
+				delete(sh.m, k)
+				evicted++
+			}
+		}
+		sh.mu.Unlock()
+	}
+	r.count.Add(int64(-evicted))
+	return evicted
+}
+
+func (r *abuseRegistry) janitor(every time.Duration, stop <-chan struct{}) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case now := <-t.C:
+			r.sweep(now)
+		}
+	}
 }
 
 // ─── room configuration ──────────────────────────────────────────────────────
@@ -624,6 +1209,21 @@ func configureRoom(wr *room.WaitingRoom, cfg config, stats *counters) error {
 
 // ─── ops routes ──────────────────────────────────────────────────────────────
 
+// requireAdmin checks the bearer token. Wrong tokens earn strikes.
+func (a *app) requireAdmin(c *gin.Context) bool {
+	if a.cfg.adminToken == "" {
+		c.AbortWithStatus(http.StatusNotFound)
+		return false
+	}
+	got := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
+	if subtle.ConstantTimeCompare([]byte(got), []byte(a.cfg.adminToken)) != 1 {
+		a.strike(c, strikeAdminAuth)
+		c.AbortWithStatus(http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
+
 func registerOps(r *gin.Engine, a *app) {
 	cfg, wr, stats, assets := a.cfg, a.room, a.stats, a.assets
 
@@ -654,6 +1254,12 @@ func registerOps(r *gin.Engine, a *app) {
 			"asset_denied_total":           stats.assetDenied.Load(),
 			"asset_user_throttled_total":   stats.assetUserThrottled.Load(),
 			"asset_global_throttled_total": stats.assetGlobalThrottled.Load(),
+			"abuse_enabled":                a.abuse != nil,
+			"abuse_tracked":                a.abuse.tracked(),
+			"abuse_strikes_total":          stats.abuseStrikes.Load(),
+			"abuse_bans_total":             stats.abuseBans.Load(),
+			"abuse_rejected_total":         stats.abuseRejected.Load(),
+			"abuse_dropped_total":          stats.abuseDropped.Load(),
 		})
 	})
 
@@ -661,13 +1267,7 @@ func registerOps(r *gin.Engine, a *app) {
 	// SetCap drains every slot when shrinking, which would break in-flight
 	// asset releases.
 	r.POST("/_room/cap", func(c *gin.Context) {
-		if cfg.adminToken == "" {
-			c.Status(http.StatusNotFound)
-			return
-		}
-		got := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
-		if subtle.ConstantTimeCompare([]byte(got), []byte(cfg.adminToken)) != 1 {
-			c.Status(http.StatusUnauthorized)
+		if !a.requireAdmin(c) {
 			return
 		}
 		var body struct {
@@ -683,11 +1283,68 @@ func registerOps(r *gin.Engine, a *app) {
 		}
 		c.JSON(http.StatusOK, gin.H{"cap": wr.Cap(), "occupancy": wr.Len()})
 	})
+
+	r.GET("/_room/abuse", func(c *gin.Context) {
+		if !a.requireAdmin(c) {
+			return
+		}
+		if a.abuse == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "abuse registry disabled"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"tracked": a.abuse.tracked(),
+			"bans":    a.abuse.bans(time.Now()),
+		})
+	})
+
+	// DELETE /_room/abuse?client=203.0.113.9 or ?client=2001:db8::/64
+	r.DELETE("/_room/abuse", func(c *gin.Context) {
+		if !a.requireAdmin(c) {
+			return
+		}
+		if a.abuse == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "abuse registry disabled"})
+			return
+		}
+		ip, err := parseClient(c.Query("client"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "client must be an IP address or IPv6 /64 prefix"})
+			return
+		}
+		key, _ := abuseKey(ip)
+		if !a.abuse.unban(ip) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "client not tracked", "client": displayKey(key)})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"unbanned": displayKey(key)})
+	})
+}
+
+func parseClient(s string) (netip.Addr, error) {
+	if strings.Contains(s, "/") {
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
+			return netip.Addr{}, err
+		}
+		return p.Addr(), nil
+	}
+	return netip.ParseAddr(s)
 }
 
 // ─── admission pass ──────────────────────────────────────────────────────────
 
 type passID [passIDLen]byte
+
+type passStatus int
+
+const (
+	passMissing passStatus = iota // no cookie, or an empty one
+	passValid                     // authentic and unexpired
+	passExpired                   // authentic but past its expiry
+	passStale                     // signed under a different key (restart, rotation)
+	passForged                    // malformed, or bad signature under the current key
+)
 
 func newPassID() (passID, error) {
 	var id passID
@@ -699,44 +1356,59 @@ func newPassID() (passID, error) {
 // is stateless, so any instance sharing CONCERT_ADMIT_SECRET accepts a pass.
 type admitter struct {
 	secret []byte
+	kid    [passKIDLen]byte
 	ttl    time.Duration
 	path   string
 	domain string
 	secure bool
 }
 
+func newAdmitter(secret []byte, ttl time.Duration, path, domain string, secure bool) *admitter {
+	a := &admitter{secret: secret, ttl: ttl, path: path, domain: domain, secure: secure}
+	m := hmac.New(sha256.New, secret)
+	m.Write([]byte("concert/admit/key-id"))
+	copy(a.kid[:], m.Sum(nil))
+	return a
+}
+
 func (a *admitter) mint(id passID, now time.Time) string {
 	var buf [passRawLen]byte
 	copy(buf[:passIDLen], id[:])
-	binary.BigEndian.PutUint64(buf[passIDLen:passBodyLen], uint64(now.Add(a.ttl).Unix()))
+	binary.BigEndian.PutUint64(buf[passExpOff:passKIDOff], uint64(now.Add(a.ttl).Unix()))
+	copy(buf[passKIDOff:passBodyLen], a.kid[:])
 	mac := hmac.New(sha256.New, a.secret)
 	mac.Write(buf[:passBodyLen])
 	copy(buf[passBodyLen:], mac.Sum(nil)[:passMACLen])
 	return base64.RawURLEncoding.EncodeToString(buf[:])
 }
 
-// verify returns the pass ID and expiry when the value is authentic and unexpired.
-func (a *admitter) verify(value string, now time.Time) (passID, time.Time, bool) {
+func (a *admitter) verify(value string, now time.Time) (passID, time.Time, passStatus) {
 	var id passID
+	if value == "" {
+		return id, time.Time{}, passMissing
+	}
 	if base64.RawURLEncoding.DecodedLen(len(value)) != passRawLen {
-		return id, time.Time{}, false
+		return id, time.Time{}, passForged
 	}
 	var buf [passRawLen]byte
 	n, err := base64.RawURLEncoding.Decode(buf[:], []byte(value))
 	if err != nil || n != passRawLen {
-		return id, time.Time{}, false
+		return id, time.Time{}, passForged
+	}
+	if !bytes.Equal(buf[passKIDOff:passBodyLen], a.kid[:]) {
+		return id, time.Time{}, passStale
 	}
 	mac := hmac.New(sha256.New, a.secret)
 	mac.Write(buf[:passBodyLen])
 	if !hmac.Equal(buf[passBodyLen:], mac.Sum(nil)[:passMACLen]) {
-		return id, time.Time{}, false
+		return id, time.Time{}, passForged
 	}
-	exp := time.Unix(int64(binary.BigEndian.Uint64(buf[passIDLen:passBodyLen])), 0)
+	exp := time.Unix(int64(binary.BigEndian.Uint64(buf[passExpOff:passKIDOff])), 0)
 	if !now.Before(exp) {
-		return id, time.Time{}, false
+		return id, time.Time{}, passExpired
 	}
 	copy(id[:], buf[:passIDLen])
-	return id, exp, true
+	return id, exp, passValid
 }
 
 func (a *admitter) set(w http.ResponseWriter, id passID, now time.Time) {
@@ -754,38 +1426,39 @@ func (a *admitter) set(w http.ResponseWriter, id passID, now time.Time) {
 
 // refresh runs on every admitted page request. A valid pass is re-signed only
 // past half its lifetime, so most responses carry no Set-Cookie and stay
-// cacheable. A missing or invalid pass is replaced with a new one.
-func (a *admitter) refresh(w http.ResponseWriter, r *http.Request, now time.Time) {
+// cacheable. Anything else is replaced with a new pass. The incoming status
+// is returned so the caller can strike forgeries.
+func (a *admitter) refresh(w http.ResponseWriter, r *http.Request, now time.Time) passStatus {
+	status := passMissing
 	if ck, err := r.Cookie(admitCookie); err == nil {
-		if id, exp, ok := a.verify(ck.Value, now); ok {
+		var id passID
+		var exp time.Time
+		id, exp, status = a.verify(ck.Value, now)
+		if status == passValid {
 			if exp.Sub(now) <= a.ttl/2 {
 				a.set(w, id, now)
 			}
-			return
+			return status
 		}
 	}
-	id, err := newPassID()
-	if err != nil {
-		return // no entropy: serve the page without a pass
+	if id, err := newPassID(); err == nil {
+		a.set(w, id, now)
 	}
-	a.set(w, id, now)
+	return status
 }
 
 // check runs on every private asset request. It also slides the pass past
 // half-life, so pages that lazy-load assets without navigating stay admitted.
-func (a *admitter) check(w http.ResponseWriter, r *http.Request, now time.Time) (passID, bool) {
+func (a *admitter) check(w http.ResponseWriter, r *http.Request, now time.Time) (passID, passStatus) {
 	ck, err := r.Cookie(admitCookie)
 	if err != nil {
-		return passID{}, false
+		return passID{}, passMissing
 	}
-	id, exp, ok := a.verify(ck.Value, now)
-	if !ok {
-		return passID{}, false
-	}
-	if exp.Sub(now) <= a.ttl/2 {
+	id, exp, status := a.verify(ck.Value, now)
+	if status == passValid && exp.Sub(now) <= a.ttl/2 {
 		a.set(w, id, now)
 	}
-	return id, true
+	return id, status
 }
 
 // ─── asset tier ──────────────────────────────────────────────────────────────
@@ -898,13 +1571,17 @@ type assetGuard struct {
 	globalWait  time.Duration
 	protoHeader string
 	stats       *counters
+	strike      func(*gin.Context, int)
 }
 
 // private requires a valid admission pass.
 func (g *assetGuard) private(c *gin.Context) {
 	now := time.Now()
-	id, ok := g.admit.check(c.Writer, c.Request, now)
-	if !ok {
+	id, status := g.admit.check(c.Writer, c.Request, now)
+	if status != passValid {
+		if status == passForged {
+			g.strike(c, strikeForgedPass)
+		}
 		g.stats.assetDenied.Add(1)
 		c.AbortWithStatus(http.StatusForbidden)
 		return
@@ -913,6 +1590,7 @@ func (g *assetGuard) private(c *gin.Context) {
 	userSem := g.users.slot(id, isMultiplexed(c.Request, g.protoHeader), now.UnixNano())
 	if !acquire(c.Request.Context(), userSem, g.userWait) {
 		g.stats.assetUserThrottled.Add(1)
+		g.strike(c, strikeUserThrottle)
 		c.Header("Retry-After", "1")
 		c.AbortWithStatus(http.StatusTooManyRequests)
 		return
@@ -1108,7 +1786,7 @@ func mustJSON(v any) []byte {
 
 // ─── reverse proxy ───────────────────────────────────────────────────────────
 
-func newProxy(target *url.URL, preserveHost bool, headerTimeout time.Duration) *httputil.ReverseProxy {
+func newProxy(target *url.URL, preserveHost bool, headerTimeout time.Duration, trusted []netip.Prefix) *httputil.ReverseProxy {
 	transport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
@@ -1130,7 +1808,24 @@ func newProxy(target *url.URL, preserveHost bool, headerTimeout time.Duration) *
 		FlushInterval: -1,
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(target)
+
+			// Rewrite strips inbound X-Forwarded-* before this runs. Restore
+			// the chain from trusted proxies so SetXForwarded appends to it;
+			// from anyone else it is client-controlled and discarded.
+			ra, ok := remoteAddr(pr.In)
+			fromTrusted := ok && containsAddr(trusted, ra)
+			if fromTrusted {
+				if v := pr.In.Header.Values("X-Forwarded-For"); len(v) > 0 {
+					pr.Out.Header["X-Forwarded-For"] = append([]string(nil), v...)
+				}
+			}
 			pr.SetXForwarded()
+			if fromTrusted {
+				if p := pr.In.Header.Get("X-Forwarded-Proto"); p != "" {
+					pr.Out.Header.Set("X-Forwarded-Proto", p)
+				}
+			}
+
 			if preserveHost {
 				pr.Out.Host = pr.In.Host
 				pr.Out.Header.Set("X-Forwarded-Host", pr.In.Host)

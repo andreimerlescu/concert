@@ -9,7 +9,7 @@
 
 ![Concert — FIFO Waiting Room Reverse Proxy](/concert.jpg)
 
-A FIFO waiting room reverse proxy. Put Concert in front of any HTTP origin, such as a PHP site, a WordPress install, or a legacy app that falls over under load. When traffic exceeds what the origin can handle, visitors wait in an orderly queue with a live position instead of getting 502s and timeouts. Admitted visitors load their page's assets through a separate tier that queued and denied visitors can't reach.
+A FIFO waiting room reverse proxy. Put Concert in front of any HTTP origin, such as a PHP site, a WordPress install, or a legacy app that falls over under load. When traffic exceeds what the origin can handle, visitors wait in an orderly queue with a live position instead of getting 502s and timeouts. Admitted visitors load their page's assets through a separate tier that queued and denied visitors can't reach, and clients that misbehave are blocked for an escalating cooldown.
 
 Concert is a single Go binary built on [room](https://github.com/andreimerlescu/room), a FIFO waiting room middleware for Gin, and [sema](https://github.com/andreimerlescu/sema), a resizable semaphore.
 
@@ -23,6 +23,9 @@ Concert caps the number of concurrent page requests that reach your origin. Ever
 
     browser ──▶ TLS terminator ──▶ concert :8080 ──▶ origin :3000
                                       │
+              every request ──────────┼─▶ client banned? ──▶ 429 until the cooldown ends
+                                      │   ban path? ──────▶ ban now, 429
+                                      │
               page requests ──────────┼─▶ room: slot free?
                                       │     yes ──▶ proxied, concert_admit pass issued
                                       │     no  ──▶ waiting room page, polls /queue/status
@@ -33,6 +36,8 @@ Concert caps the number of concurrent page requests that reach your origin. Ever
                                       │               ──▶ global asset semaphore ──▶ proxied
                                       │
               bypass paths ───────────┴─▶ proxied, no guard
+
+**Every request** is first matched to a client address. Banned clients are rejected before anything else runs.
 
 **Pages** go through room. A request whose ticket falls inside the serving window takes a slot, is proxied, and releases the slot when its response has been fully delivered. Other requests get a `room_ticket` cookie and the waiting room page, which polls `/queue/status` and reloads when the visitor's turn arrives. `-cap` is the maximum number of page requests in flight to your origin.
 
@@ -84,6 +89,7 @@ Every option can be set with a flag or an environment variable. A flag overrides
 | `-cookie-path` | `CONCERT_COOKIE_PATH` | `/` | Path attribute of cookies |
 | `-cookie-domain` | `CONCERT_COOKIE_DOMAIN` | *(empty)* | Domain attribute of cookies |
 | `-preserve-host` | `CONCERT_PRESERVE_HOST` | `true` | Forward the client's `Host` header to the origin |
+| `-trusted-proxies` | `CONCERT_TRUSTED_PROXIES` | `127.0.0.1/32,::1/128` | CIDRs whose `X-Forwarded-For` and `X-Forwarded-Proto` are trusted |
 | `-bypass` | `CONCERT_BYPASS` | `/favicon.ico` | Paths that skip every guard; suffix `/*` for a prefix |
 | `-assets` | `CONCERT_ASSETS` | *(empty)* | Asset paths that require an admission pass; suffix `/*` for a prefix |
 | `-asset-public` | `CONCERT_ASSET_PUBLIC` | *(empty)* | Asset paths served without a pass, still under the global asset cap |
@@ -94,6 +100,14 @@ Every option can be set with a flag or an environment variable. A flag overrides
 | `-asset-user-wait` | `CONCERT_ASSET_USER_WAIT` | `2s` | Max wait for a per-pass asset slot before 429 |
 | `-admit-ttl` | `CONCERT_ADMIT_TTL` | `10m` | Sliding lifetime of the admission pass (minimum 30s) |
 | `-client-proto-header` | `CONCERT_CLIENT_PROTO_HEADER` | *(empty)* | Header from a trusted TLS terminator carrying the client's HTTP protocol |
+| `-abuse` | `CONCERT_ABUSE` | `true` | Enable the abuse registry |
+| `-abuse-strikes` | `CONCERT_ABUSE_STRIKES` | `20` | Strike total within the window that triggers a ban |
+| `-abuse-window` | `CONCERT_ABUSE_WINDOW` | `1m` | Window over which strikes accumulate |
+| `-abuse-cooldown` | `CONCERT_ABUSE_COOLDOWN` | `5m` | First ban length; doubles with each repeat ban |
+| `-abuse-max-cooldown` | `CONCERT_ABUSE_MAX_COOLDOWN` | `24h` | Longest ban; also how long ban history is remembered |
+| `-abuse-max-entries` | `CONCERT_ABUSE_MAX_ENTRIES` | `100000` | Max clients tracked at once |
+| `-abuse-allow` | `CONCERT_ABUSE_ALLOW` | *(empty)* | CIDRs that are never struck or banned |
+| `-ban-paths` | `CONCERT_BAN_PATHS` | *(empty)* | Paths that ban the client on first hit; suffix `/*` for a prefix |
 | `-access-log` | `CONCERT_ACCESS_LOG` | `true` | Write an access log line per non-asset request |
 | `-html` | `CONCERT_HTML_FILE` | *(empty)* | Custom waiting room HTML file |
 | `-skip-url` | `CONCERT_SKIP_URL` | *(empty)* | Payment page URL for the skip-the-line card (see limitations) |
@@ -104,7 +118,7 @@ Every option can be set with a flag or an environment variable. A flag overrides
 | `-api-json` | `CONCERT_API_JSON` | `true` | Answer queued non-browser clients with JSON 429 instead of HTML |
 | `-retry-after` | `CONCERT_RETRY_AFTER` | `5` | `Retry-After` seconds sent to queued API clients |
 | `-version` | | | Print the version and exit |
-| | `CONCERT_ADMIN_TOKEN` | *(empty)* | Bearer token for `POST /_room/cap`; the endpoint is disabled when unset |
+| | `CONCERT_ADMIN_TOKEN` | *(empty)* | Bearer token for the admin endpoints; they are disabled when unset |
 | | `CONCERT_ADMIT_SECRET` | *(random)* | Key that signs admission passes; at least 32 bytes |
 
 Both secrets are environment-only on purpose: command-line arguments are visible in `ps` output and shell history.
@@ -123,6 +137,18 @@ Throughput follows from Little's law: requests admitted per second ≈ `cap` ÷ 
 
 Page capacity can be changed at runtime without a restart; see `POST /_room/cap` below.
 
+## Client addresses and trusted proxies
+
+Behind nginx or a load balancer, every connection to Concert comes from the proxy. `-trusted-proxies` lists the addresses Concert should look past.
+
+When a connection comes from a trusted proxy, Concert reads `X-Forwarded-For` from right to left and takes the first address that isn't itself a trusted proxy. Addresses further left were written by the client and are ignored. When a connection comes from anywhere else, its own address is the client, and any forwarded headers it sent are discarded.
+
+The same rule decides what the origin sees. For trusted hops, Concert appends to the incoming `X-Forwarded-For` chain and keeps `X-Forwarded-Proto`, so your application gets real client IPs and knows the visitor used HTTPS. From untrusted peers, both are replaced.
+
+The default trusts loopback only. That is safe even when Concert faces the internet directly, because internet connections never arrive from loopback. Add your load balancer's range if it runs on another host:
+
+    -trusted-proxies "127.0.0.1/32,::1/128,10.0.0.0/8"
+
 ## Assets
 
 List the paths that hold your stylesheets, scripts, fonts and images in `-assets`:
@@ -133,11 +159,13 @@ List the paths that hold your stylesheets, scripts, fonts and images in `-assets
 
 ### The admission pass
 
-Every page response that room admits carries `concert_admit`: an HttpOnly cookie holding a random ID, an expiry, and an HMAC signature. Checking it costs one HMAC and no lookup, so any instance sharing `CONCERT_ADMIT_SECRET` accepts it.
+Every page response that room admits carries `concert_admit`: an HttpOnly cookie holding a random ID, an expiry, a key identifier and an HMAC signature. Checking it costs one HMAC and no lookup, so any instance sharing `CONCERT_ADMIT_SECRET` accepts it.
 
 The pass slides. It is re-signed once it is past half of `-admit-ttl`, on either a page load or an asset request. Visitors who keep browsing stay admitted, while most responses carry no `Set-Cookie` header and stay cacheable.
 
 An asset request without a valid pass gets `403 Forbidden` immediately. It never waits and never reaches your origin.
+
+A pass signed with a different key is treated as stale, not forged. After a restart or a secret rotation, returning visitors get 403 on assets until their next page load issues a fresh pass, but they never earn abuse strikes for it.
 
 ### Per-user concurrency: HTTP/1.1 and HTTP/2
 
@@ -180,15 +208,65 @@ List those paths in `-asset-public`. They skip the pass check but still count ag
 
 The asset path writes no log lines; activity is counted in `/_room/stats`. Asset paths, `/queue/status` and `/_room/healthz` are also left out of the access log, and `-access-log=false` turns the access log off entirely.
 
+## Abuse registry
+
+Concert keeps a registry of clients that misbehave. Each abusive act adds weighted strikes to the client's address. When a client's strikes within `-abuse-window` reach `-abuse-strikes`, it is banned for a cooldown. While banned, every request from it gets:
+
+    HTTP/1.1 429 Too Many Requests
+    Retry-After: 300
+    Content-Type: application/json; charset=utf-8
+    Cache-Control: no-store
+
+    {"error":"temporarily blocked","retry_after_seconds":300}
+
+Enforcement happens before anything else: before the queue, the asset tier, the operations endpoints and the access log. It is a single map lookup, and banned requests are not logged.
+
+### What earns strikes
+
+| Behaviour | Strikes | Why it signals abuse |
+|---|---|---|
+| Admission pass with a bad signature | 5 | Browsers never alter the pass; someone is tampering with it |
+| Wrong admin token | 5 | Someone is guessing `CONCERT_ADMIN_TOKEN` |
+| Per-user asset pool exhausted | 1 | One pass is sending far more concurrent requests than a browser would |
+| Queued without a `room_ticket` cookie | 1 | A script is discarding cookies to take fresh places in line |
+
+With the defaults, 20 strikes within one minute trigger a ban. That is four forged passes, four wrong admin tokens, or twenty cookie-less queue arrivals.
+
+These never earn strikes: missing passes (link-preview crawlers), expired or stale passes (idle visitors, restarts), and the global asset limit (not any one client's fault). Queued visitors who keep their `room_ticket` cookie never earn churn strikes, however long they wait.
+
+### Ban paths
+
+`-ban-paths` lists paths no legitimate visitor to your site ever requests. A client that requests one is banned immediately, without accumulating strikes. On a PHP site these are typically vulnerability scanners probing for secrets and admin tools:
+
+    -ban-paths "/.env,/.git/*,/.aws/*,/.DS_Store,/phpmyadmin/*,/pma/*,/wp-config.php.bak,/server-status"
+
+Only list paths your site genuinely never serves. Don't list `/wp-login.php` or `/xmlrpc.php` on WordPress: real users and plugins such as Jetpack use them. A path may not appear in both `-ban-paths` and any other path flag.
+
+### Escalating cooldowns
+
+The first ban lasts `-abuse-cooldown`. Each later ban of the same client doubles it, up to `-abuse-max-cooldown`: with the defaults, 5 minutes, then 10, 20, 40, and so on to 24 hours. A client whose last ban ended more than `-abuse-max-cooldown` ago, with no strikes since, is forgotten and starts from the beginning.
+
+### Who is never banned
+
+Addresses in `-abuse-allow` and in `-trusted-proxies` are never struck or banned. List your monitoring systems, your office, and your own address there, so an operator mistake can't lock you out of the admin endpoints. Trusted proxies are exempt because they only appear as the client when a request carries no forwarding headers, such as nginx's own health checks.
+
+Think carefully about shared addresses. Behind carrier-grade NAT or a large office network, thousands of real people can share one IPv4 address, and their strikes add up together. If you expect heavy traffic from such networks, add their ranges to `-abuse-allow` or raise `-abuse-strikes`.
+
+IPv6 clients are tracked by their `/64` prefix, because a single IPv6 host can rotate through billions of addresses in its own `/64`.
+
+### Memory
+
+At most `-abuse-max-entries` clients are tracked. When the table is full, a new client replaces an unbanned entry if one is available; otherwise its strikes are dropped and counted in `abuse_dropped_total`. Existing bans are never evicted to make room.
+
 ## Bypass paths
 
-`-bypass` sends matching paths straight to the origin with no pass, no queue and no semaphore. Use it only for traffic that has no admitted visitor behind it and can't tolerate a queue:
+`-bypass` sends matching paths straight to the origin with no pass, no queue and no semaphore. Banned clients are still rejected. Use it only for traffic that has no admitted visitor behind it and can't tolerate a queue:
 
     -bypass "/favicon.ico,/robots.txt,/.well-known/acme-challenge/*,/webhooks/*"
 
-That covers payment-provider webhooks, certificate renewal challenges and uptime checks. Bypassed paths are completely unprotected, so never bypass anything that runs expensive application code.
+That covers payment-provider webhooks, certificate renewal challenges and uptime checks. Bypassed paths are otherwise unprotected, so never bypass anything that runs expensive application code.
 
-A path may appear in only one of `-bypass`, `-assets` and `-asset-public`. Overlapping or conflicting entries are rejected at startup.
+A path may appear in only one of `-bypass`, `-assets`, `-asset-public` and `-ban-paths`. Overlapping or conflicting entries are rejected at startup.
 
 ## API and non-browser clients
 
@@ -207,23 +285,35 @@ A client that keeps cookies holds its place in line across retries:
     curl -c jar -b jar https://example.com/queue/status    # {"ready":false,"position":12,...}
     curl -c jar -b jar https://example.com/api/orders      # 200 once ready
 
+A client that discards cookies takes a new ticket on every retry and earns a churn strike each time. With the defaults, twenty retries within a minute ban it.
+
 When `-max-queue` is reached, new arrivals receive `503 Service Unavailable` with a JSON body and a `Retry-After` header.
 
 Set `-api-json=false` to serve the HTML page to every client regardless of `Accept`.
 
 ## Operations endpoints
 
-These are never queued, so they keep answering even when the room is full.
+These are never queued, so they keep answering even when the room is full. Banned clients are rejected here too.
 
 | Endpoint | Purpose |
 |---|---|
 | `GET /_room/healthz` | Liveness check; returns `ok` |
-| `GET /_room/stats` | Page and asset capacity, occupancy, queue depth, and counters |
-| `POST /_room/cap` | Change page capacity at runtime (requires `CONCERT_ADMIN_TOKEN`) |
+| `GET /_room/stats` | Page, asset and abuse counters |
+| `POST /_room/cap` | Change page capacity at runtime (admin) |
+| `GET /_room/abuse` | List banned clients (admin) |
+| `DELETE /_room/abuse?client=…` | Unban a client and forget its history (admin) |
+
+Admin endpoints require `Authorization: Bearer $CONCERT_ADMIN_TOKEN` and return 404 when the token is unset. Wrong tokens earn strikes.
 
 Example stats output:
 
     {
+      "abuse_bans_total": 7,
+      "abuse_dropped_total": 0,
+      "abuse_enabled": true,
+      "abuse_rejected_total": 1893,
+      "abuse_strikes_total": 164,
+      "abuse_tracked": 41,
       "asset_cap": 64000,
       "asset_denied_total": 312,
       "asset_global_throttled_total": 0,
@@ -247,7 +337,19 @@ Example stats output:
       "utilization": 0.98
     }
 
-`live_queue_depth` counts only clients still holding a ticket, so it is the better number for dashboards than `queue_depth`, which briefly includes abandoned tickets. `asset_users` is the number of passes with an active per-user pool. Idle pools are removed after `-admit-ttl`.
+`live_queue_depth` counts only clients still holding a ticket, so it is the better number for dashboards than `queue_depth`, which briefly includes abandoned tickets. `asset_users` is the number of passes with an active per-user pool.
+
+Listing and lifting bans:
+
+    curl https://example.com/_room/abuse \
+         -H "Authorization: Bearer $CONCERT_ADMIN_TOKEN"
+
+    {"bans":[{"client":"203.0.113.9","until":"2026-09-21T18:04:11Z","remaining_seconds":243,"offenses":1}],"tracked":41}
+
+    curl -X DELETE "https://example.com/_room/abuse?client=203.0.113.9" \
+         -H "Authorization: Bearer $CONCERT_ADMIN_TOKEN"
+
+IPv6 clients appear and are unbanned as their `/64`, for example `client=2001:db8:1:2::/64`.
 
 Raising page capacity during an event:
 
@@ -266,6 +368,7 @@ Concert answers these paths itself, and they never reach your origin:
     /_room/healthz
     /_room/stats
     /_room/cap
+    /_room/abuse
 
 ## Cookies
 
@@ -325,6 +428,8 @@ nginx:
             proxy_pass         http://127.0.0.1:8080;
             proxy_http_version 1.1;
             proxy_set_header   Host $host;
+            proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
             proxy_set_header   X-Client-Proto $server_protocol;
             proxy_set_header   Upgrade $http_upgrade;
             proxy_set_header   Connection $connection_upgrade;
@@ -333,7 +438,7 @@ nginx:
         }
     }
 
-Put the `map` block in the `http` section. Turning `proxy_buffering` off lets streamed responses reach clients immediately.
+Put the `map` block in the `http` section. `X-Forwarded-For` is what lets Concert identify and ban individual clients; without it every request appears to come from nginx, which is exempt. Turning `proxy_buffering` off lets streamed responses reach clients immediately.
 
 systemd unit (`/etc/systemd/system/concert.service`):
 
@@ -352,6 +457,8 @@ systemd unit (`/etc/systemd/system/concert.service`):
     Environment=CONCERT_ASSETS=/wp-content/themes/*,/wp-content/plugins/*,/wp-includes/*
     Environment=CONCERT_ASSET_PUBLIC=/wp-content/uploads/*
     Environment=CONCERT_BYPASS=/favicon.ico,/robots.txt,/.well-known/acme-challenge/*
+    Environment=CONCERT_BAN_PATHS=/.env,/.git/*,/.aws/*,/phpmyadmin/*,/wp-config.php.bak
+    Environment=CONCERT_ABUSE_ALLOW=198.51.100.10
     Environment=CONCERT_ACCESS_LOG=false
     EnvironmentFile=/etc/concert/secrets.env
     Restart=on-failure
@@ -370,13 +477,11 @@ On `SIGTERM` Concert stops accepting new connections and gives in-flight request
 
 ## Limitations
 
-**One instance, one queue.** Queue state lives in the process's memory. Two Concert instances are two independent waiting rooms: the origin sees up to twice `-cap`, and a visitor's place in line exists only on the instance that issued their ticket. If you must run more than one, divide `-cap` by the number of instances and enable sticky sessions at the load balancer. Use a cookie the load balancer inserts itself, because `room_ticket` is only issued once a visitor is queued. Admission passes work across instances as long as they share `CONCERT_ADMIT_SECRET`. Per-user and global asset semaphores are per instance.
+**One instance, one queue, one registry.** Queue state, asset semaphores and the abuse registry live in the process's memory. Two Concert instances are two independent waiting rooms: the origin sees up to twice `-cap`, a visitor's place in line exists only on the instance that issued their ticket, and a client banned on one instance is not banned on the other. If you must run more than one, divide `-cap` by the number of instances and enable sticky sessions at the load balancer. Use a cookie the load balancer inserts itself, because `room_ticket` is only issued once a visitor is queued. Admission passes work across instances as long as they share `CONCERT_ADMIT_SECRET`.
 
-**A pass limits concurrency, not request rate.** A pass holder can have at most its per-user cap of asset requests in flight, but fast assets finish quickly, so a single pass can still generate many requests per second. The global semaphore bounds the total load on the host regardless. A visitor who discards cookies and keeps reloading gets a new pass on each admitted page load, which is bounded by page admissions. Volumetric attacks belong at a CDN or WAF in front of Concert.
+**A pass limits concurrency, not request rate.** A pass holder can have at most its per-user cap of asset requests in flight, but fast assets finish quickly, so a single pass can still generate many requests per second. The global semaphore bounds the total load on the host regardless. Volumetric attacks from many addresses belong at a CDN or WAF in front of Concert; the abuse registry handles individual misbehaving clients.
 
 **Long-lived connections hold slots.** WebSockets and server-sent event streams keep their page slot until they close. With `-cap 50` and 50 open sockets, nobody else gets in. Run a separate Concert instance for long-lived paths.
-
-**Client address headers.** Concert sets `X-Forwarded-For` to the address its own connection came from, and `X-Forwarded-Proto` to the scheme Concert itself received. Behind a TLS terminator, the origin therefore sees the terminator's address as the client and `http` as the scheme. Applications that log client IPs, rate-limit by IP, or build absolute URLs from the forwarded scheme (WordPress's HTTPS detection, for example) need to account for this.
 
 **Skip the line is not wired end to end.** `-rate`, `-surge`, `-skip-url`, and `-pass` enable the pricing card on the waiting room page. But promoting a paid visitor requires calling room's in-process API after payment, and Concert does not yet expose an endpoint your payment flow can call. Leave `-rate` at `0` in production for now.
 
@@ -386,15 +491,16 @@ On `SIGTERM` Concert stops accepting new connections and gives in-flight request
     make build                  # binaries for linux, darwin, windows × amd64, arm64 in bin/
     go test -race -count=1 ./...
 
-The test suite runs the real waiting room and asset tier against a fake origin. It covers:
+The test suite runs the real waiting room, asset tier and abuse registry against a fake origin. It covers:
 
 - configuration precedence and validation
-- admission pass signing, tampering, expiry and refresh
+- client address resolution through trusted and untrusted proxies
+- admission pass signing, tampering, staleness, expiry and refresh
 - per-user HTTP/1.1 and HTTP/2 limits, and the global asset limit
-- public assets
+- every strike source, ban paths, escalating cooldowns, allowlists, IPv6 /64 grouping, and the admin ban endpoints
 - queueing for browsers and API clients, the queue-depth breaker, and cookie-jar resume
-- bypass routing, streaming, and proxy header handling
-- the operations endpoints and graceful shutdown
+- bypass routing, streaming, and forwarded-header handling
+- graceful shutdown
 
 ## License
 

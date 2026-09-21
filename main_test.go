@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
@@ -43,6 +44,7 @@ type fakeUpstream struct {
 	lastPath   string
 	lastCookie string
 	lastXFF    string
+	lastProto  string
 	total      atomic.Int64
 }
 
@@ -70,7 +72,8 @@ func (u *fakeUpstream) handle(w http.ResponseWriter, r *http.Request) {
 	u.lastHost = r.Host
 	u.lastPath = r.URL.Path
 	u.lastCookie = r.Header.Get("Cookie")
-	u.lastXFF = r.Header.Get("X-Forwarded-For")
+	u.lastXFF = strings.Join(r.Header.Values("X-Forwarded-For"), ", ")
+	u.lastProto = r.Header.Get("X-Forwarded-Proto")
 	u.mu.Unlock()
 
 	switch r.URL.Path {
@@ -106,6 +109,12 @@ func (u *fakeUpstream) seen() (host, path, cookie, xff string) {
 	return u.lastHost, u.lastPath, u.lastCookie, u.lastXFF
 }
 
+func (u *fakeUpstream) seenProto() string {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.lastProto
+}
+
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 var testClient = &http.Client{
@@ -135,6 +144,13 @@ func testConfig(upstream string) config {
 		admitSecret:      []byte("concert-test-secret-0123456789abcdef"),
 		accessLogEnabled: false,
 		accessLog:        io.Discard,
+		trustedProxies:   "", // test clients are the real clients
+		abuseEnabled:     true,
+		abuseStrikes:     20,
+		abuseWindow:      time.Minute,
+		abuseCooldown:    5 * time.Minute,
+		abuseMaxCooldown: 24 * time.Hour,
+		abuseMaxEntries:  1000,
 	}
 }
 
@@ -258,6 +274,25 @@ func withPass(pass string, extra map[string]string) map[string]string {
 	return hdr
 }
 
+func withXFF(ip string) map[string]string {
+	return map[string]string{"X-Forwarded-For": ip}
+}
+
+// tamper flips one character inside the pass ID, keeping the key id intact.
+func tamper(pass string) string {
+	b := []byte(pass)
+	if b[5] == 'A' {
+		b[5] = 'B'
+	} else {
+		b[5] = 'A'
+	}
+	return string(b)
+}
+
+func isBlocked(resp *http.Response, body []byte) bool {
+	return resp.StatusCode == http.StatusTooManyRequests && strings.Contains(string(body), "temporarily blocked")
+}
+
 func getStats(t *testing.T, front *httptest.Server) map[string]any {
 	t.Helper()
 	_, body := get(t, front.URL+"/_room/stats", nil)
@@ -285,6 +320,19 @@ func newFlagSet() *flag.FlagSet {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	return fs
+}
+
+func testRegistry(t *testing.T, mutate func(*config)) (*abuseRegistry, *counters) {
+	t.Helper()
+	cfg := testConfig("http://127.0.0.1:1")
+	if mutate != nil {
+		mutate(&cfg)
+	}
+	if err := cfg.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	stats := &counters{}
+	return newAbuseRegistry(cfg, stats), stats
 }
 
 // ─── parseConfig / normalize ─────────────────────────────────────────────────
@@ -330,6 +378,16 @@ func TestParseConfig_Defaults(t *testing.T) {
 		{"accessLogEnabled", cfg.accessLogEnabled, true},
 		{"admitSecretGenerated", cfg.admitSecretGenerated, true},
 		{"effectiveAssetCap", cfg.effectiveAssetCap(), 500 * 128},
+		{"trustedProxies", cfg.trustedProxies, "127.0.0.1/32,::1/128"},
+		{"trusted count", len(cfg.trusted), 2},
+		{"abuseEnabled", cfg.abuseEnabled, true},
+		{"abuseStrikes", cfg.abuseStrikes, 20},
+		{"abuseWindow", cfg.abuseWindow, time.Minute},
+		{"abuseCooldown", cfg.abuseCooldown, 5 * time.Minute},
+		{"abuseMaxCooldown", cfg.abuseMaxCooldown, 24 * time.Hour},
+		{"abuseMaxEntries", cfg.abuseMaxEntries, 100000},
+		{"abuseAllow", cfg.abuseAllow, ""},
+		{"banPaths", cfg.banPaths, ""},
 	}
 	for _, c := range checks {
 		if c.got != c.want {
@@ -353,6 +411,8 @@ func TestParseConfig_EnvOverridesDefaults(t *testing.T) {
 	t.Setenv("CONCERT_ADMIN_TOKEN", "s3cret")
 	t.Setenv("CONCERT_ASSET_USER_CAP_H2", "64")
 	t.Setenv("CONCERT_ADMIT_SECRET", strings.Repeat("k", 40))
+	t.Setenv("CONCERT_BAN_PATHS", "/.env,/.git/*")
+	t.Setenv("CONCERT_ABUSE_ALLOW", "198.51.100.0/24")
 
 	cfg, _, err := parseConfig(newFlagSet(), nil)
 	if err != nil {
@@ -378,6 +438,12 @@ func TestParseConfig_EnvOverridesDefaults(t *testing.T) {
 	}
 	if cfg.admitSecretGenerated || string(cfg.admitSecret) != strings.Repeat("k", 40) {
 		t.Error("CONCERT_ADMIT_SECRET was not used")
+	}
+	if len(parsePaths(cfg.banPaths)) != 2 {
+		t.Errorf("banPaths: got %q", cfg.banPaths)
+	}
+	if len(cfg.allow) != 1 {
+		t.Errorf("allow: got %v", cfg.allow)
 	}
 }
 
@@ -430,7 +496,18 @@ func TestParseConfig_Invalid(t *testing.T) {
 		"catch-all bypass":    {"-bypass", "/*"},
 		"reserved asset":      {"-assets", "/_room/*"},
 		"reserved status":     {"-asset-public", "/queue/status"},
+		"reserved ban path":   {"-ban-paths", "/_room/stats"},
+		"catch-all ban path":  {"-ban-paths", "/*"},
 		"duplicate path":      {"-bypass", "/x", "-assets", "/x"},
+		"ban overlaps asset":  {"-assets", "/x", "-ban-paths", "/x"},
+		"bad trusted proxy":   {"-trusted-proxies", "nope"},
+		"bad allow cidr":      {"-abuse-allow", "10.0.0.0/99"},
+		"zero strikes":        {"-abuse-strikes", "0"},
+		"zero window":         {"-abuse-window", "0s"},
+		"zero cooldown":       {"-abuse-cooldown", "0s"},
+		"max below cooldown":  {"-abuse-cooldown", "10m", "-abuse-max-cooldown", "5m"},
+		"zero max entries":    {"-abuse-max-entries", "0"},
+		"ban paths w/o abuse": {"-abuse=false", "-ban-paths", "/.env"},
 	}
 	for name, args := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -584,45 +661,271 @@ func TestIsMultiplexed(t *testing.T) {
 	}
 }
 
+func TestParsePrefixes(t *testing.T) {
+	got, err := parsePrefixes(" 10.0.0.0/8, 192.0.2.1 , ::1, 2001:db8::/32 ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 4 {
+		t.Fatalf("got %d prefixes, want 4", len(got))
+	}
+	if got[1].Bits() != 32 || got[2].Bits() != 128 {
+		t.Errorf("bare addresses should be single-address prefixes: %v", got)
+	}
+	for _, bad := range []string{"nope", "10.0.0.0/33", "1.2.3"} {
+		if _, err := parsePrefixes(bad); err == nil {
+			t.Errorf("%q: expected error", bad)
+		}
+	}
+}
+
+func TestClientIP(t *testing.T) {
+	cases := []struct {
+		name    string
+		remote  string
+		trusted string
+		xff     []string
+		want    string
+	}{
+		{"untrusted remote ignores xff", "203.0.113.7:1234", "", []string{"198.51.100.1"}, "203.0.113.7"},
+		{"trusted hop uses xff", "127.0.0.1:1", "127.0.0.1/32", []string{"198.51.100.1"}, "198.51.100.1"},
+		{"right-most untrusted wins", "127.0.0.1:1", "127.0.0.1/32", []string{"192.0.2.66, 198.51.100.1"}, "198.51.100.1"},
+		{"skips trusted hops", "127.0.0.1:1", "127.0.0.1/32,10.0.0.0/8", []string{"198.51.100.1, 10.1.2.3"}, "198.51.100.1"},
+		{"multiple header lines", "127.0.0.1:1", "127.0.0.1/32,10.0.0.0/8", []string{"198.51.100.1", "10.1.2.3"}, "198.51.100.1"},
+		{"malformed falls back", "127.0.0.1:1", "127.0.0.1/32", []string{"not-an-ip"}, "127.0.0.1"},
+		{"no xff uses remote", "127.0.0.1:1", "127.0.0.1/32", nil, "127.0.0.1"},
+		{"all trusted returns left-most", "127.0.0.1:1", "127.0.0.1/32,10.0.0.0/8", []string{"10.0.0.5, 10.0.0.6"}, "10.0.0.5"},
+		{"ipv6 remote", "[2001:db8::1]:443", "", nil, "2001:db8::1"},
+		{"mapped v4 is unmapped", "[::ffff:203.0.113.7]:1", "", nil, "203.0.113.7"},
+	}
+	for _, c := range cases {
+		trusted, err := parsePrefixes(c.trusted)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = c.remote
+		for _, v := range c.xff {
+			req.Header.Add("X-Forwarded-For", v)
+		}
+		if got := clientIP(req, trusted); got.String() != c.want {
+			t.Errorf("%s: got %s, want %s", c.name, got, c.want)
+		}
+	}
+}
+
+func TestAbuseKey(t *testing.T) {
+	a, _ := abuseKey(netip.MustParseAddr("2001:db8:1:2:aaaa::1"))
+	b, _ := abuseKey(netip.MustParseAddr("2001:db8:1:2:ffff::9"))
+	c, _ := abuseKey(netip.MustParseAddr("2001:db8:1:3::1"))
+	if a != b {
+		t.Error("addresses in the same /64 must share a key")
+	}
+	if a == c {
+		t.Error("addresses in different /64s must not share a key")
+	}
+	if displayKey(a) != "2001:db8:1:2::/64" {
+		t.Errorf("display: got %s", displayKey(a))
+	}
+	v4, _ := abuseKey(netip.MustParseAddr("::ffff:203.0.113.7"))
+	if v4.String() != "203.0.113.7" {
+		t.Errorf("mapped v4 key: got %s", v4)
+	}
+	if _, ok := abuseKey(netip.Addr{}); ok {
+		t.Error("invalid address must not be tracked")
+	}
+}
+
+// ─── abuse registry ──────────────────────────────────────────────────────────
+
+func TestAbuse_StrikesBanAtThreshold(t *testing.T) {
+	r, stats := testRegistry(t, func(c *config) { c.abuseStrikes = 3 })
+	ip := netip.MustParseAddr("203.0.113.9")
+	now := time.Now()
+
+	if r.strike(ip, 1, now) || r.strike(ip, 1, now) {
+		t.Fatal("banned before threshold")
+	}
+	if _, banned := r.banned(ip, now); banned {
+		t.Fatal("banned before threshold")
+	}
+	if !r.strike(ip, 1, now) {
+		t.Fatal("not banned at threshold")
+	}
+	left, banned := r.banned(ip, now)
+	if !banned || left != 5*time.Minute {
+		t.Errorf("ban: banned=%v left=%s, want 5m", banned, left)
+	}
+	if stats.abuseBans.Load() != 1 {
+		t.Errorf("bans counter: got %d", stats.abuseBans.Load())
+	}
+	if _, banned := r.banned(ip, now.Add(5*time.Minute)); banned {
+		t.Error("ban should expire after the cooldown")
+	}
+}
+
+func TestAbuse_WindowResets(t *testing.T) {
+	r, _ := testRegistry(t, func(c *config) { c.abuseStrikes = 3 })
+	ip := netip.MustParseAddr("203.0.113.9")
+	t0 := time.Now()
+
+	r.strike(ip, 2, t0)
+	if r.strike(ip, 1, t0.Add(2*time.Minute)) {
+		t.Error("strikes from an expired window must not carry over")
+	}
+}
+
+func TestAbuse_EscalatingCooldown(t *testing.T) {
+	r, _ := testRegistry(t, func(c *config) {
+		c.abuseCooldown = time.Minute
+		c.abuseMaxCooldown = 3 * time.Minute
+	})
+	ip := netip.MustParseAddr("203.0.113.9")
+	t0 := time.Now()
+
+	want := []time.Duration{time.Minute, 2 * time.Minute, 3 * time.Minute, 3 * time.Minute}
+	at := t0
+	for i, w := range want {
+		got, banned := r.banNow(ip, at)
+		if !banned || got != w {
+			t.Errorf("ban %d: got %s (banned=%v), want %s", i+1, got, banned, w)
+		}
+		at = at.Add(got + time.Second)
+	}
+}
+
+func TestAbuse_BanNowWhileBannedReportsRemaining(t *testing.T) {
+	r, stats := testRegistry(t, nil)
+	ip := netip.MustParseAddr("203.0.113.9")
+	t0 := time.Now()
+
+	r.banNow(ip, t0)
+	left, banned := r.banNow(ip, t0.Add(time.Minute))
+	if !banned || left != 4*time.Minute {
+		t.Errorf("got %s banned=%v, want 4m remaining", left, banned)
+	}
+	if stats.abuseBans.Load() != 1 {
+		t.Error("hitting a ban path while banned must not escalate")
+	}
+}
+
+func TestAbuse_ExemptNeverBanned(t *testing.T) {
+	r, _ := testRegistry(t, func(c *config) {
+		c.abuseStrikes = 1
+		c.abuseAllow = "198.51.100.0/24"
+		c.trustedProxies = "10.0.0.1"
+	})
+	now := time.Now()
+	for _, s := range []string{"198.51.100.20", "10.0.0.1"} {
+		ip := netip.MustParseAddr(s)
+		if r.strike(ip, 100, now) {
+			t.Errorf("%s: exempt address was banned by strikes", s)
+		}
+		if _, banned := r.banNow(ip, now); banned {
+			t.Errorf("%s: exempt address was banned by banNow", s)
+		}
+	}
+	if r.tracked() != 0 {
+		t.Errorf("exempt addresses must not be tracked: %d", r.tracked())
+	}
+}
+
+func TestAbuse_Unban(t *testing.T) {
+	r, _ := testRegistry(t, nil)
+	ip := netip.MustParseAddr("203.0.113.9")
+	now := time.Now()
+
+	r.banNow(ip, now)
+	if !r.unban(ip) {
+		t.Fatal("unban returned false for a tracked client")
+	}
+	if _, banned := r.banned(ip, now); banned {
+		t.Error("still banned after unban")
+	}
+	if got, _ := r.banNow(ip, now); got != 5*time.Minute {
+		t.Errorf("offense history should reset on unban: next ban %s, want 5m", got)
+	}
+	if r.unban(netip.MustParseAddr("192.0.2.1")) {
+		t.Error("unban of an untracked client returned true")
+	}
+}
+
+func TestAbuse_SweepForgetsHistory(t *testing.T) {
+	r, _ := testRegistry(t, func(c *config) {
+		c.abuseCooldown = time.Minute
+		c.abuseMaxCooldown = time.Hour
+	})
+	ip := netip.MustParseAddr("203.0.113.9")
+	t0 := time.Now()
+	r.banNow(ip, t0)
+
+	if n := r.sweep(t0.Add(30 * time.Minute)); n != 0 {
+		t.Errorf("history swept too early: %d", n)
+	}
+	if n := r.sweep(t0.Add(time.Minute + time.Hour + 2*time.Minute)); n != 1 {
+		t.Errorf("history not swept after max cooldown of good behaviour: %d", n)
+	}
+	if r.tracked() != 0 {
+		t.Errorf("tracked: got %d", r.tracked())
+	}
+
+	fresh := netip.MustParseAddr("203.0.113.10")
+	r.strike(fresh, 1, t0)
+	if n := r.sweep(t0.Add(2 * time.Minute)); n != 1 {
+		t.Errorf("never-banned entry outside its window should be swept: %d", n)
+	}
+}
+
+func TestAbuse_MaxEntriesDrops(t *testing.T) {
+	r, stats := testRegistry(t, func(c *config) { c.abuseMaxEntries = 1 })
+	now := time.Now()
+
+	r.banNow(netip.MustParseAddr("203.0.113.1"), now) // banned: never evicted
+	r.strike(netip.MustParseAddr("203.0.113.2"), 1, now)
+
+	if r.tracked() != 1 {
+		t.Errorf("tracked: got %d, want 1", r.tracked())
+	}
+	if stats.abuseDropped.Load() != 1 {
+		t.Errorf("dropped: got %d, want 1", stats.abuseDropped.Load())
+	}
+}
+
 // ─── admission pass ──────────────────────────────────────────────────────────
 
 func TestAdmitter_RoundTrip(t *testing.T) {
-	a := &admitter{secret: []byte(strings.Repeat("s", 32)), ttl: time.Minute}
+	a := newAdmitter([]byte(strings.Repeat("s", 32)), time.Minute, "/", "", false)
 	now := time.Now()
 	id := passID{9, 8, 7}
 
 	v := a.mint(id, now)
-	got, exp, ok := a.verify(v, now)
-	if !ok || got != id {
-		t.Fatalf("round trip failed: ok=%v id=%v", ok, got)
+	got, exp, status := a.verify(v, now)
+	if status != passValid || got != id {
+		t.Fatalf("round trip failed: status=%v id=%v", status, got)
 	}
 	if exp.Unix() != now.Add(time.Minute).Unix() {
 		t.Errorf("expiry: got %v", exp)
 	}
 
-	b := []byte(v)
-	if b[5] == 'A' {
-		b[5] = 'B'
-	} else {
-		b[5] = 'A'
+	if _, _, s := a.verify(tamper(v), now); s != passForged {
+		t.Errorf("tampered pass: got %v, want forged", s)
 	}
-	if _, _, ok := a.verify(string(b), now); ok {
-		t.Error("tampered pass verified")
+	if _, _, s := a.verify(v, now.Add(time.Minute)); s != passExpired {
+		t.Errorf("expired pass: got %v, want expired", s)
 	}
 
-	if _, _, ok := a.verify(v, now.Add(time.Minute)); ok {
-		t.Error("expired pass verified")
+	other := newAdmitter([]byte(strings.Repeat("x", 32)), time.Minute, "/", "", false)
+	if _, _, s := a.verify(other.mint(id, now), now); s != passStale {
+		t.Errorf("pass from another key: got %v, want stale", s)
 	}
 
-	other := &admitter{secret: []byte(strings.Repeat("x", 32)), ttl: time.Minute}
-	if _, _, ok := other.verify(v, now); ok {
-		t.Error("pass verified under a different secret")
-	}
-
-	for _, junk := range []string{"", "nope", strings.Repeat("A", 54), v + "A"} {
-		if _, _, ok := a.verify(junk, now); ok {
-			t.Errorf("junk %q verified", junk)
+	for _, junk := range []string{"nope", v + "A", "!!!!"} {
+		if _, _, s := a.verify(junk, now); s != passForged {
+			t.Errorf("junk %q: got %v, want forged", junk, s)
 		}
+	}
+	if _, _, s := a.verify("", now); s != passMissing {
+		t.Errorf("empty value: got %v, want missing", s)
 	}
 }
 
@@ -655,8 +958,8 @@ func TestGate_PassRefreshedOnlyPastHalfLife(t *testing.T) {
 		t.Error("fresh pass should not be re-issued")
 	}
 
-	id, _, ok := a.admit.verify(pass, time.Now())
-	if !ok {
+	id, _, status := a.admit.verify(pass, time.Now())
+	if status != passValid {
 		t.Fatal("issued pass does not verify")
 	}
 	stale := a.admit.mint(id, time.Now().Add(-a.cfg.admitTTL*3/4))
@@ -665,7 +968,7 @@ func TestGate_PassRefreshedOnlyPastHalfLife(t *testing.T) {
 	if !ok {
 		t.Fatal("pass past half-life was not refreshed")
 	}
-	if gotID, _, ok := a.admit.verify(renewed, time.Now()); !ok || gotID != id {
+	if gotID, _, s := a.admit.verify(renewed, time.Now()); s != passValid || gotID != id {
 		t.Error("refresh must keep the same pass ID")
 	}
 }
@@ -740,6 +1043,44 @@ func TestProxy_RewritesHostWhenNotPreserved(t *testing.T) {
 	host, _, _, _ := up.seen()
 	if host != up.srv.Listener.Addr().String() {
 		t.Errorf("upstream Host: got %q, want %q", host, up.srv.Listener.Addr())
+	}
+}
+
+func TestProxy_ExtendsForwardedChainFromTrustedProxy(t *testing.T) {
+	up := newFakeUpstream(t)
+	cfg := testConfig(up.URL())
+	cfg.trustedProxies = "127.0.0.1/32"
+	_, front := newTestApp(t, cfg, up)
+
+	get(t, front.URL+"/h", map[string]string{
+		"X-Forwarded-For":   "203.0.113.9",
+		"X-Forwarded-Proto": "https",
+	})
+
+	_, _, _, xff := up.seen()
+	if xff != "203.0.113.9, 127.0.0.1" {
+		t.Errorf("X-Forwarded-For: got %q, want the client then concert's peer", xff)
+	}
+	if p := up.seenProto(); p != "https" {
+		t.Errorf("X-Forwarded-Proto: got %q, want https from the trusted proxy", p)
+	}
+}
+
+func TestProxy_DiscardsForwardedFromUntrustedPeer(t *testing.T) {
+	up := newFakeUpstream(t)
+	_, front := newTestApp(t, testConfig(up.URL()), up) // nothing trusted
+
+	get(t, front.URL+"/h", map[string]string{
+		"X-Forwarded-For":   "6.6.6.6",
+		"X-Forwarded-Proto": "https",
+	})
+
+	_, _, _, xff := up.seen()
+	if xff != "127.0.0.1" {
+		t.Errorf("X-Forwarded-For: got %q, spoofed chain must be discarded", xff)
+	}
+	if p := up.seenProto(); p != "http" {
+		t.Errorf("X-Forwarded-Proto: got %q, want http", p)
 	}
 }
 
@@ -1181,6 +1522,266 @@ func TestUserStore_SweepEvictsOnlyIdle(t *testing.T) {
 	}
 }
 
+// ─── abuse enforcement end to end ────────────────────────────────────────────
+
+func TestAbuse_BanPathBansInstantly(t *testing.T) {
+	up := newFakeUpstream(t)
+	cfg := testConfig(up.URL())
+	cfg.banPaths = "/.env,/.git/*"
+	_, front := newTestApp(t, cfg, up)
+
+	resp, body := get(t, front.URL+"/.git/config", nil)
+	if !isBlocked(resp, body) {
+		t.Fatalf("ban path: got %d %q, want blocked 429", resp.StatusCode, body)
+	}
+	if ra := resp.Header.Get("Retry-After"); ra != "300" {
+		t.Errorf("Retry-After: got %q, want 300", ra)
+	}
+	if up.hitsFor("/.git/config") != 0 {
+		t.Error("ban path reached the upstream")
+	}
+
+	resp, body = get(t, front.URL+"/hello", nil)
+	if !isBlocked(resp, body) {
+		t.Errorf("banned client on a normal path: got %d, want blocked 429", resp.StatusCode)
+	}
+	resp, body = get(t, front.URL+"/_room/healthz", nil)
+	if !isBlocked(resp, body) {
+		t.Errorf("ban must cover everything, including ops routes: got %d", resp.StatusCode)
+	}
+}
+
+func TestAbuse_AllowlistedClientNotBanned(t *testing.T) {
+	up := newFakeUpstream(t)
+	cfg := testConfig(up.URL())
+	cfg.banPaths = "/.env"
+	cfg.abuseAllow = "127.0.0.1/32"
+	_, front := newTestApp(t, cfg, up)
+
+	resp, body := get(t, front.URL+"/.env", nil)
+	if resp.StatusCode != http.StatusOK || string(body) != "ok" {
+		t.Errorf("allowlisted client on a ban path: got %d %q, want proxied", resp.StatusCode, body)
+	}
+}
+
+func TestAbuse_BansRealClientBehindTrustedProxy(t *testing.T) {
+	up := newFakeUpstream(t)
+	cfg := testConfig(up.URL())
+	cfg.trustedProxies = "127.0.0.1/32"
+	cfg.banPaths = "/.env"
+	_, front := newTestApp(t, cfg, up)
+
+	resp, body := get(t, front.URL+"/.env", withXFF("203.0.113.9"))
+	if !isBlocked(resp, body) {
+		t.Fatalf("got %d, want blocked", resp.StatusCode)
+	}
+	if resp, body := get(t, front.URL+"/hello", withXFF("203.0.113.9")); !isBlocked(resp, body) {
+		t.Error("banned client should stay banned")
+	}
+	if resp, _ := get(t, front.URL+"/hello", withXFF("198.51.100.4")); resp.StatusCode != http.StatusOK {
+		t.Errorf("other client behind the same proxy: got %d, want 200", resp.StatusCode)
+	}
+	if resp, _ := get(t, front.URL+"/hello", nil); resp.StatusCode != http.StatusOK {
+		t.Errorf("the proxy itself must never be banned: got %d", resp.StatusCode)
+	}
+}
+
+func TestAbuse_AdminFailuresBan(t *testing.T) {
+	up := newFakeUpstream(t)
+	cfg := testConfig(up.URL())
+	cfg.adminToken = "secret"
+	_, front := newTestApp(t, cfg, up)
+
+	post := func() (*http.Response, []byte) {
+		return doReq(t, testClient, http.MethodPost, front.URL+"/_room/cap",
+			map[string]string{"Authorization": "Bearer wrong"}, strings.NewReader(`{"cap":3}`))
+	}
+	for i := 1; i <= 4; i++ { // 4 × weight 5 = threshold 20
+		if resp, _ := post(); resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: got %d, want 401", i, resp.StatusCode)
+		}
+	}
+	if resp, body := post(); !isBlocked(resp, body) {
+		t.Errorf("fifth attempt: got %d, want blocked", resp.StatusCode)
+	}
+}
+
+func TestAbuse_ForgedPassesBan(t *testing.T) {
+	up := newFakeUpstream(t)
+	cfg := testConfig(up.URL())
+	cfg.assets = "/assets/*"
+	cfg.abuseStrikes = 10
+	_, front := newTestApp(t, cfg, up)
+
+	forged := tamper(admitPass(t, front))
+	for i := 1; i <= 2; i++ { // 2 × weight 5 = threshold 10
+		if resp, _ := get(t, front.URL+"/assets/app.js", withPass(forged, nil)); resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("forged attempt %d: got %d, want 403", i, resp.StatusCode)
+		}
+	}
+	if resp, body := get(t, front.URL+"/assets/app.js", withPass(forged, nil)); !isBlocked(resp, body) {
+		t.Errorf("after forged passes: got %d, want blocked", resp.StatusCode)
+	}
+}
+
+func TestAbuse_StalePassNoStrike(t *testing.T) {
+	up := newFakeUpstream(t)
+	cfg := testConfig(up.URL())
+	cfg.assets = "/assets/*"
+	_, front := newTestApp(t, cfg, up)
+
+	other := newAdmitter([]byte(strings.Repeat("o", 32)), 10*time.Minute, "/", "", false)
+	stale := other.mint(passID{1}, time.Now())
+	for i := 0; i < 5; i++ {
+		if resp, _ := get(t, front.URL+"/assets/app.js", withPass(stale, nil)); resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("stale pass: got %d, want 403", resp.StatusCode)
+		}
+	}
+	if s := getStats(t, front); s["abuse_strikes_total"] != float64(0) {
+		t.Errorf("stale passes must not earn strikes: %v", s["abuse_strikes_total"])
+	}
+}
+
+func TestAbuse_TicketChurnBans(t *testing.T) {
+	up := newFakeUpstream(t)
+	cfg := testConfig(up.URL())
+	cfg.capacity = 1
+	cfg.abuseStrikes = 3
+	_, front := newTestApp(t, cfg, up)
+	fillSlot(t, front, up)
+
+	for i := 1; i <= 3; i++ {
+		resp, body := get(t, front.URL+"/api/x", nil) // no cookie jar
+		if resp.StatusCode != http.StatusTooManyRequests || isBlocked(resp, body) {
+			t.Fatalf("churn %d: got %d %q, want a queued 429", i, resp.StatusCode, body)
+		}
+	}
+	if resp, body := get(t, front.URL+"/api/x", nil); !isBlocked(resp, body) {
+		t.Errorf("after churn: got %d %q, want blocked", resp.StatusCode, body)
+	}
+}
+
+func TestAbuse_CookieJarClientNotChurn(t *testing.T) {
+	up := newFakeUpstream(t)
+	cfg := testConfig(up.URL())
+	cfg.capacity = 1
+	cfg.abuseStrikes = 3
+	_, front := newTestApp(t, cfg, up)
+	fillSlot(t, front, up)
+
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar, Timeout: 10 * time.Second}
+	for i := 0; i < 6; i++ {
+		resp, body := doReq(t, client, http.MethodGet, front.URL+"/api/x", nil, nil)
+		if isBlocked(resp, body) {
+			t.Fatalf("retry %d: a client that keeps its ticket was banned", i+1)
+		}
+	}
+}
+
+func TestAbuse_UserThrottleStrikes(t *testing.T) {
+	up := newFakeUpstream(t)
+	cfg := testConfig(up.URL())
+	cfg.assets = "/assets/*"
+	cfg.assetUserCapH1 = 1
+	cfg.assetUserWait = 20 * time.Millisecond
+	cfg.abuseStrikes = 2
+	_, front := newTestApp(t, cfg, up)
+
+	pass := admitPass(t, front)
+	park(t, front, up, "/assets/slow", withPass(pass, nil))
+
+	for i := 1; i <= 2; i++ {
+		resp, body := get(t, front.URL+"/assets/a.js", withPass(pass, nil))
+		if resp.StatusCode != http.StatusTooManyRequests || isBlocked(resp, body) {
+			t.Fatalf("throttle %d: got %d %q, want a throttled 429", i, resp.StatusCode, body)
+		}
+	}
+	if resp, body := get(t, front.URL+"/assets/a.js", withPass(pass, nil)); !isBlocked(resp, body) {
+		t.Errorf("after repeated throttling: got %d, want blocked", resp.StatusCode)
+	}
+}
+
+func TestAbuse_Disabled(t *testing.T) {
+	up := newFakeUpstream(t)
+	cfg := testConfig(up.URL())
+	cfg.abuseEnabled = false
+	cfg.adminToken = "secret"
+	_, front := newTestApp(t, cfg, up)
+
+	for i := 0; i < 10; i++ {
+		doReq(t, testClient, http.MethodPost, front.URL+"/_room/cap",
+			map[string]string{"Authorization": "Bearer wrong"}, strings.NewReader(`{}`))
+	}
+	if resp, _ := get(t, front.URL+"/hello", nil); resp.StatusCode != http.StatusOK {
+		t.Errorf("with -abuse=false nothing is banned: got %d", resp.StatusCode)
+	}
+	resp, _ := get(t, front.URL+"/_room/abuse", map[string]string{"Authorization": "Bearer secret"})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("abuse endpoint when disabled: got %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestAbuse_AdminListAndUnban(t *testing.T) {
+	up := newFakeUpstream(t)
+	cfg := testConfig(up.URL())
+	cfg.trustedProxies = "127.0.0.1/32" // admin calls come from the exempt proxy address
+	cfg.banPaths = "/.env"
+	cfg.adminToken = "secret"
+	_, front := newTestApp(t, cfg, up)
+	admin := map[string]string{"Authorization": "Bearer secret"}
+
+	get(t, front.URL+"/.env", withXFF("203.0.113.9"))
+
+	resp, body := get(t, front.URL+"/_room/abuse", admin)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list: got %d", resp.StatusCode)
+	}
+	var list struct {
+		Tracked int       `json:"tracked"`
+		Bans    []banView `json:"bans"`
+	}
+	if err := json.Unmarshal(body, &list); err != nil {
+		t.Fatalf("list not JSON: %q", body)
+	}
+	if len(list.Bans) != 1 || list.Bans[0].Client != "203.0.113.9" || list.Bans[0].Offenses != 1 {
+		t.Fatalf("unexpected bans: %+v", list.Bans)
+	}
+
+	resp, _ = doReq(t, testClient, http.MethodDelete, front.URL+"/_room/abuse?client=203.0.113.9", admin, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unban: got %d", resp.StatusCode)
+	}
+	if resp, _ := get(t, front.URL+"/hello", withXFF("203.0.113.9")); resp.StatusCode != http.StatusOK {
+		t.Errorf("after unban: got %d, want 200", resp.StatusCode)
+	}
+
+	resp, _ = doReq(t, testClient, http.MethodDelete, front.URL+"/_room/abuse?client=nope", admin, nil)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("bad client param: got %d, want 400", resp.StatusCode)
+	}
+	resp, _ = doReq(t, testClient, http.MethodDelete, front.URL+"/_room/abuse?client=192.0.2.1", admin, nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("untracked client: got %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestAbuse_IPv6BannedPerSlash64(t *testing.T) {
+	up := newFakeUpstream(t)
+	cfg := testConfig(up.URL())
+	cfg.trustedProxies = "127.0.0.1/32"
+	cfg.banPaths = "/.env"
+	_, front := newTestApp(t, cfg, up)
+
+	get(t, front.URL+"/.env", withXFF("2001:db8:1:2::1"))
+	if resp, body := get(t, front.URL+"/hello", withXFF("2001:db8:1:2:ffff::9")); !isBlocked(resp, body) {
+		t.Error("another address in the same /64 should be banned")
+	}
+	if resp, _ := get(t, front.URL+"/hello", withXFF("2001:db8:1:3::1")); resp.StatusCode != http.StatusOK {
+		t.Errorf("a different /64 should not be banned: got %d", resp.StatusCode)
+	}
+}
+
 // ─── ops endpoints ───────────────────────────────────────────────────────────
 
 func TestOps_HealthzUngatedWhenFull(t *testing.T) {
@@ -1210,6 +1811,8 @@ func TestOps_Stats(t *testing.T) {
 		"queued_total", "evicted_total", "timeouts_total", "promoted_total",
 		"asset_cap", "asset_in_flight", "asset_users", "asset_user_cap_h1", "asset_user_cap_h2",
 		"asset_served_total", "asset_denied_total", "asset_user_throttled_total", "asset_global_throttled_total",
+		"abuse_enabled", "abuse_tracked", "abuse_strikes_total", "abuse_bans_total",
+		"abuse_rejected_total", "abuse_dropped_total",
 	} {
 		if _, ok := s[k]; !ok {
 			t.Errorf("stats missing %q", k)
