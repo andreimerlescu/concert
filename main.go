@@ -134,6 +134,9 @@ type config struct {
 	abuseAllow       string
 	banPaths         string
 
+	// portal holds the admin portal settings; see portal.go.
+	portal portalConfig
+
 	// Derived / non-flag fields.
 	admitSecret          []byte         // CONCERT_ADMIT_SECRET, or random when unset
 	admitSecretGenerated bool           // true when admitSecret was generated
@@ -241,6 +244,7 @@ func parseConfig(fs *flag.FlagSet, args []string) (config, bool, error) {
 	fs.IntVar(&cfg.abuseMaxEntries, "abuse-max-entries", env.Int("CONCERT_ABUSE_MAX_ENTRIES", 100000), "max clients tracked at once")
 	fs.StringVar(&cfg.abuseAllow, "abuse-allow", env.String("CONCERT_ABUSE_ALLOW", ""), "comma-separated CIDRs that are never struck or banned")
 	fs.StringVar(&cfg.banPaths, "ban-paths", env.String("CONCERT_BAN_PATHS", ""), "comma-separated paths that ban the client on first hit; suffix /* for a prefix")
+	registerPortalFlags(fs, &cfg.portal)
 	showVersion := fs.Bool("version", false, "show version")
 
 	if err := fs.Parse(args); err != nil {
@@ -248,6 +252,7 @@ func parseConfig(fs *flag.FlagSet, args []string) (config, bool, error) {
 	}
 	cfg.adminToken = env.String("CONCERT_ADMIN_TOKEN", "")
 	cfg.admitSecret = []byte(env.String("CONCERT_ADMIT_SECRET", ""))
+	cfg.portal.loadSecrets()
 	cfg.accessLog = os.Stdout
 
 	if *showVersion {
@@ -325,6 +330,10 @@ func (c *config) normalize() error {
 		}
 	} else if len(parsePaths(c.banPaths)) > 0 {
 		return errors.New("-ban-paths requires -abuse")
+	}
+
+	if err := c.portal.normalize(); err != nil {
+		return err
 	}
 
 	return validateRoutes(c)
@@ -518,13 +527,22 @@ func (a *app) Close() {
 	})
 }
 
-// run builds the app, binds cfg.listen, and serves until ctx is cancelled.
+// run builds the app, starts the admin portal when configured, binds
+// cfg.listen, and serves until ctx is cancelled.
 func run(ctx context.Context, cfg config) error {
 	a, err := newApp(cfg)
 	if err != nil {
 		return err
 	}
 	defer a.Close()
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel() // stops the portal if the main listener fails
+
+	handler, err := startPortal(ctx, a)
+	if err != nil {
+		return err
+	}
 
 	ln, err := net.Listen("tcp", cfg.listen)
 	if err != nil {
@@ -546,7 +564,7 @@ func run(ctx context.Context, cfg config) error {
 		log.Printf("CONCERT_ADMIT_SECRET not set: using a random secret; admission passes reset on restart and are not shared across instances")
 	}
 
-	return serve(ctx, ln, a.handler, shutdownGrace)
+	return serve(ctx, ln, handler, shutdownGrace)
 }
 
 // serve runs h on ln until ctx is cancelled, then drains for up to grace.

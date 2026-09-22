@@ -1,0 +1,46 @@
+/* Dark theme overrides. Enabled by portal.js alongside data-bs-theme="dark". */
+
+body {
+    background-color: #0e1116;
+}
+
+.navbar {
+    background-color: #12161c !important;
+}
+
+.navbar-brand .bi {
+    color: #3dd5f3;
+}
+
+.stat-card {
+    background-color: #161b22;
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, .06);
+}
+
+.stat-card .card-footer {
+    background-color: #1a2029;
+    border-top-color: rgba(255, 255, 255, .06);
+}
+
+.table-portal {
+    --bs-table-bg: transparent;
+    --bs-table-hover-bg: rgba(255, 255, 255, .04);
+}
+
+.form-control,
+.input-group-text {
+    background-color: #0f141a;
+    border-color: #2a313c;
+}
+
+.form-control:focus {
+    background-color: #0f141a;
+}
+
+.modal-content {
+    background-color: #161b22;
+}
+
+footer {
+    background-color: #0e1116;
+}

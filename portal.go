@@ -1,0 +1,1298 @@
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"embed"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"html/template"
+	"io/fs"
+	"log"
+	"math"
+	"mime"
+	"net"
+	"net/http"
+	"net/netip"
+	"path"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/andreimerlescu/goenv/env"
+	"github.com/gin-gonic/gin"
+)
+
+// portalFS holds the portal's templates and static assets. Files whose names
+// start with "." or "_" are excluded by go:embed, which keeps stray files
+// such as .DS_Store out of the binary.
+//
+//go:embed templates
+var portalFS embed.FS
+
+// Files inside templates/. Templates are named after their file by
+// template.ParseFS, so templateIndex is also the name passed to
+// ExecuteTemplate. Vendored assets are referenced by these constants in
+// Go and passed to the templates, so the two can never disagree.
+const (
+	templateHeader = "header.tpl"
+	templateFooter = "footer.tpl"
+	templateIndex  = "index.tpl"
+
+	assetBootstrapCSS = "lib/css/bootstrap.5.3.3.min.css"
+	assetIconsCSS     = "lib/css/bootstrap-icons.1.13.1.min.css"
+	assetBootstrapJS  = "lib/js/bootstrap.bundle.5.3.3.min.js"
+	assetPortalLight  = "css/portal-light.css"
+	assetPortalDark   = "css/portal-dark.css"
+	assetPortalJS     = "js/portal.js"
+)
+
+const (
+	portalCookie       = "concert_portal"
+	portalNonceLen     = 16
+	portalExpOff       = portalNonceLen
+	portalBodyLen      = portalExpOff + 8
+	portalMACLen       = 16
+	portalRawLen       = portalBodyLen + portalMACLen
+	minPortalPassLen   = 16
+	portalMaxOccupants = 100000
+	statusCaptureLimit = 2048
+	loginMaxFailures   = 5
+	loginWindow        = 15 * time.Minute
+	loginLockout       = 15 * time.Minute
+	readyForgetAfter   = time.Minute
+	ctxPortalNonce     = "portal.nonce"
+)
+
+var (
+	errAbuseDisabled = errors.New("the abuse registry is disabled (-abuse=false)")
+	errClientExempt  = errors.New("that address is exempt from bans: it is listed in -abuse-allow or -trusted-proxies")
+	errRegistryFull  = errors.New("the abuse registry is full (-abuse-max-entries)")
+)
+
+// ─── configuration ───────────────────────────────────────────────────────────
+
+type portalConfig struct {
+	listen       string
+	allowSpec    string
+	sessionTTL   time.Duration
+	secureCookie bool
+
+	pass  string         // CONCERT_PORTAL_PASS; env-only
+	allow []netip.Prefix // parsed allowSpec
+}
+
+func registerPortalFlags(fs *flag.FlagSet, pc *portalConfig) {
+	fs.StringVar(&pc.listen, "portal-listen", env.String("CONCERT_PORTAL_LISTEN", "127.0.0.1:8081"), "admin portal address; the portal only starts when CONCERT_PORTAL_PASS is set")
+	fs.StringVar(&pc.allowSpec, "portal-allow", env.String("CONCERT_PORTAL_ALLOW", "127.0.0.1/32,::1/128"), "comma-separated CIDRs allowed to reach the admin portal")
+	fs.DurationVar(&pc.sessionTTL, "portal-session-ttl", env.Duration("CONCERT_PORTAL_SESSION_TTL", 8*time.Hour), "admin portal sign-in lifetime")
+	fs.BoolVar(&pc.secureCookie, "portal-secure-cookie", env.Bool("CONCERT_PORTAL_SECURE_COOKIE", false), "mark the portal session cookie Secure (portal served over HTTPS)")
+}
+
+// loadSecrets reads values that must never be passed as flags.
+func (pc *portalConfig) loadSecrets() {
+	pc.pass = env.String("CONCERT_PORTAL_PASS", "")
+}
+
+func (pc *portalConfig) enabled() bool {
+	return pc.listen != "" && pc.pass != ""
+}
+
+func (pc *portalConfig) normalize() error {
+	allow, err := parsePrefixes(pc.allowSpec)
+	if err != nil {
+		return fmt.Errorf("invalid -portal-allow: %w", err)
+	}
+	pc.allow = allow
+	if !pc.enabled() {
+		return nil
+	}
+	if len(pc.pass) < minPortalPassLen {
+		return fmt.Errorf("CONCERT_PORTAL_PASS must be at least %d characters", minPortalPassLen)
+	}
+	if len(pc.allow) == 0 {
+		return errors.New("-portal-allow must list at least one address when the portal is enabled")
+	}
+	if pc.sessionTTL < 5*time.Minute {
+		return fmt.Errorf("invalid -portal-session-ttl %s: must be at least 5m", pc.sessionTTL)
+	}
+	return nil
+}
+
+// ─── lifecycle ───────────────────────────────────────────────────────────────
+
+// startPortal starts the admin portal in its own goroutine when configured
+// and returns the handler the main listener should serve. With the portal
+// disabled that is a.handler unchanged.
+func startPortal(ctx context.Context, a *app) (http.Handler, error) {
+	p, err := newPortal(a)
+	if err != nil {
+		return nil, err
+	}
+	if p == nil {
+		if a.cfg.portal.listen != "" && a.cfg.portal.pass == "" {
+			log.Printf("portal disabled: set CONCERT_PORTAL_PASS to enable it on %s", a.cfg.portal.listen)
+		}
+		return a.handler, nil
+	}
+	log.Printf("portal listening on %s (allowed: %s)", p.ln.Addr(), a.cfg.portal.allowSpec)
+	go func() {
+		if err := p.serve(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("portal: %v", err)
+		}
+	}()
+	return p.wrap(a.handler), nil
+}
+
+type portal struct {
+	a          *app
+	cfg        portalConfig
+	ln         net.Listener
+	engine     *gin.Engine
+	tmpl       *template.Template
+	static     fs.FS
+	sessionKey []byte
+	passDigest [sha256.Size]byte
+	rateBits   atomic.Uint64
+	surgeBits  atomic.Uint64
+	occupants  *occupantStore
+	kicked     *kickList
+	fails      *loginLimiter
+	untracked  []pathRule
+}
+
+// newPortal builds the portal and binds its listener. It returns nil when
+// the portal is not configured.
+func newPortal(a *app) (*portal, error) {
+	pc := a.cfg.portal
+	if !pc.enabled() {
+		return nil, nil
+	}
+
+	static, err := fs.Sub(portalFS, "templates")
+	if err != nil {
+		return nil, fmt.Errorf("portal: %w", err)
+	}
+	for _, req := range []string{
+		templateHeader, templateFooter, templateIndex,
+		assetBootstrapCSS, assetIconsCSS, assetBootstrapJS,
+		assetPortalLight, assetPortalDark, assetPortalJS,
+	} {
+		if _, err := fs.Stat(static, req); err != nil {
+			return nil, fmt.Errorf("portal: templates/%s is missing", req)
+		}
+	}
+	tmpl, err := template.ParseFS(static, templateHeader, templateFooter, templateIndex)
+	if err != nil {
+		return nil, fmt.Errorf("portal templates: %w", err)
+	}
+
+	keyMAC := hmac.New(sha256.New, []byte(pc.pass))
+	keyMAC.Write([]byte("concert/portal/session-key"))
+
+	p := &portal{
+		a:          a,
+		cfg:        pc,
+		tmpl:       tmpl,
+		static:     static,
+		sessionKey: keyMAC.Sum(nil),
+		passDigest: sha256.Sum256([]byte(pc.pass)),
+		occupants:  newOccupantStore(portalMaxOccupants),
+		kicked:     &kickList{m: map[string]time.Time{}},
+		fails:      &loginLimiter{m: map[netip.Addr]*loginState{}},
+	}
+	p.untracked = append(p.untracked, parsePaths(a.cfg.assets)...)
+	p.untracked = append(p.untracked, parsePaths(a.cfg.assetPublic)...)
+	p.untracked = append(p.untracked, parsePaths(a.cfg.bypass)...)
+	p.untracked = append(p.untracked, pathRule{path: "/_room", prefix: true})
+
+	// Pricing becomes adjustable at runtime. Same formula as -rate/-surge.
+	p.setPricing(a.cfg.rate, a.cfg.surge)
+	a.room.SetRateFunc(p.price)
+
+	p.engine = p.routes()
+
+	ln, err := net.Listen("tcp", pc.listen)
+	if err != nil {
+		return nil, fmt.Errorf("portal listen %s: %w", pc.listen, err)
+	}
+	p.ln = ln
+	return p, nil
+}
+
+func (p *portal) serve(ctx context.Context) error {
+	srv := &http.Server{
+		Handler:           p.engine,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	go p.janitor(ctx)
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Serve(p.ln) }()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+	}
+	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return srv.Shutdown(sctx)
+}
+
+func (p *portal) janitor(ctx context.Context) {
+	t := time.NewTicker(10 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-t.C:
+			p.occupants.sweep(now, p.a.room.TokenTTL(), readyForgetAfter)
+			p.kicked.sweep(now)
+			p.fails.sweep(now)
+		}
+	}
+}
+
+// ─── pricing ─────────────────────────────────────────────────────────────────
+
+func (p *portal) setPricing(rate, surge float64) {
+	p.rateBits.Store(math.Float64bits(rate))
+	p.surgeBits.Store(math.Float64bits(surge))
+}
+
+func (p *portal) pricing() (rate, surge float64) {
+	return math.Float64frombits(p.rateBits.Load()), math.Float64frombits(p.surgeBits.Load())
+}
+
+// price is installed as room's RateFunc: base + depth × surge per position.
+func (p *portal) price(depth int64) float64 {
+	rate, surge := p.pricing()
+	return rate + float64(depth)*surge
+}
+
+// ─── routes ──────────────────────────────────────────────────────────────────
+
+func (p *portal) routes() *gin.Engine {
+	r := gin.New()
+	r.RedirectTrailingSlash = false
+	r.RedirectFixedPath = false
+	_ = r.SetTrustedProxies(nil)
+
+	r.Use(gin.Recovery(), p.allowOnly, securityHeaders)
+
+	r.GET("/assets/*filepath", p.asset)
+	r.GET("/", p.index)
+	r.POST("/login", p.login)
+	r.POST("/logout", p.requireSession, p.requireFormCSRF, p.logout)
+
+	api := r.Group("/api", p.requireSession, p.requireCSRF)
+	api.GET("/overview", p.apiOverview)
+	api.GET("/queue", p.apiQueue)
+	api.POST("/queue/promote", p.apiPromote)
+	api.POST("/queue/kick", p.apiKick)
+	api.GET("/bans", p.apiBans)
+	api.POST("/bans", p.apiBanSave)
+	api.DELETE("/bans", p.apiUnban)
+	api.GET("/settings", p.apiSettings)
+	api.POST("/settings", p.apiSettingsSave)
+
+	r.NoRoute(func(c *gin.Context) { c.String(http.StatusNotFound, "not found") })
+	return r
+}
+
+// allowOnly admits only addresses in -portal-allow. The portal is reached
+// directly, never through a proxy, so the connection address is authoritative.
+func (p *portal) allowOnly(c *gin.Context) {
+	ip, ok := remoteAddr(c.Request)
+	if !ok || !containsAddr(p.cfg.allow, ip) {
+		c.AbortWithStatus(http.StatusForbidden)
+	}
+}
+
+func securityHeaders(c *gin.Context) {
+	h := c.Writer.Header()
+	h.Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; font-src 'self'; "+
+		"style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; "+
+		"form-action 'self'; base-uri 'none'")
+	h.Set("X-Frame-Options", "DENY")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Referrer-Policy", "no-referrer")
+	h.Set("Cache-Control", "no-store")
+}
+
+// asset serves only lib/, css/ and js/ from the embedded templates directory,
+// never the .tpl sources.
+func (p *portal) asset(c *gin.Context) {
+	rel := strings.TrimPrefix(path.Clean("/"+c.Param("filepath")), "/")
+	if !strings.HasPrefix(rel, "lib/") && !strings.HasPrefix(rel, "css/") && !strings.HasPrefix(rel, "js/") {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	data, err := fs.ReadFile(p.static, rel)
+	if err != nil {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	c.Header("Cache-Control", "private, max-age=300")
+	c.Data(http.StatusOK, assetType(rel), data)
+}
+
+func assetType(name string) string {
+	switch ext := strings.ToLower(path.Ext(name)); ext {
+	case ".woff2":
+		return "font/woff2"
+	case ".woff":
+		return "font/woff"
+	default:
+		if t := mime.TypeByExtension(ext); t != "" {
+			return t
+		}
+		return "application/octet-stream"
+	}
+}
+
+// ─── pages and sessions ──────────────────────────────────────────────────────
+
+type portalPage struct {
+	Title        string
+	Error        string
+	CSRF         string
+	BootstrapCSS string
+	IconsCSS     string
+	BootstrapJS  string
+	PortalLight  string
+	PortalDark   string
+	PortalJS     string
+	Version      string
+	Upstream     string
+	Authed       bool
+}
+
+func (p *portal) render(c *gin.Context, status int, page portalPage) {
+	page.BootstrapCSS = assetBootstrapCSS
+	page.IconsCSS = assetIconsCSS
+	page.BootstrapJS = assetBootstrapJS
+	page.PortalLight = assetPortalLight
+	page.PortalDark = assetPortalDark
+	page.PortalJS = assetPortalJS
+	page.Version = BinaryVersion()
+	page.Upstream = p.a.cfg.upstream
+	var buf bytes.Buffer
+	if err := p.tmpl.ExecuteTemplate(&buf, templateIndex, page); err != nil {
+		log.Printf("portal: render: %v", err)
+		c.String(http.StatusInternalServerError, "template error")
+		return
+	}
+	c.Data(status, "text/html; charset=utf-8", buf.Bytes())
+}
+
+func (p *portal) index(c *gin.Context) {
+	if nonce, ok := p.verifySession(c.Request, time.Now()); ok {
+		p.render(c, http.StatusOK, portalPage{Title: "Dashboard", Authed: true, CSRF: p.csrfToken(nonce)})
+		return
+	}
+	p.render(c, http.StatusOK, portalPage{Title: "Sign in"})
+}
+
+func (p *portal) login(c *gin.Context) {
+	ip, _ := remoteAddr(c.Request)
+	now := time.Now()
+	if left, locked := p.fails.locked(ip, now); locked {
+		c.Header("Retry-After", strconv.Itoa(int(left/time.Second)+1))
+		p.render(c, http.StatusTooManyRequests, portalPage{
+			Title: "Sign in",
+			Error: fmt.Sprintf("Too many failed attempts. Try again in %s.", left.Round(time.Second)),
+		})
+		return
+	}
+	got := sha256.Sum256([]byte(c.PostForm("pass")))
+	if subtle.ConstantTimeCompare(got[:], p.passDigest[:]) != 1 {
+		p.fails.fail(ip, now)
+		log.Printf("portal: failed sign-in from %s", ip)
+		p.render(c, http.StatusUnauthorized, portalPage{Title: "Sign in", Error: "That portal pass is not correct."})
+		return
+	}
+	p.fails.reset(ip)
+	value, _ := p.mintSession(now)
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     portalCookie,
+		Value:    value,
+		Path:     "/",
+		MaxAge:   int(p.cfg.sessionTTL / time.Second),
+		Secure:   p.cfg.secureCookie,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	})
+	log.Printf("portal: %s signed in", ip)
+	c.Redirect(http.StatusSeeOther, "/")
+}
+
+func (p *portal) logout(c *gin.Context) {
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name: portalCookie, Value: "", Path: "/", MaxAge: -1,
+		Secure: p.cfg.secureCookie, HttpOnly: true, SameSite: http.SameSiteStrictMode,
+	})
+	c.Redirect(http.StatusSeeOther, "/")
+}
+
+// Session cookie: nonce(16) | expiry unix seconds(8) | HMAC(16). The key is
+// derived from CONCERT_PORTAL_PASS, so changing the pass signs everyone out.
+func (p *portal) mintSession(now time.Time) (string, []byte) {
+	var buf [portalRawLen]byte
+	_, _ = rand.Read(buf[:portalNonceLen])
+	binary.BigEndian.PutUint64(buf[portalExpOff:portalBodyLen], uint64(now.Add(p.cfg.sessionTTL).Unix()))
+	mac := hmac.New(sha256.New, p.sessionKey)
+	mac.Write(buf[:portalBodyLen])
+	copy(buf[portalBodyLen:], mac.Sum(nil)[:portalMACLen])
+	return base64.RawURLEncoding.EncodeToString(buf[:]), append([]byte(nil), buf[:portalNonceLen]...)
+}
+
+func (p *portal) verifySession(r *http.Request, now time.Time) ([]byte, bool) {
+	ck, err := r.Cookie(portalCookie)
+	if err != nil || base64.RawURLEncoding.DecodedLen(len(ck.Value)) != portalRawLen {
+		return nil, false
+	}
+	var buf [portalRawLen]byte
+	if n, err := base64.RawURLEncoding.Decode(buf[:], []byte(ck.Value)); err != nil || n != portalRawLen {
+		return nil, false
+	}
+	mac := hmac.New(sha256.New, p.sessionKey)
+	mac.Write(buf[:portalBodyLen])
+	if !hmac.Equal(buf[portalBodyLen:], mac.Sum(nil)[:portalMACLen]) {
+		return nil, false
+	}
+	if now.Unix() >= int64(binary.BigEndian.Uint64(buf[portalExpOff:portalBodyLen])) {
+		return nil, false
+	}
+	return append([]byte(nil), buf[:portalNonceLen]...), true
+}
+
+func (p *portal) csrfToken(nonce []byte) string {
+	mac := hmac.New(sha256.New, p.sessionKey)
+	mac.Write([]byte("csrf"))
+	mac.Write(nonce)
+	return hex.EncodeToString(mac.Sum(nil)[:16])
+}
+
+func (p *portal) requireSession(c *gin.Context) {
+	nonce, ok := p.verifySession(c.Request, time.Now())
+	if !ok {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "sign in required"})
+		return
+	}
+	c.Set(ctxPortalNonce, nonce)
+}
+
+func (p *portal) sessionCSRF(c *gin.Context) string {
+	v, _ := c.Get(ctxPortalNonce)
+	nonce, _ := v.([]byte)
+	return p.csrfToken(nonce)
+}
+
+// requireCSRF protects every state-changing API call.
+func (p *portal) requireCSRF(c *gin.Context) {
+	if c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead {
+		return
+	}
+	got := c.GetHeader("X-CSRF-Token")
+	if subtle.ConstantTimeCompare([]byte(got), []byte(p.sessionCSRF(c))) != 1 {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "missing or invalid CSRF token; reload the page"})
+	}
+}
+
+func (p *portal) requireFormCSRF(c *gin.Context) {
+	if subtle.ConstantTimeCompare([]byte(c.PostForm("csrf")), []byte(p.sessionCSRF(c))) != 1 {
+		c.AbortWithStatus(http.StatusForbidden)
+	}
+}
+
+func jsonError(c *gin.Context, status int, msg string) {
+	c.AbortWithStatusJSON(status, gin.H{"error": msg})
+}
+
+func portalActor(c *gin.Context) string {
+	ip, _ := remoteAddr(c.Request)
+	return ip.String()
+}
+
+// ─── API: overview ───────────────────────────────────────────────────────────
+
+func (p *portal) apiOverview(c *gin.Context) {
+	a, wr, stats := p.a, p.a.room, p.a.stats
+	rate, surge := p.pricing()
+	c.JSON(http.StatusOK, gin.H{
+		"cap":                          wr.Cap(),
+		"occupancy":                    wr.Len(),
+		"queue_depth":                  wr.QueueDepth(),
+		"live_queue_depth":             wr.LiveQueueDepth(),
+		"max_queue_depth":              wr.MaxQueueDepth(),
+		"utilization":                  wr.UtilizationSmoothed(),
+		"queued_total":                 stats.queued.Load(),
+		"evicted_total":                stats.evicted.Load(),
+		"timeouts_total":               stats.timeouts.Load(),
+		"promoted_total":               stats.promoted.Load(),
+		"asset_cap":                    a.assets.global.Cap(),
+		"asset_in_flight":              a.assets.global.Len(),
+		"asset_users":                  a.assets.users.count.Load(),
+		"asset_served_total":           stats.assetServed.Load(),
+		"asset_denied_total":           stats.assetDenied.Load(),
+		"asset_user_throttled_total":   stats.assetUserThrottled.Load(),
+		"asset_global_throttled_total": stats.assetGlobalThrottled.Load(),
+		"abuse_enabled":                a.abuse != nil,
+		"abuse_tracked":                a.abuse.tracked(),
+		"abuse_strikes_total":          stats.abuseStrikes.Load(),
+		"abuse_bans_total":             stats.abuseBans.Load(),
+		"abuse_rejected_total":         stats.abuseRejected.Load(),
+		"abuse_dropped_total":          stats.abuseDropped.Load(),
+		"active_bans":                  len(a.abuse.bans(time.Now())),
+		"occupants_tracked":            p.occupants.count(),
+		"occupants_dropped":            p.occupants.dropped.Load(),
+		"kicked_active":                p.kicked.count(),
+		"rate":                         rate,
+		"surge":                        surge,
+		"skip_url":                     wr.SkipURL(),
+	})
+}
+
+// ─── API: queue ──────────────────────────────────────────────────────────────
+
+func (p *portal) apiQueue(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"occupants":        p.occupants.list(time.Now()),
+		"tracked":          p.occupants.count(),
+		"dropped":          p.occupants.dropped.Load(),
+		"kicked":           p.kicked.count(),
+		"live_queue_depth": p.a.room.LiveQueueDepth(),
+	})
+}
+
+type occupantAction struct {
+	ID  string `json:"id"`
+	Ban bool   `json:"ban"`
+}
+
+func (p *portal) apiPromote(c *gin.Context) {
+	var body occupantAction
+	if err := c.ShouldBindJSON(&body); err != nil || body.ID == "" {
+		jsonError(c, http.StatusBadRequest, "id is required")
+		return
+	}
+	occ, ok := p.occupants.find(body.ID)
+	if !ok {
+		jsonError(c, http.StatusNotFound, "that visitor is no longer in line")
+		return
+	}
+	if _, err := p.a.room.PromoteTokenToFront(occ.token); err != nil {
+		jsonError(c, http.StatusConflict, "room refused the promotion: "+err.Error())
+		return
+	}
+	p.occupants.setPosition(occ.token, 1)
+	log.Printf("portal: %s moved %s (%s) to the front", portalActor(c), occ.id, occ.ip)
+	c.JSON(http.StatusOK, gin.H{"promoted": occ.id})
+}
+
+func (p *portal) apiKick(c *gin.Context) {
+	var body occupantAction
+	if err := c.ShouldBindJSON(&body); err != nil || body.ID == "" {
+		jsonError(c, http.StatusBadRequest, "id is required")
+		return
+	}
+	occ, ok := p.occupants.find(body.ID)
+	if !ok {
+		jsonError(c, http.StatusNotFound, "that visitor is no longer in line")
+		return
+	}
+
+	now := time.Now()
+	var banFor time.Duration
+	if body.Ban {
+		if p.a.abuse == nil {
+			jsonError(c, http.StatusConflict, errAbuseDisabled.Error())
+			return
+		}
+		left, banned := p.a.abuse.banNow(occ.ip, now)
+		if !banned {
+			jsonError(c, http.StatusConflict, errClientExempt.Error())
+			return
+		}
+		banFor = left
+	}
+
+	p.kicked.add(occ.token, now.Add(p.a.room.TokenTTL()+time.Minute))
+	p.occupants.remove(occ.token)
+	log.Printf("portal: %s removed %s (%s) from the line, ban=%v", portalActor(c), occ.id, occ.ip, body.Ban)
+	c.JSON(http.StatusOK, gin.H{
+		"kicked":      occ.id,
+		"banned":      body.Ban,
+		"ban_seconds": int(banFor / time.Second),
+	})
+}
+
+// ─── API: bans ───────────────────────────────────────────────────────────────
+
+func (p *portal) apiBans(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"enabled": p.a.abuse != nil,
+		"tracked": p.a.abuse.tracked(),
+		"bans":    p.a.abuse.bans(time.Now()),
+	})
+}
+
+// apiBanSave creates a ban or replaces the remaining time of an existing one.
+func (p *portal) apiBanSave(c *gin.Context) {
+	var body struct {
+		Client   string `json:"client"`
+		Duration string `json:"duration"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		jsonError(c, http.StatusBadRequest, "client and duration are required")
+		return
+	}
+	ip, err := parseClient(strings.TrimSpace(body.Client))
+	if err != nil {
+		jsonError(c, http.StatusBadRequest, "client must be an IP address or an IPv6 /64 prefix")
+		return
+	}
+	d, err := time.ParseDuration(strings.TrimSpace(body.Duration))
+	if err != nil || d < time.Minute || d > 365*24*time.Hour {
+		jsonError(c, http.StatusBadRequest, "duration must be between 1m and 8760h, for example 30m or 24h")
+		return
+	}
+	key, err := p.a.abuse.banFor(ip, d, time.Now())
+	switch {
+	case errors.Is(err, errAbuseDisabled), errors.Is(err, errClientExempt), errors.Is(err, errRegistryFull):
+		jsonError(c, http.StatusConflict, err.Error())
+		return
+	case err != nil:
+		jsonError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	log.Printf("portal: %s banned %s for %s", portalActor(c), displayKey(key), d)
+	c.JSON(http.StatusOK, gin.H{"client": displayKey(key), "until": time.Now().Add(d).UTC()})
+}
+
+func (p *portal) apiUnban(c *gin.Context) {
+	if p.a.abuse == nil {
+		jsonError(c, http.StatusConflict, errAbuseDisabled.Error())
+		return
+	}
+	ip, err := parseClient(strings.TrimSpace(c.Query("client")))
+	if err != nil {
+		jsonError(c, http.StatusBadRequest, "client must be an IP address or an IPv6 /64 prefix")
+		return
+	}
+	key, _ := abuseKey(ip)
+	if !p.a.abuse.unban(ip) {
+		jsonError(c, http.StatusNotFound, "that client is not tracked")
+		return
+	}
+	log.Printf("portal: %s unbanned %s", portalActor(c), displayKey(key))
+	c.JSON(http.StatusOK, gin.H{"unbanned": displayKey(key)})
+}
+
+// banFor sets ip's ban to end d from now. A new ban counts as an offense
+// for future escalation; changing an active ban does not.
+func (r *abuseRegistry) banFor(ip netip.Addr, d time.Duration, now time.Time) (netip.Addr, error) {
+	if r == nil {
+		return netip.Addr{}, errAbuseDisabled
+	}
+	if !ip.IsValid() {
+		return netip.Addr{}, errors.New("invalid address")
+	}
+	k, ok := r.trackable(ip)
+	if !ok {
+		return netip.Addr{}, errClientExempt
+	}
+	n := now.UnixNano()
+	sh := r.shard(k)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+
+	e := r.entryLocked(sh, k, n)
+	if e == nil {
+		return netip.Addr{}, errRegistryFull
+	}
+	if e.bannedUntil <= n {
+		e.offenses++
+		r.stats.abuseBans.Add(1)
+	}
+	e.bannedUntil = n + int64(d)
+	e.strikes = 0
+	e.windowStart = n
+	return k, nil
+}
+
+// ─── API: settings ───────────────────────────────────────────────────────────
+
+func (p *portal) settingsView() gin.H {
+	a, wr := p.a, p.a.room
+	rate, surge := p.pricing()
+	return gin.H{
+		"cap":           wr.Cap(),
+		"max_queue":     wr.MaxQueueDepth(),
+		"rate":          rate,
+		"surge":         surge,
+		"skip_url":      wr.SkipURL(),
+		"pass_duration": wr.PassDuration().String(),
+		"token_ttl":     wr.TokenTTL().String(),
+		"readonly": gin.H{
+			"Upstream":              a.cfg.upstream,
+			"Asset cap":             strconv.Itoa(a.assets.global.Cap()),
+			"Per-user assets":       fmt.Sprintf("%d HTTP/1.1 · %d HTTP/2", a.cfg.assetUserCapH1, a.cfg.assetUserCapH2),
+			"Admission pass TTL":    a.cfg.admitTTL.String(),
+			"Abuse registry":        fmt.Sprintf("%v · %d strikes / %s · cooldown %s → %s", a.abuse != nil, a.cfg.abuseStrikes, a.cfg.abuseWindow, a.cfg.abuseCooldown, a.cfg.abuseMaxCooldown),
+			"Trusted proxies":       orNone(a.cfg.trustedProxies),
+			"Abuse allowlist":       orNone(a.cfg.abuseAllow),
+			"Bypass paths":          orNone(a.cfg.bypass),
+			"Asset paths":           orNone(a.cfg.assets),
+			"Public asset paths":    orNone(a.cfg.assetPublic),
+			"Ban paths":             orNone(a.cfg.banPaths),
+			"Portal allowlist":      p.cfg.allowSpec,
+			"Portal session length": p.cfg.sessionTTL.String(),
+		},
+	}
+}
+
+func orNone(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "none"
+	}
+	return s
+}
+
+func (p *portal) apiSettings(c *gin.Context) {
+	c.JSON(http.StatusOK, p.settingsView())
+}
+
+type settingsUpdate struct {
+	Cap          *int32   `json:"cap"`
+	MaxQueue     *int64   `json:"max_queue"`
+	Rate         *float64 `json:"rate"`
+	Surge        *float64 `json:"surge"`
+	SkipURL      *string  `json:"skip_url"`
+	PassDuration *string  `json:"pass_duration"`
+	TokenTTL     *string  `json:"token_ttl"`
+}
+
+// apiSettingsSave validates every field before applying any of them, so a
+// bad value never leaves the room half-updated. Changes last until restart.
+func (p *portal) apiSettingsSave(c *gin.Context) {
+	var u settingsUpdate
+	if err := c.ShouldBindJSON(&u); err != nil {
+		jsonError(c, http.StatusBadRequest, "invalid settings: "+err.Error())
+		return
+	}
+
+	var passD, ttlD time.Duration
+	var problems []string
+	if u.Cap != nil && *u.Cap < 1 {
+		problems = append(problems, "cap must be at least 1")
+	}
+	if u.MaxQueue != nil && *u.MaxQueue < 0 {
+		problems = append(problems, "max queue must be 0 (unlimited) or more")
+	}
+	for name, v := range map[string]*float64{"rate": u.Rate, "surge": u.Surge} {
+		if v != nil && (math.IsNaN(*v) || math.IsInf(*v, 0) || *v < 0 || *v > 1e6) {
+			problems = append(problems, name+" must be between 0 and 1000000")
+		}
+	}
+	if u.SkipURL != nil {
+		s := strings.TrimSpace(*u.SkipURL)
+		*u.SkipURL = s
+		valid := s == "" || strings.HasPrefix(s, "/") || strings.HasPrefix(s, "https://") || strings.HasPrefix(s, "http://")
+		if !valid || len(s) > 2048 || strings.ContainsAny(s, " \t\r\n\"<>") {
+			problems = append(problems, "skip URL must be empty, a path starting with /, or an http(s) URL")
+		}
+	}
+	if u.PassDuration != nil {
+		d, err := time.ParseDuration(strings.TrimSpace(*u.PassDuration))
+		if err != nil || (d != 0 && (d < time.Minute || d > 24*time.Hour)) {
+			problems = append(problems, "VIP pass duration must be 0s or between 1m and 24h")
+		}
+		passD = d
+	}
+	if u.TokenTTL != nil {
+		d, err := time.ParseDuration(strings.TrimSpace(*u.TokenTTL))
+		if err != nil || d < 30*time.Second || d > 24*time.Hour {
+			problems = append(problems, "ticket TTL must be between 30s and 24h")
+		}
+		ttlD = d
+	}
+	if len(problems) > 0 {
+		jsonError(c, http.StatusBadRequest, strings.Join(problems, "; "))
+		return
+	}
+
+	wr := p.a.room
+	apply := []struct {
+		set bool
+		fn  func() error
+	}{
+		{u.Cap != nil, func() error { return wr.SetCap(*u.Cap) }},
+		{u.MaxQueue != nil, func() error { return wr.SetMaxQueueDepth(*u.MaxQueue) }},
+		{u.PassDuration != nil, func() error { return wr.SetPassDuration(passD) }},
+		{u.TokenTTL != nil, func() error { return wr.SetTokenTTL(ttlD) }},
+	}
+	for _, step := range apply {
+		if step.set {
+			if err := step.fn(); err != nil {
+				jsonError(c, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
+	}
+	if u.Rate != nil || u.Surge != nil {
+		rate, surge := p.pricing()
+		if u.Rate != nil {
+			rate = *u.Rate
+		}
+		if u.Surge != nil {
+			surge = *u.Surge
+		}
+		p.setPricing(rate, surge)
+	}
+	if u.SkipURL != nil {
+		wr.SetSkipURL(*u.SkipURL)
+	}
+
+	log.Printf("portal: %s updated settings", portalActor(c))
+	c.JSON(http.StatusOK, p.settingsView())
+}
+
+// ─── queue tracking on the main listener ─────────────────────────────────────
+
+// wrap observes gated traffic on the main listener to maintain the portal's
+// view of the line, and enforces kicks. Asset, bypass and ops paths are
+// passed straight through: room never issues tickets there.
+func (p *portal) wrap(next http.Handler) http.Handler {
+	if p == nil {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqPath := r.URL.Path
+		for _, rule := range p.untracked {
+			if rule.matches(reqPath) {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+
+		now := time.Now()
+		var token string
+		if ck, err := r.Cookie("room_ticket"); err == nil {
+			token = ck.Value
+		}
+		isStatus := reqPath == "/queue/status"
+		if token != "" && p.kicked.has(token, now) {
+			p.rejectKicked(w, r, isStatus)
+			return
+		}
+
+		tw := &trackWriter{ResponseWriter: w, capture: isStatus && token != ""}
+		next.ServeHTTP(tw, r)
+		tw.inspect()
+
+		ip := clientIP(r, p.a.cfg.trusted)
+		switch {
+		case tw.issued != "":
+			p.occupants.join(tw.issued, ip, r.UserAgent(), reqPath, now)
+		case token != "":
+			p.occupants.touch(token, ip, now)
+		}
+		if tw.capture && tw.status == http.StatusOK {
+			p.occupants.observe(token, tw.body.Bytes(), now)
+		}
+	})
+}
+
+// rejectKicked answers a removed visitor. Status polls get ready=true so the
+// waiting room page reloads; the reload gets the removal notice and the
+// ticket cookie is cleared, so returning means rejoining at the back.
+func (p *portal) rejectKicked(w http.ResponseWriter, r *http.Request, isStatus bool) {
+	h := w.Header()
+	h.Set("Cache-Control", "no-store")
+	if isStatus {
+		h.Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ready":true}`))
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: "room_ticket", Value: "", Path: p.a.cfg.cookiePath, Domain: p.a.cfg.cookieDomain,
+		MaxAge: -1, Secure: p.a.cfg.secureCookie, HttpOnly: true, SameSite: http.SameSiteLaxMode,
+	})
+	if wantsHTML(r) {
+		h.Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(kickedPage))
+		return
+	}
+	h.Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusForbidden)
+	_, _ = w.Write([]byte(`{"error":"removed from the queue","removed":true}`))
+}
+
+const kickedPage = `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Removed from the line</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:32rem;margin:15vh auto;padding:0 1rem;text-align:center">
+<h1>You were removed from the line</h1>
+<p>An administrator removed your place in the queue. You can rejoin at the back.</p>
+<p><a href="/">Rejoin the line</a></p></body></html>`
+
+// trackWriter notes the room_ticket a response issues and, for status polls,
+// captures the small JSON body. It forwards Flush and Hijack because gin
+// type-asserts the writer it wraps, and streaming and upgrades must survive.
+// Client disconnects are observed through the request context, so the
+// deprecated http.CloseNotifier is intentionally not implemented.
+type trackWriter struct {
+	http.ResponseWriter
+	capture   bool
+	body      bytes.Buffer
+	status    int
+	inspected bool
+	issued    string
+}
+
+func (w *trackWriter) inspect() {
+	if w.inspected {
+		return
+	}
+	w.inspected = true
+	for _, v := range w.Header().Values("Set-Cookie") {
+		if !strings.HasPrefix(v, "room_ticket=") {
+			continue
+		}
+		val := strings.TrimPrefix(v, "room_ticket=")
+		if i := strings.IndexByte(val, ';'); i >= 0 {
+			val = val[:i]
+		}
+		if val != "" {
+			w.issued = val
+		}
+	}
+}
+
+func (w *trackWriter) WriteHeader(code int) {
+	w.inspect()
+	if w.status == 0 && code >= 200 {
+		w.status = code
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *trackWriter) Write(b []byte) (int, error) {
+	if w.status == 0 {
+		w.inspect()
+		w.status = http.StatusOK
+	}
+	if w.capture && w.body.Len()+len(b) <= statusCaptureLimit {
+		w.body.Write(b)
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+func (w *trackWriter) Flush() {
+	w.inspect()
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (w *trackWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	w.inspect()
+	if h, ok := w.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, http.ErrNotSupported
+}
+
+func (w *trackWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// ─── occupant store ──────────────────────────────────────────────────────────
+
+type occupant struct {
+	id       string
+	token    string
+	ip       netip.Addr
+	ua       string
+	path     string
+	joined   time.Time
+	lastSeen time.Time
+	position int64 // 0 until the first status poll
+	ready    bool
+	hasPass  bool
+}
+
+type occupantView struct {
+	ID          string    `json:"id"`
+	Client      string    `json:"client"`
+	UserAgent   string    `json:"user_agent"`
+	Path        string    `json:"path"`
+	Joined      time.Time `json:"joined"`
+	LastSeen    time.Time `json:"last_seen"`
+	IdleSeconds int       `json:"idle_seconds"`
+	Position    int64     `json:"position"`
+	Ready       bool      `json:"ready"`
+	HasPass     bool      `json:"has_pass"`
+}
+
+// occupantStore is the portal's view of the line. Raw tickets never leave
+// it; the UI addresses visitors by an opaque ID derived from the ticket.
+type occupantStore struct {
+	mu      sync.Mutex
+	byToken map[string]*occupant
+	byID    map[string]*occupant
+	max     int
+	dropped atomic.Int64
+}
+
+func newOccupantStore(max int) *occupantStore {
+	return &occupantStore{byToken: map[string]*occupant{}, byID: map[string]*occupant{}, max: max}
+}
+
+func occupantID(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:8])
+}
+
+func clip(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
+}
+
+func (s *occupantStore) join(token string, ip netip.Addr, ua, reqPath string, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if o := s.byToken[token]; o != nil {
+		o.lastSeen, o.ip = now, ip
+		return
+	}
+	if len(s.byToken) >= s.max {
+		s.dropped.Add(1)
+		return
+	}
+	o := &occupant{
+		id: occupantID(token), token: token, ip: ip,
+		ua: clip(ua, 256), path: clip(reqPath, 256),
+		joined: now, lastSeen: now,
+	}
+	s.byToken[token] = o
+	s.byID[o.id] = o
+}
+
+func (s *occupantStore) touch(token string, ip netip.Addr, now time.Time) {
+	s.mu.Lock()
+	if o := s.byToken[token]; o != nil {
+		o.lastSeen, o.ip = now, ip
+	}
+	s.mu.Unlock()
+}
+
+// observe records what room told the visitor in its status reply.
+func (s *occupantStore) observe(token string, body []byte, now time.Time) {
+	var st struct {
+		Ready    bool  `json:"ready"`
+		Position int64 `json:"position"`
+		HasPass  bool  `json:"has_pass"`
+	}
+	if json.Unmarshal(body, &st) != nil {
+		return
+	}
+	s.mu.Lock()
+	if o := s.byToken[token]; o != nil {
+		o.lastSeen, o.ready, o.hasPass = now, st.Ready, st.HasPass
+		if st.Position > 0 {
+			o.position = st.Position
+		}
+	}
+	s.mu.Unlock()
+}
+
+func (s *occupantStore) setPosition(token string, pos int64) {
+	s.mu.Lock()
+	if o := s.byToken[token]; o != nil {
+		o.position = pos
+	}
+	s.mu.Unlock()
+}
+
+func (s *occupantStore) find(id string) (occupant, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if o := s.byID[id]; o != nil {
+		return *o, true
+	}
+	return occupant{}, false
+}
+
+func (s *occupantStore) remove(token string) {
+	s.mu.Lock()
+	if o := s.byToken[token]; o != nil {
+		delete(s.byToken, token)
+		delete(s.byID, o.id)
+	}
+	s.mu.Unlock()
+}
+
+func (s *occupantStore) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.byToken)
+}
+
+// list returns visitors in line order; unknown positions sort last by arrival.
+func (s *occupantStore) list(now time.Time) []occupantView {
+	s.mu.Lock()
+	out := make([]occupantView, 0, len(s.byToken))
+	for _, o := range s.byToken {
+		out = append(out, occupantView{
+			ID: o.id, Client: o.ip.String(), UserAgent: o.ua, Path: o.path,
+			Joined: o.joined.UTC(), LastSeen: o.lastSeen.UTC(),
+			IdleSeconds: int(now.Sub(o.lastSeen) / time.Second),
+			Position:    o.position, Ready: o.ready, HasPass: o.hasPass,
+		})
+	}
+	s.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool {
+		pi, pj := out[i].Position, out[j].Position
+		switch {
+		case pi > 0 && pj > 0 && pi != pj:
+			return pi < pj
+		case (pi > 0) != (pj > 0):
+			return pi > 0
+		}
+		return out[i].Joined.Before(out[j].Joined)
+	})
+	return out
+}
+
+// sweep forgets visitors room itself would have reaped, and admitted
+// visitors shortly after their last poll.
+func (s *occupantStore) sweep(now time.Time, idle, readyIdle time.Duration) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for token, o := range s.byToken {
+		since := now.Sub(o.lastSeen)
+		if since > idle || (o.ready && since > readyIdle) {
+			delete(s.byToken, token)
+			delete(s.byID, o.id)
+			n++
+		}
+	}
+	return n
+}
+
+// ─── kick list ───────────────────────────────────────────────────────────────
+
+type kickList struct {
+	mu sync.Mutex
+	m  map[string]time.Time
+}
+
+func (k *kickList) add(token string, until time.Time) {
+	k.mu.Lock()
+	k.m[token] = until
+	k.mu.Unlock()
+}
+
+func (k *kickList) has(token string, now time.Time) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	until, ok := k.m[token]
+	if ok && !now.Before(until) {
+		delete(k.m, token)
+		return false
+	}
+	return ok
+}
+
+func (k *kickList) count() int {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return len(k.m)
+}
+
+func (k *kickList) sweep(now time.Time) {
+	k.mu.Lock()
+	for t, until := range k.m {
+		if !now.Before(until) {
+			delete(k.m, t)
+		}
+	}
+	k.mu.Unlock()
+}
+
+// ─── sign-in limiter ─────────────────────────────────────────────────────────
+
+type loginState struct {
+	fails       int
+	first       time.Time
+	lockedUntil time.Time
+}
+
+type loginLimiter struct {
+	mu sync.Mutex
+	m  map[netip.Addr]*loginState
+}
+
+func (l *loginLimiter) locked(ip netip.Addr, now time.Time) (time.Duration, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if s := l.m[ip]; s != nil && now.Before(s.lockedUntil) {
+		return s.lockedUntil.Sub(now), true
+	}
+	return 0, false
+}
+
+func (l *loginLimiter) fail(ip netip.Addr, now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	s := l.m[ip]
+	if s == nil || now.Sub(s.first) > loginWindow {
+		s = &loginState{first: now}
+		l.m[ip] = s
+	}
+	s.fails++
+	if s.fails >= loginMaxFailures {
+		s.lockedUntil = now.Add(loginLockout)
+		s.fails = 0
+		s.first = now
+	}
+}
+
+func (l *loginLimiter) reset(ip netip.Addr) {
+	l.mu.Lock()
+	delete(l.m, ip)
+	l.mu.Unlock()
+}
+
+func (l *loginLimiter) sweep(now time.Time) {
+	l.mu.Lock()
+	for ip, s := range l.m {
+		if now.After(s.lockedUntil) && now.Sub(s.first) > loginWindow {
+			delete(l.m, ip)
+		}
+	}
+	l.mu.Unlock()
+}
