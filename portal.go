@@ -558,6 +558,7 @@ func (p *portal) apiOverview(c *gin.Context) {
 		"asset_global_throttled_total": stats.assetGlobalThrottled.Load(),
 		"abuse_enabled":                a.abuse != nil,
 		"abuse_tracked":                a.abuse.tracked(),
+		"abuse_range_bans":             a.abuse.rangeCount(),
 		"abuse_strikes_total":          stats.abuseStrikes.Load(),
 		"abuse_bans_total":             stats.abuseBans.Load(),
 		"abuse_rejected_total":         stats.abuseRejected.Load(),
@@ -652,11 +653,14 @@ func (p *portal) apiBans(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"enabled": p.a.abuse != nil,
 		"tracked": p.a.abuse.tracked(),
+		"ranges":  p.a.abuse.rangeCount(),
 		"bans":    p.a.abuse.bans(time.Now()),
 	})
 }
 
 // apiBanSave creates a ban or replaces the remaining time of an existing one.
+// The client may be a single address (IPv6 is banned by its /64) or a CIDR
+// range such as 203.0.0.0/16.
 func (p *portal) apiBanSave(c *gin.Context) {
 	var body struct {
 		Client   string `json:"client"`
@@ -666,9 +670,9 @@ func (p *portal) apiBanSave(c *gin.Context) {
 		jsonError(c, http.StatusBadRequest, "client and duration are required")
 		return
 	}
-	ip, err := parseClient(strings.TrimSpace(body.Client))
+	target, err := parseBanTarget(body.Client)
 	if err != nil {
-		jsonError(c, http.StatusBadRequest, "client must be an IP address or an IPv6 /64 prefix")
+		jsonError(c, http.StatusBadRequest, err.Error())
 		return
 	}
 	d, err := time.ParseDuration(strings.TrimSpace(body.Duration))
@@ -676,17 +680,35 @@ func (p *portal) apiBanSave(c *gin.Context) {
 		jsonError(c, http.StatusBadRequest, "duration must be between 1m and 8760h, for example 30m or 24h")
 		return
 	}
-	key, err := p.a.abuse.banFor(ip, d, time.Now())
-	switch {
-	case errors.Is(err, errAbuseDisabled), errors.Is(err, errClientExempt), errors.Is(err, errRegistryFull):
-		jsonError(c, http.StatusConflict, err.Error())
-		return
-	case err != nil:
-		jsonError(c, http.StatusBadRequest, err.Error())
+	now := time.Now()
+
+	if target.single {
+		key, err := p.a.abuse.banFor(target.prefix.Addr(), d, now)
+		switch {
+		case errors.Is(err, errAbuseDisabled), errors.Is(err, errClientExempt), errors.Is(err, errRegistryFull):
+			jsonError(c, http.StatusConflict, err.Error())
+			return
+		case err != nil:
+			jsonError(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		log.Printf("portal: %s banned %s for %s", portalActor(c), displayKey(key), d)
+		c.JSON(http.StatusOK, gin.H{"client": displayKey(key), "until": now.Add(d).UTC(), "range": false})
 		return
 	}
-	log.Printf("portal: %s banned %s for %s", portalActor(c), displayKey(key), d)
-	c.JSON(http.StatusOK, gin.H{"client": displayKey(key), "until": time.Now().Add(d).UTC()})
+
+	if err := p.a.abuse.banRange(target.prefix, d, now); err != nil {
+		jsonError(c, http.StatusConflict, err.Error())
+		return
+	}
+	exempt := p.a.abuse.exemptWithin(target.prefix)
+	log.Printf("portal: %s banned range %s for %s (exempt within: %v)", portalActor(c), target.prefix, d, exempt)
+	c.JSON(http.StatusOK, gin.H{
+		"client":        target.prefix.String(),
+		"until":         now.Add(d).UTC(),
+		"range":         true,
+		"exempt_within": exempt,
+	})
 }
 
 func (p *portal) apiUnban(c *gin.Context) {
@@ -694,18 +716,17 @@ func (p *portal) apiUnban(c *gin.Context) {
 		jsonError(c, http.StatusConflict, errAbuseDisabled.Error())
 		return
 	}
-	ip, err := parseClient(strings.TrimSpace(c.Query("client")))
+	target, err := parseBanTarget(c.Query("client"))
 	if err != nil {
-		jsonError(c, http.StatusBadRequest, "client must be an IP address or an IPv6 /64 prefix")
+		jsonError(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	key, _ := abuseKey(ip)
-	if !p.a.abuse.unban(ip) {
+	if !p.a.abuse.unbanTarget(target) {
 		jsonError(c, http.StatusNotFound, "that client is not tracked")
 		return
 	}
-	log.Printf("portal: %s unbanned %s", portalActor(c), displayKey(key))
-	c.JSON(http.StatusOK, gin.H{"unbanned": displayKey(key)})
+	log.Printf("portal: %s unbanned %s", portalActor(c), target)
+	c.JSON(http.StatusOK, gin.H{"unbanned": target.String()})
 }
 
 // banFor sets ip's ban to end d from now. A new ban counts as an offense
@@ -1295,4 +1316,10 @@ func (l *loginLimiter) sweep(now time.Time) {
 		}
 	}
 	l.mu.Unlock()
+}
+
+func (l *loginLimiter) count() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.m)
 }

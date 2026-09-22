@@ -872,6 +872,7 @@ func displayKey(k netip.Addr) string {
 // abuseRegistry tracks weighted strikes per client and bans clients whose
 // strikes within a fixed window reach the threshold. Each ban doubles the
 // previous cooldown up to max. History is forgotten after max of good behaviour.
+// Administrator-set CIDR range bans live alongside in ranges (see ranges.go).
 type abuseRegistry struct {
 	shards     [abuseShards]abuseShard
 	threshold  int
@@ -882,6 +883,7 @@ type abuseRegistry struct {
 	exempt     []netip.Prefix // -abuse-allow plus -trusted-proxies
 	count      atomic.Int64
 	stats      *counters
+	ranges     rangeSet // CIDR range bans; see ranges.go
 }
 
 type abuseShard struct {
@@ -901,6 +903,7 @@ type banView struct {
 	Until            time.Time `json:"until"`
 	RemainingSeconds int       `json:"remaining_seconds"`
 	Offenses         int       `json:"offenses"`
+	Range            bool      `json:"range"`
 }
 
 func newAbuseRegistry(cfg config, stats *counters) *abuseRegistry {
@@ -920,6 +923,7 @@ func newAbuseRegistry(cfg config, stats *counters) *abuseRegistry {
 	for i := range r.shards {
 		r.shards[i].m = make(map[netip.Addr]*abuseEntry)
 	}
+	r.ranges.m = make(map[netip.Prefix]*rangeBan)
 	return r
 }
 
@@ -990,7 +994,8 @@ func (r *abuseRegistry) banLocked(e *abuseEntry, now int64) time.Duration {
 	return d
 }
 
-// banned reports whether ip is banned and for how much longer.
+// banned reports whether ip is banned, individually or by a range, and for
+// how much longer.
 func (r *abuseRegistry) banned(ip netip.Addr, now time.Time) (time.Duration, bool) {
 	if r == nil {
 		return 0, false
@@ -999,6 +1004,8 @@ func (r *abuseRegistry) banned(ip netip.Addr, now time.Time) (time.Duration, boo
 	if !ok {
 		return 0, false
 	}
+	n := now.UnixNano()
+
 	sh := r.shard(k)
 	sh.mu.Lock()
 	var until int64
@@ -1007,10 +1014,10 @@ func (r *abuseRegistry) banned(ip netip.Addr, now time.Time) (time.Duration, boo
 	}
 	sh.mu.Unlock()
 
-	if left := until - now.UnixNano(); left > 0 {
+	if left := until - n; left > 0 {
 		return time.Duration(left), true
 	}
-	return 0, false
+	return r.rangeBanned(ip, n)
 }
 
 // strike adds weight to ip's strikes and reports whether ip is now banned.
@@ -1094,7 +1101,7 @@ func (r *abuseRegistry) unban(ip netip.Addr) bool {
 	return true
 }
 
-// bans lists currently banned clients, longest remaining first.
+// bans lists currently banned clients and ranges, longest remaining first.
 func (r *abuseRegistry) bans(now time.Time) []banView {
 	out := []banView{}
 	if r == nil {
@@ -1116,6 +1123,7 @@ func (r *abuseRegistry) bans(now time.Time) []banView {
 		}
 		sh.mu.Unlock()
 	}
+	out = append(out, r.rangeViews(n)...)
 	sort.Slice(out, func(i, j int) bool { return out[i].Until.After(out[j].Until) })
 	return out
 }
@@ -1160,6 +1168,7 @@ func (r *abuseRegistry) janitor(every time.Duration, stop <-chan struct{}) {
 			return
 		case now := <-t.C:
 			r.sweep(now)
+			r.sweepRanges(now)
 		}
 	}
 }
@@ -1274,6 +1283,7 @@ func registerOps(r *gin.Engine, a *app) {
 			"asset_global_throttled_total": stats.assetGlobalThrottled.Load(),
 			"abuse_enabled":                a.abuse != nil,
 			"abuse_tracked":                a.abuse.tracked(),
+			"abuse_range_bans":             a.abuse.rangeCount(),
 			"abuse_strikes_total":          stats.abuseStrikes.Load(),
 			"abuse_bans_total":             stats.abuseBans.Load(),
 			"abuse_rejected_total":         stats.abuseRejected.Load(),
@@ -1312,11 +1322,13 @@ func registerOps(r *gin.Engine, a *app) {
 		}
 		c.JSON(http.StatusOK, gin.H{
 			"tracked": a.abuse.tracked(),
+			"ranges":  a.abuse.rangeCount(),
 			"bans":    a.abuse.bans(time.Now()),
 		})
 	})
 
-	// DELETE /_room/abuse?client=203.0.113.9 or ?client=2001:db8::/64
+	// DELETE /_room/abuse?client=203.0.113.9, ?client=2001:db8::/64,
+	// or a range such as ?client=203.0.0.0/16
 	r.DELETE("/_room/abuse", func(c *gin.Context) {
 		if !a.requireAdmin(c) {
 			return
@@ -1325,29 +1337,17 @@ func registerOps(r *gin.Engine, a *app) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "abuse registry disabled"})
 			return
 		}
-		ip, err := parseClient(c.Query("client"))
+		t, err := parseBanTarget(c.Query("client"))
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "client must be an IP address or IPv6 /64 prefix"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		key, _ := abuseKey(ip)
-		if !a.abuse.unban(ip) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "client not tracked", "client": displayKey(key)})
+		if !a.abuse.unbanTarget(t) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "client not tracked", "client": t.String()})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"unbanned": displayKey(key)})
+		c.JSON(http.StatusOK, gin.H{"unbanned": t.String()})
 	})
-}
-
-func parseClient(s string) (netip.Addr, error) {
-	if strings.Contains(s, "/") {
-		p, err := netip.ParsePrefix(s)
-		if err != nil {
-			return netip.Addr{}, err
-		}
-		return p.Addr(), nil
-	}
-	return netip.ParseAddr(s)
 }
 
 // ─── admission pass ──────────────────────────────────────────────────────────

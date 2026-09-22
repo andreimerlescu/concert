@@ -125,6 +125,7 @@
               <dt class="col-8">Bans issued</dt><dd class="col-4 text-end" data-stat="abuse_bans_total">–</dd>
               <dt class="col-8">Requests blocked</dt><dd class="col-4 text-end" data-stat="abuse_rejected_total">–</dd>
               <dt class="col-8">Clients tracked</dt><dd class="col-4 text-end" data-stat="abuse_tracked">–</dd>
+              <dt class="col-8">Range bans</dt><dd class="col-4 text-end" data-stat="abuse_range_bans">–</dd>
               <dt class="col-8">Dropped (table full)</dt><dd class="col-4 text-end" data-stat="abuse_dropped_total">–</dd>
             </dl>
           </div></div>
@@ -173,7 +174,7 @@
         <i class="bi bi-info-circle"></i> The abuse registry is disabled (<code>-abuse=false</code>), so bans are unavailable.
       </div>
       <div class="d-flex align-items-center gap-2 mb-3">
-        <button type="button" class="btn btn-sm btn-danger" id="ban-new"><i class="bi bi-plus-circle"></i> Ban a client</button>
+        <button type="button" class="btn btn-sm btn-danger" id="ban-new"><i class="bi bi-plus-circle"></i> Ban a client or range</button>
         <button type="button" class="btn btn-sm btn-outline-secondary ms-auto" id="bans-refresh"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
       </div>
       <div class="card stat-card">
@@ -270,9 +271,13 @@
       </div>
       <div class="modal-body">
         <div class="mb-3">
-          <label for="ban-client" class="form-label">Client</label>
-          <input type="text" class="form-control font-monospace" id="ban-client" required placeholder="203.0.113.9 or 2001:db8::/64">
-          <div class="form-text">IPv6 clients are banned by their /64.</div>
+          <label for="ban-client" class="form-label">Client or range</label>
+          <input type="text" class="form-control font-monospace" id="ban-client" required placeholder="203.0.113.9 · 203.0.0.0/16 · 2001:db8::/48">
+          <div class="form-text">
+            An address or a CIDR range. IPv6 addresses are banned by their /64.
+            Ranges may be as broad as /8 for IPv4 and /16 for IPv6.
+            Addresses in the abuse allowlist and trusted proxies stay reachable inside a banned range.
+          </div>
         </div>
         <label for="ban-duration" class="form-label">Duration</label>
         <input type="text" class="form-control" id="ban-duration" required value="1h" placeholder="30m, 1h, 24h">
