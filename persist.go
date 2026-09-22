@@ -99,7 +99,7 @@ func (r *abuseRegistry) snapshot(now time.Time) banSnapshot {
 // exempt, and history too old to matter, are skipped.
 func (r *abuseRegistry) restore(s banSnapshot, now time.Time) int {
 	n := now.UnixNano()
-	maxNS := int64(r.max)
+	maxNS := int64(r.p().max)
 	restored := 0
 
 	for _, sb := range s.Clients {

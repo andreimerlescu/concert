@@ -109,11 +109,12 @@ func TestParseConfig_FileBeatsFlagBeatsEnvBeatsDefault(t *testing.T) {
 
 func TestParseConfig_BadSettingsFile(t *testing.T) {
 	cases := map[string]string{
-		"not json":     `{`,
-		"wrong type":   `{"version":1,"settings":{"cap":"lots"}}`,
-		"failed check": `{"version":1,"settings":{"rate":-1}}`,
-		"bad duration": `{"version":1,"settings":{"reaper":"soon"}}`,
-		"invalid cfg":  `{"version":1,"settings":{"upstream":"ftp://x"}}`,
+		"not json":        `{`,
+		"wrong type":      `{"version":1,"settings":{"cap":"lots"}}`,
+		"failed check":    `{"version":1,"settings":{"rate":-1}}`,
+		"bad duration":    `{"version":1,"settings":{"reaper":"soon"}}`,
+		"reaper too fast": `{"version":1,"settings":{"reaper":"1s"}}`,
+		"invalid cfg":     `{"version":1,"settings":{"upstream":"ftp://x"}}`,
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -125,6 +126,16 @@ func TestParseConfig_BadSettingsFile(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("restart-only key is ignored", func(t *testing.T) {
+		clearConcertEnv(t)
+		dir := t.TempDir()
+		writeSettings(t, dir, `{"version":1,"settings":{"listen":":9999","cap":9}}`)
+		cfg, _, err := parseConfig(newFlagSet(), []string{"-data-dir", dir})
+		if err != nil || cfg.listen != ":8080" || cfg.capacity != 9 {
+			t.Errorf("listen=%s cap=%d err=%v", cfg.listen, cfg.capacity, err)
+		}
+	})
 
 	t.Run("unknown key is ignored", func(t *testing.T) {
 		clearConcertEnv(t)
@@ -139,7 +150,7 @@ func TestParseConfig_BadSettingsFile(t *testing.T) {
 
 // ─── portal changes ──────────────────────────────────────────────────────────
 
-func TestSettings_SaveWritesFileAndReloads(t *testing.T) {
+func TestSettings_SaveAppliesImmediatelyAndReloads(t *testing.T) {
 	dir := t.TempDir()
 	cfg := portalTestConfig("http://127.0.0.1:1")
 	cfg.dataDir = dir
@@ -152,17 +163,19 @@ func TestSettings_SaveWritesFileAndReloads(t *testing.T) {
 		t.Fatalf("save: %d %s", rec.Code, rec.Body.String())
 	}
 	if a.room.Cap() != 9 {
-		t.Errorf("live setting not applied: cap=%d", a.room.Cap())
+		t.Errorf("cap not applied: %d", a.room.Cap())
 	}
-	if a.cfg.abuseStrikes != 20 {
-		t.Errorf("restart setting must not change the running config: %d", a.cfg.abuseStrikes)
+	g := a.current()
+	if g.cfg.abuseStrikes != 7 || a.abuse.p().threshold != 7 || a.abuse.p().window != int64(2*time.Minute) {
+		t.Errorf("abuse tuning not applied: cfg=%d threshold=%d window=%d",
+			g.cfg.abuseStrikes, a.abuse.p().threshold, a.abuse.p().window)
+	}
+	if len(g.banRules) != 1 || g.banRules[0].path != "/.env" {
+		t.Errorf("ban paths not applied: %+v", g.banRules)
 	}
 	v := decodeJSON(t, rec)
-	if s := findSetting(t, v, "abuse_strikes"); s["pending"] != true || s["source"] != sourceFile || s["value"] != float64(7) {
+	if s := findSetting(t, v, "abuse_strikes"); s["source"] != sourceFile || s["value"] != float64(7) {
 		t.Errorf("abuse_strikes view: %v", s)
-	}
-	if s := findSetting(t, v, "cap"); s["pending"] != false || s["live"] != true {
-		t.Errorf("cap view: %v", s)
 	}
 
 	path := filepath.Join(dir, settingsFileName)
@@ -204,8 +217,11 @@ func TestSettings_ResetRestoresBaseline(t *testing.T) {
 	if a.room.Cap() != 10 {
 		t.Errorf("cap should return to its baseline 10, got %d", a.room.Cap())
 	}
+	if a.abuse.p().threshold != 20 {
+		t.Errorf("abuse_strikes should return to its baseline 20, got %d", a.abuse.p().threshold)
+	}
 	v := decodeJSON(t, rec)
-	if s := findSetting(t, v, "abuse_strikes"); s["pending"] != false || s["source"] != sourceDefault {
+	if s := findSetting(t, v, "abuse_strikes"); s["source"] != sourceDefault {
 		t.Errorf("abuse_strikes after reset: %v", s)
 	}
 	values, _ := readSettingsFile(filepath.Join(dir, settingsFileName))
@@ -214,11 +230,18 @@ func TestSettings_ResetRestoresBaseline(t *testing.T) {
 	}
 }
 
-func TestSettings_RestartSettingsNeedDataDir(t *testing.T) {
-	_, p, _ := newTestPortal(t, portalTestConfig("http://127.0.0.1:1"), nil)
+func TestSettings_WithoutDataDirAppliedButNotSaved(t *testing.T) {
+	a, p, _ := newTestPortal(t, portalTestConfig("http://127.0.0.1:1"), nil)
 	ck, csrf := portalLogin(t, p)
-	if rec := portalDo(p, http.MethodPost, "/api/settings", `{"abuse_strikes":7}`, ck, csrf, false); rec.Code != http.StatusConflict {
-		t.Errorf("restart setting without -data-dir: got %d, want 409", rec.Code)
+	rec := portalDo(p, http.MethodPost, "/api/settings", `{"abuse_strikes":7}`, ck, csrf, false)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("save: %d %s", rec.Code, rec.Body.String())
+	}
+	if a.abuse.p().threshold != 7 {
+		t.Errorf("not applied: %d", a.abuse.p().threshold)
+	}
+	if v := decodeJSON(t, rec); v["persisted"] != false {
+		t.Errorf("persisted should be false without -data-dir: %v", v["persisted"])
 	}
 }
 
@@ -228,22 +251,25 @@ func TestSettings_InvalidValuesAreNeverSaved(t *testing.T) {
 	cfg.dataDir = dir
 	a, p, _ := newTestPortal(t, cfg, nil)
 	ck, csrf := portalLogin(t, p)
+	before := a.current()
 
 	for name, body := range map[string]string{
-		"bad upstream":     `{"cap":5,"upstream":"ftp://x"}`,
-		"route conflict":   `{"bypass":"/static/*","assets":"/static/app.js"}`,
-		"portal lockout":   `{"portal_allow":"10.0.0.0/8"}`,
-		"unknown key":      `{"nope":1}`,
-		"wrong type":       `{"abuse":"yes"}`,
-		"missing html":     `{"html":"/does/not/exist.html"}`,
-		"ban w/o registry": `{"abuse":false,"ban_paths":"/.env"}`,
+		"bad upstream":      `{"cap":5,"upstream":"ftp://x"}`,
+		"route conflict":    `{"bypass":"/static/*","assets":"/static/app.js"}`,
+		"portal lockout":    `{"portal_allow":"10.0.0.0/8"}`,
+		"unknown key":       `{"nope":1}`,
+		"wrong type":        `{"abuse":"yes"}`,
+		"missing html":      `{"html":"/does/not/exist.html"}`,
+		"ban w/o registry":  `{"abuse":false,"ban_paths":"/.env"}`,
+		"reaper too fast":   `{"reaper":"1s"}`,
+		"token ttl too low": `{"token_ttl":"10s"}`,
 	} {
 		if rec := portalDo(p, http.MethodPost, "/api/settings", body, ck, csrf, false); rec.Code != http.StatusBadRequest {
 			t.Errorf("%s: got %d %s, want 400", name, rec.Code, rec.Body.String())
 		}
 	}
-	if a.room.Cap() != 10 {
-		t.Error("a rejected change must not apply any field")
+	if a.room.Cap() != 10 || a.current() != before {
+		t.Error("a rejected change must not apply anything")
 	}
 	if _, err := os.Stat(filepath.Join(dir, settingsFileName)); !os.IsNotExist(err) {
 		t.Errorf("no settings file should have been written: %v", err)

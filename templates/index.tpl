@@ -18,6 +18,8 @@
 </div>
 {{else}}
 <div id="portal-app">
+  <div class="alert alert-info d-none" id="portal-moved" role="alert"></div>
+
   <ul class="nav nav-tabs mb-4" role="tablist">
     <li class="nav-item" role="presentation">
       <button class="nav-link active" id="tab-overview-btn" data-bs-toggle="tab" data-bs-target="#tab-overview" type="button" role="tab" aria-controls="tab-overview" aria-selected="true">
@@ -36,7 +38,7 @@
     </li>
     <li class="nav-item" role="presentation">
       <button class="nav-link" id="tab-settings-btn" data-bs-toggle="tab" data-bs-target="#tab-settings" type="button" role="tab" aria-controls="tab-settings" aria-selected="false">
-        <i class="bi bi-sliders"></i> Settings <span class="badge rounded-pill text-bg-warning d-none" id="settings-pending">restart</span>
+        <i class="bi bi-sliders"></i> Settings
       </button>
     </li>
     <li class="ms-auto align-self-center small text-body-secondary">
@@ -171,7 +173,7 @@
     <!-- Bans -->
     <div class="tab-pane fade" id="tab-bans" role="tabpanel" aria-labelledby="tab-bans-btn" tabindex="0">
       <div class="alert alert-secondary d-none" id="bans-disabled" role="alert">
-        <i class="bi bi-info-circle"></i> The abuse registry is disabled (<code>-abuse=false</code>), so bans are unavailable.
+        <i class="bi bi-info-circle"></i> The abuse registry is off (<code>abuse</code> in Settings). Existing bans are kept and apply again when it is turned back on.
       </div>
       <div class="alert alert-warning d-none" id="bans-not-persisted" role="alert">
         <i class="bi bi-exclamation-triangle"></i> <code>-data-dir</code> is empty, so bans — including permanent ones — are lost when concert restarts.
@@ -200,8 +202,8 @@
 
     <!-- Settings -->
     <div class="tab-pane fade" id="tab-settings" role="tabpanel" aria-labelledby="tab-settings-btn" tabindex="0">
-      <div class="alert alert-warning d-none" id="settings-restart" role="alert">
-        <i class="bi bi-arrow-repeat"></i> Some saved settings take effect after a restart: <code>systemctl restart concert</code>.
+      <div class="alert alert-warning d-none" id="settings-unsaved" role="alert">
+        <i class="bi bi-exclamation-triangle"></i> <code>-data-dir</code> is empty: changes apply immediately but are lost when concert restarts.
       </div>
       <div class="row g-3">
         <div class="col-xl-8">
@@ -227,15 +229,15 @@
               <li><span class="badge text-bg-info">env</span> <code>CONCERT_*</code> environment variable</li>
               <li><span class="badge text-bg-light border">default</span> built-in default</li>
             </ol>
-            <p class="small mb-2">
-              <span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle">restart</span>
-              settings are saved at once and used from the next start. The rest apply immediately.
-              Reset removes a value from settings.json.
-            </p>
+                        <p class="small mb-2">
+                          Every change applies immediately. Settings marked
+                          <span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle">restart</span>
+                          are changed in concert.env and take effect when concert restarts. Reset removes a value from settings.json.
+                        </p>
             <p class="small mb-0 text-break">File: <span class="font-monospace" id="settings-file">–</span></p>
           </div></div>
           <div class="card stat-card"><div class="card-body">
-            <h2 class="h6 mb-3"><i class="bi bi-lock"></i> Environment only</h2>
+            <h2 class="h6 mb-3"><i class="bi bi-lock"></i> Environment only, and listeners</h2>
             <dl class="row small mb-0" id="settings-fixed"></dl>
           </div></div>
         </div>

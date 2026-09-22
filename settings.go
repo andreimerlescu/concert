@@ -5,7 +5,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"math"
 	"net/http"
@@ -31,13 +30,10 @@ import (
 // API; every other setting keeps following flags and the environment.
 // Resetting a setting in the portal removes it from the file again.
 //
-// Secrets (CONCERT_ADMIN_TOKEN, CONCERT_ADMIT_SECRET, CONCERT_PORTAL_PASS) and
-// -data-dir itself are never stored in the file.
-//
-// Some settings apply the moment they are saved ("live"); the rest are saved
-// immediately and take effect on the next start. Because the file outranks
-// the command line, a value is validated by building a throwaway app from the
-// candidate configuration before it is written, so a saved file always boots.
+// Every change applies immediately, without restarting concert: see
+// reload.go. Secrets (CONCERT_ADMIN_TOKEN, CONCERT_ADMIT_SECRET,
+// CONCERT_PORTAL_PASS) and -data-dir itself are never stored in the file and
+// are the only settings that need a restart.
 
 const (
 	settingsFileName    = "settings.json"
@@ -81,35 +77,35 @@ const (
 // settingDef describes one setting: its flag, environment variable, default,
 // where it lives in config, and how the portal presents it.
 type settingDef struct {
-	key   string            // settings.json and portal API key
-	flag  string            // command-line flag, without the dash
-	env   string            // environment variable
-	group string            // portal section
-	label string            // portal label
-	usage string            // flag usage and portal help text
-	live  bool              // applied immediately; otherwise on the next start
-	def   any               // built-in default, of the field's type
-	ptr   func(*config) any // pointer to the config field
-	check func(any) error   // extra validation for values from the file or portal
-	kind  string            // derived from ptr in init
+	key     string            // settings.json and portal API key
+	flag    string            // command-line flag, without the dash
+	env     string            // environment variable
+	group   string            // portal section
+	label   string            // portal label
+	usage   string            // flag usage and portal help text
+	def     any               // built-in default, of the field's type
+	ptr     func(*config) any // pointer to the config field
+	check   func(any) error   // extra validation for values from the file or portal
+	restart bool              // set only by flag or environment; takes effect on restart
+	kind    string            // derived from ptr in init
 }
 
 // settingDefs is every setting concert has. parseConfig declares one flag per
 // entry, so this table is the single place a setting is defined.
 var settingDefs = []settingDef{
 	// ---- Waiting room ----
-	{key: "cap", flag: "cap", env: "CONCERT_CAPACITY", group: groupRoom, label: "Page slots", live: true,
+	{key: "cap", flag: "cap", env: "CONCERT_CAPACITY", group: groupRoom, label: "Page slots",
 		def: 434, usage: "max concurrent page requests allowed through to the upstream",
 		ptr: func(c *config) any { return &c.capacity }, check: intAtLeast(1)},
-	{key: "max_queue", flag: "max-queue", env: "CONCERT_MAX_QUEUE", group: groupRoom, label: "Max queue depth", live: true,
+	{key: "max_queue", flag: "max-queue", env: "CONCERT_MAX_QUEUE", group: groupRoom, label: "Max queue depth",
 		def: int64(369), usage: "reject with 503 beyond this queue depth (0 = unlimited)",
 		ptr: func(c *config) any { return &c.maxQueue }, check: int64AtLeast(0)},
-	{key: "token_ttl", flag: "token-ttl", env: "CONCERT_TOKEN_TTL", group: groupRoom, label: "Ticket TTL", live: true,
+	{key: "token_ttl", flag: "token-ttl", env: "CONCERT_TOKEN_TTL", group: groupRoom, label: "Ticket TTL",
 		def: time.Duration(0), usage: "sliding TTL for queued tokens, 30s-24h (0 = room default, 5m)",
 		ptr: func(c *config) any { return &c.tokenTTL }, check: durationZeroOrBetween(30*time.Second, 24*time.Hour)},
 	{key: "reaper", flag: "reaper", env: "CONCERT_REAPER", group: groupRoom, label: "Reaper interval",
-		def: 36 * time.Second, usage: "reaper interval for abandoned tickets",
-		ptr: func(c *config) any { return &c.reaper }, check: durationAtLeast(time.Second)},
+		def: 36 * time.Second, usage: "reaper interval for abandoned tickets, 5s-24h",
+		ptr: func(c *config) any { return &c.reaper }, check: durationBetween(5*time.Second, 24*time.Hour)},
 	{key: "retry_after", flag: "retry-after", env: "CONCERT_RETRY_AFTER", group: groupRoom, label: "Retry-After for API clients",
 		def: 5, usage: "Retry-After seconds sent to queued API clients",
 		ptr: func(c *config) any { return &c.retryAfter }, check: intAtLeast(1)},
@@ -117,26 +113,26 @@ var settingDefs = []settingDef{
 		def: true, usage: "answer queued non-HTML clients with JSON 429 instead of the HTML page",
 		ptr: func(c *config) any { return &c.apiJSON }},
 	{key: "html", flag: "html", env: "CONCERT_HTML_FILE", group: groupRoom, label: "Custom waiting room HTML",
-		def: "", usage: "custom waiting room HTML (must handle cookies_required and room_probe)",
+		def: "", usage: "custom waiting room HTML file, empty for room's page (must handle cookies_required and room_probe)",
 		ptr: func(c *config) any { return &c.htmlFile }},
 
 	// ---- Skip the line ----
-	{key: "rate", flag: "rate", env: "CONCERT_RATE", group: groupSkip, label: "Price per position", live: true,
-		def: 0.0, usage: "base cost per queue position (0 disables promotion)",
+	{key: "rate", flag: "rate", env: "CONCERT_RATE", group: groupSkip, label: "Price per position",
+		def: 0.0, usage: "base cost per queue position",
 		ptr: func(c *config) any { return &c.rate }, check: floatBetween(0, 1e6)},
-	{key: "surge", flag: "surge", env: "CONCERT_SURGE", group: groupSkip, label: "Surge per queued visitor", live: true,
+	{key: "surge", flag: "surge", env: "CONCERT_SURGE", group: groupSkip, label: "Surge per queued visitor",
 		def: 0.0, usage: "extra cost per position for each client in the queue",
 		ptr: func(c *config) any { return &c.surge }, check: floatBetween(0, 1e6)},
-	{key: "skip_url", flag: "skip-url", env: "CONCERT_SKIP_URL", group: groupSkip, label: "Payment page URL", live: true,
+	{key: "skip_url", flag: "skip-url", env: "CONCERT_SKIP_URL", group: groupSkip, label: "Payment page URL",
 		def: "", usage: "payment page URL; enables the skip-the-line card",
 		ptr: func(c *config) any { return &c.skipURL }, check: checkSkipURL},
-	{key: "pass_duration", flag: "pass", env: "CONCERT_PASS_DURATION", group: groupSkip, label: "VIP pass lifetime", live: true,
+	{key: "pass_duration", flag: "pass", env: "CONCERT_PASS_DURATION", group: groupSkip, label: "VIP pass lifetime",
 		def: time.Duration(0), usage: "VIP pass lifetime (0 disables passes)",
 		ptr: func(c *config) any { return &c.passDuration }, check: durationZeroOrBetween(time.Minute, 24*time.Hour)},
 
 	// ---- Origin and listener ----
-	{key: "listen", flag: "listen", env: "CONCERT_LISTEN", group: groupOrigin, label: "Listen address",
-		def: ":8080", usage: "address to listen on",
+	{key: "listen", flag: "listen", env: "CONCERT_LISTEN", group: groupOrigin, label: "Listen address", restart: true,
+		def: ":8080", usage: "address to listen on (flag or CONCERT_LISTEN only; takes a restart)",
 		ptr: func(c *config) any { return &c.listen }},
 	{key: "upstream", flag: "upstream", env: "CONCERT_UPSTREAM", group: groupOrigin, label: "Upstream origin",
 		def: "http://127.0.0.1:3000", usage: "origin to proxy to",
@@ -204,7 +200,7 @@ var settingDefs = []settingDef{
 
 	// ---- Abuse registry ----
 	{key: "abuse", flag: "abuse", env: "CONCERT_ABUSE", group: groupAbuse, label: "Abuse registry enabled",
-		def: true, usage: "enable the abuse registry",
+		def: true, usage: "enable the abuse registry; bans are kept while it is off",
 		ptr: func(c *config) any { return &c.abuseEnabled }},
 	{key: "abuse_strikes", flag: "abuse-strikes", env: "CONCERT_ABUSE_STRIKES", group: groupAbuse, label: "Strikes before a ban",
 		def: 20, usage: "strike total within -abuse-window that triggers a ban",
@@ -239,9 +235,9 @@ var settingDefs = []settingDef{
 		def: false, usage: "use the Let's Encrypt staging directory (untrusted certificates, generous rate limits)",
 		ptr: func(c *config) any { return &c.tlsStaging }},
 
-	// ---- Admin portal; see portal.go. It only starts when CONCERT_PORTAL_PASS is set. ----
-	{key: "portal_listen", flag: "portal-listen", env: "CONCERT_PORTAL_LISTEN", group: groupPortal, label: "Portal address",
-		def: "127.0.0.1:8081", usage: "admin portal address; the portal only starts when CONCERT_PORTAL_PASS is set",
+	// ---- Admin portal; see portal.go. It only runs when CONCERT_PORTAL_PASS is set. ----
+	{key: "portal_listen", flag: "portal-listen", env: "CONCERT_PORTAL_LISTEN", group: groupPortal, label: "Portal address", restart: true,
+		def: "127.0.0.1:8081", usage: "admin portal address, empty turns the portal off (flag or CONCERT_PORTAL_LISTEN only; takes a restart); the portal needs CONCERT_PORTAL_PASS",
 		ptr: func(c *config) any { return &c.portal.listen }},
 	{key: "portal_allow", flag: "portal-allow", env: "CONCERT_PORTAL_ALLOW", group: groupPortal, label: "Portal allowlist",
 		def: "127.0.0.1/32,::1/128", usage: "comma-separated CIDRs allowed to reach the admin portal",
@@ -430,6 +426,15 @@ func durationAtLeast(min time.Duration) func(any) error {
 	}
 }
 
+func durationBetween(lo, hi time.Duration) func(any) error {
+	return func(v any) error {
+		if d := v.(time.Duration); d < lo || d > hi {
+			return fmt.Errorf("must be between %s and %s", lo, hi)
+		}
+		return nil
+	}
+}
+
 func durationZeroOrBetween(lo, hi time.Duration) func(any) error {
 	return func(v any) error {
 		d := v.(time.Duration)
@@ -554,6 +559,10 @@ func readSettingsFile(path string) (map[string]any, error) {
 			log.Printf("settings: ignoring unknown setting %q in %s", key, path)
 			continue
 		}
+		if d.restart {
+			log.Printf("settings: ignoring %q in %s: it can only be set by flag or environment", key, path)
+			continue
+		}
 		v, err := d.decode(raw)
 		if err == nil && d.check != nil {
 			err = d.check(v)
@@ -585,21 +594,18 @@ func writeSettingsFile(path string, values map[string]any, now time.Time) error 
 
 // ─── runtime changes ─────────────────────────────────────────────────────────
 
-// settingsManager owns settings.json while concert runs. desired is the
-// configuration the next start will use; the running app keeps a.cfg, except
-// for live settings, which are applied to the room as they change.
+// settingsManager owns settings.json while concert runs, and serializes
+// changes. mu also guards the app's listener endpoints (see attachEndpoints).
 type settingsManager struct {
 	mu          sync.Mutex
 	path        string            // "" when -data-dir is empty
 	file        map[string]any    // values stored in settings.json
 	base        map[string]any    // values from flags, environment and defaults
 	baseSources map[string]string // where each base value came from
-	desired     config
 }
 
 func newSettingsManager(cfg config) *settingsManager {
 	m := &settingsManager{
-		desired:     cfg,
 		file:        map[string]any{},
 		base:        make(map[string]any, len(settingDefs)),
 		baseSources: make(map[string]string, len(settingDefs)),
@@ -626,8 +632,8 @@ func newSettingsManager(cfg config) *settingsManager {
 	return m
 }
 
-// source reports where key's desired value comes from. Caller holds m.mu or
-// owns m exclusively.
+// source reports where key's value comes from. Caller holds m.mu or owns m
+// exclusively.
 func (m *settingsManager) source(key string) string {
 	if _, ok := m.file[key]; ok {
 		return sourceFile
@@ -651,28 +657,40 @@ func settingsStatus(err error) int {
 	return http.StatusInternalServerError
 }
 
-// changeSettings validates set and reset together, writes settings.json, and
-// applies live settings. Nothing is saved or applied unless every value is
-// valid. reset removes keys from the file, restoring their flag, environment
-// or default value. actor is the portal operator's address, or the zero
-// Addr for the admin API.
+// changeSettings applies set and reset to the running concert. reset
+// removes keys from settings.json, restoring their flag, environment or
+// default value. actor is the portal operator's address, or the zero Addr
+// for the admin API.
+//
+// Every value is decoded and checked, the whole configuration is validated,
+// a new generation is built, and new listen addresses are bound, all before
+// anything is saved. Only then is settings.json written and the change
+// swapped in, so a rejected change leaves the file and the running concert
+// exactly as they were.
 func (a *app) changeSettings(set map[string]json.RawMessage, reset []string, actor netip.Addr) error {
+	if len(set)+len(reset) == 0 {
+		return &settingsError{http.StatusBadRequest, "no settings to change"}
+	}
 	m := a.settings
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	cand := m.desired
+	prev := a.current()
+	cand := prev.cfg
 	file := make(map[string]any, len(m.file)+len(set))
 	for k, v := range m.file {
 		file[k] = v
 	}
 
-	var touched []*settingDef
 	var problems []string
 	for _, key := range sortedKeys(set) {
 		d, ok := settingByKey[key]
 		if !ok {
 			problems = append(problems, fmt.Sprintf("%s: unknown setting", key))
+			continue
+		}
+		if d.restart {
+			problems = append(problems, fmt.Sprintf("%s (%s) can only be changed with %s in concert.env and a restart", d.label, d.key, d.env))
 			continue
 		}
 		v, err := d.decode(set[key])
@@ -685,7 +703,6 @@ func (a *app) changeSettings(set map[string]json.RawMessage, reset []string, act
 		}
 		d.set(&cand, v)
 		file[key] = v
-		touched = append(touched, d)
 	}
 	for _, key := range reset {
 		d, ok := settingByKey[key]
@@ -693,26 +710,15 @@ func (a *app) changeSettings(set map[string]json.RawMessage, reset []string, act
 			problems = append(problems, fmt.Sprintf("%s: unknown setting", key))
 			continue
 		}
+		if d.restart {
+			problems = append(problems, fmt.Sprintf("%s (%s) can only be changed with %s in concert.env and a restart", d.label, d.key, d.env))
+			continue
+		}
 		d.set(&cand, m.base[key])
 		delete(file, key)
-		touched = append(touched, d)
 	}
 	if len(problems) > 0 {
 		return &settingsError{http.StatusBadRequest, strings.Join(problems, "; ")}
-	}
-	if len(touched) == 0 {
-		return &settingsError{http.StatusBadRequest, "no settings to change"}
-	}
-
-	needsRestart := false
-	for _, d := range touched {
-		if !d.live {
-			needsRestart = true
-		}
-	}
-	if needsRestart && m.path == "" {
-		return &settingsError{http.StatusConflict,
-			"settings that apply on restart can only be saved when -data-dir is set; only live settings can change now"}
 	}
 
 	if err := cand.normalize(); err != nil {
@@ -720,75 +726,34 @@ func (a *app) changeSettings(set map[string]json.RawMessage, reset []string, act
 	}
 	if actor.IsValid() && cand.portal.enabled() && !containsAddr(cand.portal.allow, actor) {
 		return &settingsError{http.StatusBadRequest, fmt.Sprintf(
-			"portal_allow must still include your address %s, or you would be locked out of the portal after a restart", actor)}
+			"portal_allow must still include your address %s, or you would lock yourself out of the portal", actor)}
 	}
-	if needsRestart {
-		if err := probeConfig(cand); err != nil {
-			return &settingsError{http.StatusBadRequest, "concert would not start with these settings: " + err.Error()}
-		}
+
+	g, err := a.buildGeneration(cand, prev)
+	if err != nil {
+		return &settingsError{http.StatusBadRequest, "concert cannot use these settings: " + err.Error()}
+	}
+	lp, err := a.prepareListeners(cand)
+	if err != nil {
+		return &settingsError{http.StatusBadRequest, err.Error()}
 	}
 
 	if m.path != "" {
 		if err := writeSettingsFile(m.path, file, time.Now()); err != nil {
+			lp.abort()
 			return &settingsError{http.StatusInternalServerError, "could not save settings: " + err.Error()}
 		}
 	}
 	m.file = file
-	m.desired = cand
 
-	for _, d := range touched {
-		if !d.live {
-			continue
-		}
-		if err := a.applyLive(d.key, cand); err != nil {
-			return &settingsError{http.StatusInternalServerError,
-				fmt.Sprintf("%s was saved but could not be applied: %v", d.label, err)}
-		}
+	if err := a.commit(g, lp); err != nil {
+		return &settingsError{http.StatusInternalServerError,
+			"settings were saved and applied, but the waiting room rejected part of them: " + err.Error()}
 	}
 	return nil
 }
 
-// probeConfig builds and discards an app from c, catching everything newApp
-// catches (route conflicts, an unreadable -html file, room's own limits),
-// plus an unusable certificate cache. It binds no ports.
-func probeConfig(c config) error {
-	c.dataDir = ""
-	c.accessLog = io.Discard
-	probe, err := newApp(c)
-	if err != nil {
-		return err
-	}
-	probe.Close()
-	if _, err := newACMETLSConfig(c); err != nil {
-		return err
-	}
-	return nil
-}
-
-// applyLive pushes one live setting from c into the running app.
-func (a *app) applyLive(key string, c config) error {
-	switch key {
-	case "cap":
-		return a.room.SetCap(int32(c.capacity))
-	case "max_queue":
-		return a.room.SetMaxQueueDepth(c.maxQueue)
-	case "token_ttl":
-		// 0 means room's default, which only a restart restores.
-		if c.tokenTTL > 0 {
-			return a.room.SetTokenTTL(c.tokenTTL)
-		}
-	case "rate", "surge":
-		a.setPricing(c.rate, c.surge)
-	case "skip_url":
-		a.room.SetSkipURL(c.skipURL)
-	case "pass_duration":
-		return a.room.SetPassDuration(c.passDuration)
-	}
-	return nil
-}
-
-// settingView is one setting as the portal shows it. Value is what the next
-// start uses; Running is what this process uses.
+// settingView is one setting as the portal shows it.
 type settingView struct {
 	Key     string `json:"key"`
 	Group   string `json:"group"`
@@ -798,63 +763,48 @@ type settingView struct {
 	Flag    string `json:"flag"`
 	Env     string `json:"env"`
 	Value   any    `json:"value"`
-	Running any    `json:"running"`
 	Source  string `json:"source"`
-	Live    bool   `json:"live"`
-	Pending bool   `json:"pending"`
+	Restart bool   `json:"restart"`
 }
 
-// settingsViews lists every setting in table order, and returns the path of
-// settings.json ("" when settings are not persisted).
+// settingsViews lists every setting in table order with its running value,
+// and returns the path of settings.json ("" when settings are not saved).
 func (a *app) settingsViews() ([]settingView, string) {
 	m := a.settings
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	cfg := a.current().cfg
 	out := make([]settingView, 0, len(settingDefs))
 	for i := range settingDefs {
 		d := &settingDefs[i]
-		value := encodeSetting(d.get(&m.desired))
-		running := value
-		if !d.live {
-			running = encodeSetting(d.get(&a.cfg))
-		}
 		out = append(out, settingView{
 			Key: d.key, Group: d.group, Label: d.label, Help: d.usage, Kind: d.kind,
-			Flag: d.flag, Env: d.env, Value: value, Running: running,
-			Source: m.source(d.key), Live: d.live, Pending: !d.live && value != running,
+			Flag: d.flag, Env: d.env, Value: encodeSetting(d.get(&cfg)), Source: m.source(d.key),
+			Restart: d.restart,
 		})
 	}
 	return out, m.path
 }
 
-// pendingRestart counts saved settings that differ from what is running.
-func (a *app) pendingRestart() int {
-	m := a.settings
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	n := 0
-	for i := range settingDefs {
-		d := &settingDefs[i]
-		if !d.live && encodeSetting(d.get(&m.desired)) != encodeSetting(d.get(&a.cfg)) {
-			n++
-		}
-	}
-	return n
-}
-
-// fixedSettings describes what the portal cannot change: secrets and the
-// data directory, which are environment- or command-line-only.
+// fixedSettings describes what the portal cannot change — secrets and the
+// data directory, which are environment- or command-line-only — plus where
+// concert is listening right now.
 func (a *app) fixedSettings() map[string]string {
-	dataDir := a.cfg.dataDir
+	a.settings.mu.Lock()
+	mainEP, portalEP := a.mainEP, a.portalEP
+	a.settings.mu.Unlock()
+
+	cfg := a.current().cfg
+	dataDir := cfg.dataDir
 	if dataDir == "" {
-		dataDir = "none: settings and bans are not saved"
+		dataDir = "none: changes last until concert restarts"
 	}
 	secret := "set (CONCERT_ADMIT_SECRET)"
-	if a.cfg.admitSecretGenerated {
+	if cfg.admitSecretGenerated {
 		secret = "random at startup (CONCERT_ADMIT_SECRET unset)"
 	}
 	token := "not set: admin API disabled"
-	if a.cfg.adminToken != "" {
+	if cfg.adminToken != "" {
 		token = "set (CONCERT_ADMIN_TOKEN)"
 	}
 	return map[string]string{
@@ -862,6 +812,8 @@ func (a *app) fixedSettings() map[string]string {
 		"Admission secret": secret,
 		"Admin token":      token,
 		"Portal pass":      "set (CONCERT_PORTAL_PASS)",
+		"Main listener":    mainEP.describe(),
+		"Portal listener":  portalEP.describe(),
 		"Version":          BinaryVersion(),
 	}
 }

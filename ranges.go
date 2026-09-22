@@ -19,7 +19,8 @@ import (
 // it, and like every ban it survives restarts (see persist.go).
 //
 // Addresses in -abuse-allow and -trusted-proxies stay reachable even inside
-// a banned range.
+// a banned range. Those lists can change at runtime; a range ban always
+// honours the current ones.
 
 const (
 	minRangeBitsV4 = 8  // broadest IPv4 range that may be banned
@@ -136,7 +137,7 @@ func (r *abuseRegistry) rangeBanned(ip netip.Addr, now int64) (time.Duration, bo
 	}
 	r.ranges.mu.RUnlock()
 
-	if until == 0 || containsAddr(r.exempt, ip) {
+	if until == 0 || containsAddr(r.p().exempt, ip) {
 		return 0, false
 	}
 	if until == banForever {
@@ -269,7 +270,7 @@ func (r *abuseRegistry) exemptWithin(p netip.Prefix) []string {
 	if r == nil {
 		return out
 	}
-	for _, e := range r.exempt {
+	for _, e := range r.p().exempt {
 		if p.Overlaps(e) {
 			out = append(out, e.String())
 		}

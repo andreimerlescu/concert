@@ -33,6 +33,9 @@
     const csrf = csrfMeta ? csrfMeta.getAttribute('content') : '';
     const numberFormat = new Intl.NumberFormat();
 
+    // Set once the portal has moved away from this page's address; stops polling.
+    let portalMoved = false;
+
     async function api(method, url, body) {
         const opts = { method, credentials: 'same-origin', headers: { Accept: 'application/json' } };
         if (method !== 'GET') opts.headers['X-CSRF-Token'] = csrf;
@@ -150,9 +153,6 @@
             setText('stat-price', d.skip_url ? fmtMoney(d.rate) + ' + ' + fmtMoney(d.surge) + ' per queued' : 'off');
             setText('queue-count', fmtNum(d.occupants_tracked));
             setText('ban-count', fmtNum(d.active_bans));
-            const pending = byId('settings-pending');
-            pending.classList.toggle('d-none', !(d.restart_pending > 0));
-            pending.title = d.restart_pending > 0 ? plural(d.restart_pending, 'setting') + ' waiting for a restart' : '';
             setText('updated-at', 'updated ' + new Date().toLocaleTimeString());
         } catch (e) {
             setText('updated-at', 'update failed: ' + e.message);
@@ -279,10 +279,10 @@
             return;
         }
         byId('bans-disabled').classList.toggle('d-none', d.enabled);
-        byId('bans-not-persisted').classList.toggle('d-none', !d.enabled || d.persisted);
+        byId('bans-not-persisted').classList.toggle('d-none', d.persisted);
         byId('ban-new').disabled = !d.enabled;
         tbody.replaceChildren();
-        if (!d.bans.length) emptyRow(tbody, 5, d.enabled ? 'No active bans.' : 'Bans are unavailable.');
+        if (!d.bans.length) emptyRow(tbody, 5, d.enabled ? 'No active bans.' : 'Bans are not enforced while the abuse registry is off.');
         for (const b of d.bans) {
             const tr = node('tr');
             const clientCell = node('td', 'font-monospace', b.client);
@@ -370,11 +370,7 @@
     };
     let settingsData = null;
 
-    function fmtSetting(v) {
-        return v === '' || v === null || v === undefined ? '(empty)' : String(v);
-    }
-
-    function settingInput(s, persisted) {
+    function settingInput(s) {
         const id = 'set-' + s.key;
         let wrap;
         let input;
@@ -399,11 +395,10 @@
         input.dataset.key = s.key;
         input.dataset.kind = s.kind;
         input.dataset.label = s.label;
-        input.dataset.live = String(s.live);
         input.dataset.original = inputValue(input);
-        if (!s.live && !persisted) {
+        if (s.restart) {
             input.disabled = true;
-            input.title = 'Set -data-dir to change settings that apply on restart';
+            input.title = `Set ${s.env} in concert.env and restart concert to change this.`;
         }
         return wrap;
     }
@@ -433,7 +428,7 @@
         }
     }
 
-    function settingRow(s, persisted) {
+    function settingRow(s) {
         const row = node('div', 'row g-2 align-items-start py-2 border-top setting-row');
         row.dataset.search = [s.label, s.key, s.flag, s.env, s.help].join(' ').toLowerCase();
 
@@ -441,24 +436,20 @@
         const label = node('label', 'form-label mb-0 fw-semibold', s.label);
         label.htmlFor = 'set-' + s.key;
         left.append(label);
-        const badges = node('span', 'd-inline-flex flex-wrap gap-1 ms-2 align-middle');
         const [cls, text, title] = SOURCE_BADGES[s.source] || SOURCE_BADGES.default;
-        const src = node('span', 'badge ' + cls, text);
+        const src = node('span', 'badge ms-2 align-middle ' + cls, text);
         src.title = title;
-        badges.append(src);
-        if (!s.live) {
-            const r = node('span', 'badge bg-warning-subtle text-warning-emphasis border border-warning-subtle', 'restart');
-            r.title = 'Takes effect the next time concert starts';
-            badges.append(r);
+        left.append(src);
+        if (s.restart) {
+            const r = node('span', 'badge ms-1 align-middle bg-warning-subtle text-warning-emphasis border border-warning-subtle', 'restart');
+            r.title = 'Changed only in concert.env; applies when concert restarts';
+            left.append(r);
         }
-        if (s.pending) badges.append(node('span', 'badge text-bg-warning', 'pending restart'));
-        left.append(badges);
         left.append(node('div', 'form-text mt-1', s.help));
         left.append(node('div', 'form-text font-monospace', '-' + s.flag + ' · ' + s.env));
 
         const mid = node('div', 'col-md-5');
-        mid.append(settingInput(s, persisted));
-        if (s.pending) mid.append(node('div', 'form-text', 'running now: ' + fmtSetting(s.running)));
+        mid.append(settingInput(s));
 
         const right = node('div', 'col-md-1 text-md-end');
         if (s.source === 'file') {
@@ -484,7 +475,7 @@
                 groups.append(card);
                 bodies.set(s.group, body);
             }
-            body.append(settingRow(s, d.persisted));
+            body.append(settingRow(s));
         }
 
         const dl = byId('settings-fixed');
@@ -493,8 +484,8 @@
             dl.append(node('dt', 'col-sm-5 text-body-secondary fw-normal', k));
             dl.append(node('dd', 'col-sm-7 font-monospace text-break', d.fixed[k]));
         });
-        setText('settings-file', d.persisted ? d.file : 'not saved (-data-dir is empty; only live settings can change)');
-        byId('settings-restart').classList.toggle('d-none', !(d.restart_pending > 0));
+        setText('settings-file', d.persisted ? d.file : 'not saved (-data-dir is empty)');
+        byId('settings-unsaved').classList.toggle('d-none', d.persisted);
         updateDirty();
         applySettingsFilter();
     }
@@ -537,6 +528,37 @@
         }
     }
 
+    // listenURL turns a listen address such as ":8081" or "0.0.0.0:8081" into
+    // a URL on the host this page was loaded from.
+    function listenURL(addr) {
+        const i = addr.lastIndexOf(':');
+        let host = addr.slice(0, i);
+        const port = addr.slice(i + 1);
+        if (host === '' || host === '0.0.0.0' || host === '[::]' || host === '::') host = window.location.hostname;
+        if (host.includes(':') && !host.startsWith('[')) host = '[' + host + ']';
+        return `${window.location.protocol}//${host}:${port}/`;
+    }
+
+    // showPortalMoved replaces the dashboard's live updates with a pointer to
+    // the portal's new address: this page's address stops answering.
+    function showPortalMoved(addr) {
+        portalMoved = true;
+        const box = byId('portal-moved');
+        box.replaceChildren();
+        box.append(node('i', 'bi bi-signpost-split'), ' ');
+        if (addr) {
+            const url = listenURL(addr);
+            box.append('The portal moved to ');
+            const link = node('a', 'alert-link font-monospace', url);
+            link.href = url;
+            box.append(link, '. This page no longer updates; open the new address to continue (you may need to sign in again).');
+        } else {
+            box.append('The portal is now off. To turn it back on, set portal_listen in settings.json (or remove it there) and restart concert.');
+        }
+        box.classList.remove('d-none');
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
     byId('settings-groups').addEventListener('input', updateDirty);
     byId('settings-groups').addEventListener('change', updateDirty);
     byId('settings-filter').addEventListener('input', applySettingsFilter);
@@ -546,11 +568,16 @@
         const btn = ev.target.closest('button[data-action="reset"]');
         if (!btn) return;
         const s = settingsData.settings.find((x) => x.key === btn.dataset.key);
-        if (!window.confirm(`Reset "${s.label}"? It is removed from settings.json and follows the flag, environment or default again.`)) return;
+        if (!window.confirm(`Reset "${s.label}"? It is removed from settings.json and follows the flag, environment or default again, starting now.`)) return;
         btn.disabled = true;
         try {
-            renderSettings(await api('DELETE', '/api/settings?key=' + encodeURIComponent(s.key)));
-            toast(s.live ? `${s.label} reset and applied.` : `${s.label} reset; takes effect after a restart.`, s.live ? 'success' : 'warning');
+            const d = await api('DELETE', '/api/settings?key=' + encodeURIComponent(s.key));
+            if (s.key === 'portal_listen') {
+                const now = d.settings.find((x) => x.key === 'portal_listen');
+                if (now && now.value !== s.value) { showPortalMoved(now.value); return; }
+            }
+            renderSettings(d);
+            toast(`${s.label} reset and applied.`);
             refreshOverview();
         } catch (e) {
             btn.disabled = false;
@@ -569,14 +596,23 @@
             toast(e.message, 'danger');
             return;
         }
-        const restart = changed.filter((i) => i.dataset.live !== 'true').length;
+        const portalChange = 'portal_listen' in body;
+        if (portalChange && body.portal_listen === '' && !window.confirm(
+            'Turn the admin portal off? You will not be able to turn it back on from here: '
+            + 'that takes editing settings.json and restarting concert.')) return;
+
         const btn = byId('settings-apply');
         btn.disabled = true;
         try {
-            renderSettings(await api('POST', '/api/settings', body));
-            toast(restart
-                ? `Saved. ${plural(restart, 'change')} take${restart === 1 ? 's' : ''} effect after a restart.`
-                : 'Settings saved and applied.', restart ? 'warning' : 'success');
+            const d = await api('POST', '/api/settings', body);
+            if (portalChange) {
+                showPortalMoved(body.portal_listen);
+                return;
+            }
+            renderSettings(d);
+            toast('listen' in body
+                ? `Saved. The main listener moved to ${body.listen}; open connections finish on the old address.`
+                : 'Settings saved and applied.');
             refreshOverview();
         } catch (e) {
             toast(e.message, 'danger');
@@ -587,6 +623,7 @@
     // ── Polling ────────────────────────────────────────────────────────────
     document.querySelectorAll('button[data-bs-toggle="tab"]').forEach((btn) => {
         btn.addEventListener('shown.bs.tab', (ev) => {
+            if (portalMoved) return;
             const target = ev.target.getAttribute('data-bs-target');
             if (target === '#tab-queue') refreshQueue();
             if (target === '#tab-bans') refreshBans();
@@ -595,7 +632,7 @@
     });
 
     setInterval(() => {
-        if (document.hidden) return;
+        if (document.hidden || portalMoved) return;
         refreshOverview();
         const tab = activeTab();
         if (tab === 'tab-queue') refreshQueue();

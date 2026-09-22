@@ -67,6 +67,7 @@ const (
 	portalRawLen       = portalBodyLen + portalMACLen
 	minPortalPassLen   = 16
 	portalMaxOccupants = 100000
+	portalGrace        = 5 * time.Second
 	statusCaptureLimit = 2048
 	loginMaxFailures   = 5
 	loginWindow        = 15 * time.Minute
@@ -87,6 +88,7 @@ var (
 // portalConfig holds the admin portal's settings. Its flags are declared
 // from settingDefs in settings.go with every other flag, and pass is read in
 // parseConfig from CONCERT_PORTAL_PASS alongside concert's other secrets.
+// Everything but pass can change while concert runs.
 type portalConfig struct {
 	listen       string
 	allowSpec    string
@@ -97,6 +99,7 @@ type portalConfig struct {
 	allow []netip.Prefix // parsed allowSpec
 }
 
+// enabled reports whether the portal should be listening.
 func (pc *portalConfig) enabled() bool {
 	return pc.listen != "" && pc.pass != ""
 }
@@ -124,33 +127,9 @@ func (pc *portalConfig) normalize() error {
 
 // ─── lifecycle ───────────────────────────────────────────────────────────────
 
-// startPortal starts the admin portal in its own goroutine when configured
-// and returns the handler the main listener should serve. With the portal
-// disabled that is a.handler unchanged.
-func startPortal(ctx context.Context, a *app) (http.Handler, error) {
-	p, err := newPortal(a)
-	if err != nil {
-		return nil, err
-	}
-	if p == nil {
-		if a.cfg.portal.listen != "" && a.cfg.portal.pass == "" {
-			log.Printf("portal disabled: set CONCERT_PORTAL_PASS to enable it on %s", a.cfg.portal.listen)
-		}
-		return a.handler, nil
-	}
-	log.Printf("portal listening on %s (allowed: %s)", p.ln.Addr(), a.cfg.portal.allowSpec)
-	go func() {
-		if err := p.serve(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("portal: %v", err)
-		}
-	}()
-	return p.wrap(a.handler), nil
-}
-
 type portal struct {
 	a          *app
-	cfg        portalConfig
-	ln         net.Listener
+	ln         net.Listener // bound by newPortal when -portal-listen is set; served by start
 	engine     *gin.Engine
 	tmpl       *template.Template
 	static     fs.FS
@@ -159,14 +138,19 @@ type portal struct {
 	occupants  *occupantStore
 	kicked     *kickList
 	fails      *loginLimiter
-	untracked  []pathRule
 }
 
-// newPortal builds the portal and binds its listener. It returns nil when
-// the portal is not configured.
+// newPortal builds the portal and, when -portal-listen is set, binds its
+// listener. It returns nil when CONCERT_PORTAL_PASS is unset: without a pass
+// there is no portal, and setting one needs a restart. With a pass but no
+// address the portal exists but is off, and setting -portal-listen later
+// turns it on without a restart.
 func newPortal(a *app) (*portal, error) {
-	pc := a.cfg.portal
-	if !pc.enabled() {
+	pc := a.current().cfg.portal
+	if pc.pass == "" {
+		if pc.listen != "" {
+			log.Printf("portal disabled: set CONCERT_PORTAL_PASS to enable it on %s", pc.listen)
+		}
 		return nil, nil
 	}
 
@@ -193,7 +177,6 @@ func newPortal(a *app) (*portal, error) {
 
 	p := &portal{
 		a:          a,
-		cfg:        pc,
 		tmpl:       tmpl,
 		static:     static,
 		sessionKey: keyMAC.Sum(nil),
@@ -202,48 +185,72 @@ func newPortal(a *app) (*portal, error) {
 		kicked:     &kickList{m: map[string]time.Time{}},
 		fails:      &loginLimiter{m: map[netip.Addr]*loginState{}},
 	}
-	p.untracked = append(p.untracked, parsePaths(a.cfg.assets)...)
-	p.untracked = append(p.untracked, parsePaths(a.cfg.assetPublic)...)
-	p.untracked = append(p.untracked, parsePaths(a.cfg.bypass)...)
-	p.untracked = append(p.untracked, pathRule{path: "/_room", prefix: true})
-
-	// Pricing is adjustable at runtime; the price lives on the app.
-	a.room.SetRateFunc(a.price)
 
 	// Every new ban drops that network's waiting visitors at once.
 	a.abuse.setOnBan(p.dropBanned)
 
 	p.engine = p.routes()
 
-	ln, err := net.Listen("tcp", pc.listen)
-	if err != nil {
-		return nil, fmt.Errorf("portal listen %s: %w", pc.listen, err)
+	if pc.enabled() {
+		ln, err := listen(pc.listen)
+		if err != nil {
+			return nil, fmt.Errorf("portal listen %s: %w", pc.listen, err)
+		}
+		p.ln = ln
 	}
-	p.ln = ln
 	return p, nil
 }
 
-func (p *portal) serve(ctx context.Context) error {
-	srv := &http.Server{
-		Handler:           p.engine,
+// start serves the portal until ctx is cancelled and returns its endpoint,
+// so later changes to -portal-listen can move it. Safe on a nil portal.
+func (p *portal) start(ctx context.Context) *endpoint {
+	if p == nil {
+		return nil
+	}
+	ep := newEndpoint("portal", p.engine, portalGrace, portalServer)
+	if p.ln != nil {
+		pc := p.pc()
+		ep.serveOn(p.ln, pc.listen)
+		log.Printf("portal listening on %s (allowed: %s)", p.ln.Addr(), pc.allowSpec)
+	} else {
+		log.Printf("portal off: set -portal-listen to turn it on")
+	}
+	go p.janitor(ctx)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case err := <-ep.fatal:
+				log.Printf("portal: %v", err)
+			}
+		}
+	}()
+	return ep
+}
+
+// closeListener releases the listener newPortal bound when start will never
+// run, for example because the main listener failed to bind. Safe on a nil
+// portal.
+func (p *portal) closeListener() {
+	if p != nil && p.ln != nil {
+		_ = p.ln.Close()
+	}
+}
+
+func portalServer(h http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           h,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
-	go p.janitor(ctx)
+}
 
-	errCh := make(chan error, 1)
-	go func() { errCh <- srv.Serve(p.ln) }()
-
-	select {
-	case err := <-errCh:
-		return err
-	case <-ctx.Done():
-	}
-	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	return srv.Shutdown(sctx)
+// pc is the portal's current configuration.
+func (p *portal) pc() portalConfig {
+	return p.a.current().cfg.portal
 }
 
 func (p *portal) janitor(ctx context.Context) {
@@ -301,7 +308,7 @@ func (p *portal) routes() *gin.Engine {
 // directly, never through a proxy, so the connection address is authoritative.
 func (p *portal) allowOnly(c *gin.Context) {
 	ip, ok := remoteAddr(c.Request)
-	if !ok || !containsAddr(p.cfg.allow, ip) {
+	if !ok || !containsAddr(p.pc().allow, ip) {
 		c.AbortWithStatus(http.StatusForbidden)
 	}
 }
@@ -373,7 +380,7 @@ func (p *portal) render(c *gin.Context, status int, page portalPage) {
 	page.PortalDark = assetPortalDark
 	page.PortalJS = assetPortalJS
 	page.Version = BinaryVersion()
-	page.Upstream = p.a.cfg.upstream
+	page.Upstream = p.a.current().cfg.upstream
 	var buf bytes.Buffer
 	if err := p.tmpl.ExecuteTemplate(&buf, templateIndex, page); err != nil {
 		log.Printf("portal: render: %v", err)
@@ -410,13 +417,14 @@ func (p *portal) login(c *gin.Context) {
 		return
 	}
 	p.fails.reset(ip)
-	value, _ := p.mintSession(now)
+	pc := p.pc()
+	value, _ := p.mintSession(now, pc.sessionTTL)
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name:     portalCookie,
 		Value:    value,
 		Path:     "/",
-		MaxAge:   int(p.cfg.sessionTTL / time.Second),
-		Secure:   p.cfg.secureCookie,
+		MaxAge:   int(pc.sessionTTL / time.Second),
+		Secure:   pc.secureCookie,
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
 	})
@@ -427,17 +435,19 @@ func (p *portal) login(c *gin.Context) {
 func (p *portal) logout(c *gin.Context) {
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name: portalCookie, Value: "", Path: "/", MaxAge: -1,
-		Secure: p.cfg.secureCookie, HttpOnly: true, SameSite: http.SameSiteStrictMode,
+		Secure: p.pc().secureCookie, HttpOnly: true, SameSite: http.SameSiteStrictMode,
 	})
 	c.Redirect(http.StatusSeeOther, "/")
 }
 
 // Session cookie: nonce(16) | expiry unix seconds(8) | HMAC(16). The key is
 // derived from CONCERT_PORTAL_PASS, so changing the pass signs everyone out.
-func (p *portal) mintSession(now time.Time) (string, []byte) {
+// The expiry is fixed at sign-in, so a new -portal-session-ttl applies to
+// sessions started after the change.
+func (p *portal) mintSession(now time.Time, ttl time.Duration) (string, []byte) {
 	var buf [portalRawLen]byte
 	_, _ = rand.Read(buf[:portalNonceLen])
-	binary.BigEndian.PutUint64(buf[portalExpOff:portalBodyLen], uint64(now.Add(p.cfg.sessionTTL).Unix()))
+	binary.BigEndian.PutUint64(buf[portalExpOff:portalBodyLen], uint64(now.Add(ttl).Unix()))
 	mac := hmac.New(sha256.New, p.sessionKey)
 	mac.Write(buf[:portalBodyLen])
 	copy(buf[portalBodyLen:], mac.Sum(nil)[:portalMACLen])
@@ -515,7 +525,8 @@ func portalActor(c *gin.Context) string {
 // ─── API: overview ───────────────────────────────────────────────────────────
 
 func (p *portal) apiOverview(c *gin.Context) {
-	a, wr, stats := p.a, p.a.room, p.a.stats
+	a, g := p.a, p.a.current()
+	wr, stats := a.room, a.stats
 	rate, surge := a.pricing()
 	c.JSON(http.StatusOK, gin.H{
 		"cap":                          wr.Cap(),
@@ -528,28 +539,27 @@ func (p *portal) apiOverview(c *gin.Context) {
 		"evicted_total":                stats.evicted.Load(),
 		"timeouts_total":               stats.timeouts.Load(),
 		"promoted_total":               stats.promoted.Load(),
-		"asset_cap":                    a.assets.global.Cap(),
-		"asset_in_flight":              a.assets.global.Len(),
-		"asset_users":                  a.assets.users.count.Load(),
+		"asset_cap":                    g.assets.global.Cap(),
+		"asset_in_flight":              g.assets.global.Len(),
+		"asset_users":                  g.assets.users.count.Load(),
 		"asset_served_total":           stats.assetServed.Load(),
 		"asset_denied_total":           stats.assetDenied.Load(),
 		"asset_user_throttled_total":   stats.assetUserThrottled.Load(),
 		"asset_global_throttled_total": stats.assetGlobalThrottled.Load(),
-		"abuse_enabled":                a.abuse != nil,
-		"abuse_tracked":                a.abuse.tracked(),
-		"abuse_range_bans":             a.abuse.rangeCount(),
+		"abuse_enabled":                g.abuse != nil,
+		"abuse_tracked":                g.abuse.tracked(),
+		"abuse_range_bans":             g.abuse.rangeCount(),
 		"abuse_strikes_total":          stats.abuseStrikes.Load(),
 		"abuse_bans_total":             stats.abuseBans.Load(),
 		"abuse_rejected_total":         stats.abuseRejected.Load(),
 		"abuse_dropped_total":          stats.abuseDropped.Load(),
-		"active_bans":                  len(a.abuse.bans(time.Now())),
+		"active_bans":                  len(g.abuse.bans(time.Now())),
 		"occupants_tracked":            p.occupants.count(),
 		"occupants_dropped":            p.occupants.dropped.Load(),
 		"kicked_active":                p.kicked.count(),
 		"rate":                         rate,
 		"surge":                        surge,
 		"skip_url":                     wr.SkipURL(),
-		"restart_pending":              a.pendingRestart(),
 	})
 }
 
@@ -605,11 +615,12 @@ func (p *portal) apiKick(c *gin.Context) {
 	now := time.Now()
 	var banFor time.Duration
 	if body.Ban {
-		if p.a.abuse == nil {
+		reg := p.a.current().abuse
+		if reg == nil {
 			jsonError(c, http.StatusConflict, errAbuseDisabled.Error())
 			return
 		}
-		left, banned := p.a.abuse.banNow(occ.ip, now)
+		left, banned := reg.banNow(occ.ip, now)
 		if !banned {
 			jsonError(c, http.StatusConflict, errClientExempt.Error())
 			return
@@ -636,12 +647,13 @@ func (p *portal) apiKick(c *gin.Context) {
 // ─── API: bans ───────────────────────────────────────────────────────────────
 
 func (p *portal) apiBans(c *gin.Context) {
+	reg := p.a.current().abuse
 	c.JSON(http.StatusOK, gin.H{
-		"enabled":   p.a.abuse != nil,
-		"tracked":   p.a.abuse.tracked(),
-		"ranges":    p.a.abuse.rangeCount(),
+		"enabled":   reg != nil,
+		"tracked":   reg.tracked(),
+		"ranges":    reg.rangeCount(),
 		"persisted": p.a.bansPath != "",
-		"bans":      p.a.abuse.bans(time.Now()),
+		"bans":      reg.bans(time.Now()),
 	})
 }
 
@@ -659,7 +671,8 @@ func (p *portal) apiBanSave(c *gin.Context) {
 		jsonError(c, http.StatusBadRequest, "client and duration are required")
 		return
 	}
-	if p.a.abuse == nil {
+	reg := p.a.current().abuse
+	if reg == nil {
 		jsonError(c, http.StatusConflict, errAbuseDisabled.Error())
 		return
 	}
@@ -690,7 +703,7 @@ func (p *portal) apiBanSave(c *gin.Context) {
 	dropped := p.occupants.countWhere(p.inScope(target.scope()))
 
 	if target.single {
-		key, err := p.a.abuse.banFor(target.prefix.Addr(), d, now)
+		key, err := reg.banFor(target.prefix.Addr(), d, now)
 		switch {
 		case errors.Is(err, errAbuseDisabled), errors.Is(err, errClientExempt), errors.Is(err, errRegistryFull):
 			jsonError(c, http.StatusConflict, err.Error())
@@ -711,12 +724,12 @@ func (p *portal) apiBanSave(c *gin.Context) {
 		return
 	}
 
-	if err := p.a.abuse.banRange(target.prefix, d, now); err != nil {
+	if err := reg.banRange(target.prefix, d, now); err != nil {
 		jsonError(c, http.StatusConflict, err.Error())
 		return
 	}
 	p.a.saveBansNow()
-	exempt := p.a.abuse.exemptWithin(target.prefix)
+	exempt := reg.exemptWithin(target.prefix)
 	log.Printf("portal: %s banned range %s %s, dropped %d waiting (exempt within: %v)",
 		portalActor(c), target.prefix, lasting, dropped, exempt)
 	c.JSON(http.StatusOK, gin.H{
@@ -730,7 +743,8 @@ func (p *portal) apiBanSave(c *gin.Context) {
 }
 
 func (p *portal) apiUnban(c *gin.Context) {
-	if p.a.abuse == nil {
+	reg := p.a.current().abuse
+	if reg == nil {
 		jsonError(c, http.StatusConflict, errAbuseDisabled.Error())
 		return
 	}
@@ -739,7 +753,7 @@ func (p *portal) apiUnban(c *gin.Context) {
 		jsonError(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !p.a.abuse.unbanTarget(target) {
+	if !reg.unbanTarget(target) {
 		jsonError(c, http.StatusNotFound, "that client is not tracked")
 		return
 	}
@@ -752,18 +766,11 @@ func (p *portal) apiUnban(c *gin.Context) {
 
 func (p *portal) settingsView() gin.H {
 	views, file := p.a.settingsViews()
-	pending := 0
-	for _, v := range views {
-		if v.Pending {
-			pending++
-		}
-	}
 	return gin.H{
-		"settings":        views,
-		"persisted":       file != "",
-		"file":            file,
-		"restart_pending": pending,
-		"fixed":           p.a.fixedSettings(),
+		"settings":  views,
+		"persisted": file != "",
+		"file":      file,
+		"fixed":     p.a.fixedSettings(),
 	}
 }
 
@@ -772,8 +779,9 @@ func (p *portal) apiSettings(c *gin.Context) {
 }
 
 // apiSettingsSave takes a JSON object of setting keys to new values, for
-// example {"cap": 40, "abuse_cooldown": "10m"}. Every value is validated
-// before any is saved or applied; see app.changeSettings.
+// example {"cap": 40, "abuse_cooldown": "10m"}, and applies them at once.
+// Every value is validated before any is saved or applied; see
+// app.changeSettings.
 func (p *portal) apiSettingsSave(c *gin.Context) {
 	var set map[string]json.RawMessage
 	if err := json.NewDecoder(io.LimitReader(c.Request.Body, settingsBodyLimit)).Decode(&set); err != nil || len(set) == 0 {
@@ -790,7 +798,7 @@ func (p *portal) apiSettingsSave(c *gin.Context) {
 }
 
 // apiSettingsReset removes ?key=… (repeatable) from settings.json, so those
-// settings follow flags, environment or defaults again.
+// settings follow flags, environment or defaults again, and applies them.
 func (p *portal) apiSettingsReset(c *gin.Context) {
 	keys := c.QueryArray("key")
 	if len(keys) == 0 {
@@ -820,8 +828,8 @@ func (p *portal) inScope(scope netip.Prefix) func(*occupant) bool {
 // dropBanned is the abuse registry's ban callback. It removes every waiting
 // visitor the ban covers from the line and invalidates their tickets, so an
 // unban means rejoining at the back. The visitors' next status poll is
-// answered by the ban check (see app.rejectBanned) and their page reloads
-// into the block notice. It runs outside every registry lock.
+// answered by the ban check (see generation.rejectBanned) and their page
+// reloads into the block notice. It runs outside every registry lock.
 func (p *portal) dropBanned(scope netip.Prefix) {
 	dropped := p.occupants.removeWhere(p.inScope(scope))
 	if len(dropped) == 0 {
@@ -836,10 +844,10 @@ func (p *portal) dropBanned(scope netip.Prefix) {
 }
 
 // ticketRemover is a waiting room that can release a ticket immediately.
-// The room API concert uses has no such call, so a dropped visitor's ticket
-// still counts in room's queue_depth until the reaper removes it. When room
-// gains RemoveToken with this signature, releaseTicket starts using it with
-// no other change.
+// room v1.2.1 has no such call, so a dropped visitor's ticket still counts
+// in room's queue_depth until the reaper removes it. When room gains
+// RemoveToken with this signature, releaseTicket starts using it with no
+// other change.
 type ticketRemover interface {
 	RemoveToken(token string) error
 }
@@ -860,8 +868,9 @@ func (p *portal) wrap(next http.Handler) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		g := p.a.current()
 		reqPath := r.URL.Path
-		for _, rule := range p.untracked {
+		for _, rule := range g.untracked {
 			if rule.matches(reqPath) {
 				next.ServeHTTP(w, r)
 				return
@@ -869,6 +878,7 @@ func (p *portal) wrap(next http.Handler) http.Handler {
 		}
 
 		now := time.Now()
+		ip := clientIP(r, g.cfg.trusted)
 		var token string
 		if ck, err := r.Cookie("room_ticket"); err == nil {
 			token = ck.Value
@@ -877,8 +887,8 @@ func (p *portal) wrap(next http.Handler) http.Handler {
 		if token != "" && p.kicked.has(token, now) {
 			// A banned visitor is answered by the ban check in the main
 			// handler, which shows the block notice rather than the removal notice.
-			if _, banned := p.a.abuse.banned(clientIP(r, p.a.cfg.trusted), now); !banned {
-				p.rejectKicked(w, r, isStatus)
+			if _, banned := g.abuse.banned(ip, now); !banned {
+				p.rejectKicked(w, r, isStatus, g.cfg)
 				return
 			}
 		}
@@ -887,7 +897,6 @@ func (p *portal) wrap(next http.Handler) http.Handler {
 		next.ServeHTTP(tw, r)
 		tw.inspect()
 
-		ip := clientIP(r, p.a.cfg.trusted)
 		switch {
 		case tw.issued != "":
 			p.occupants.join(tw.issued, ip, r.UserAgent(), reqPath, now)
@@ -903,7 +912,7 @@ func (p *portal) wrap(next http.Handler) http.Handler {
 // rejectKicked answers a removed visitor. Status polls get ready=true so the
 // waiting room page reloads; the reload gets the removal notice and the
 // ticket cookie is cleared, so returning means rejoining at the back.
-func (p *portal) rejectKicked(w http.ResponseWriter, r *http.Request, isStatus bool) {
+func (p *portal) rejectKicked(w http.ResponseWriter, r *http.Request, isStatus bool, cfg config) {
 	h := w.Header()
 	h.Set("Cache-Control", "no-store")
 	if isStatus {
@@ -913,8 +922,8 @@ func (p *portal) rejectKicked(w http.ResponseWriter, r *http.Request, isStatus b
 		return
 	}
 	http.SetCookie(w, &http.Cookie{
-		Name: "room_ticket", Value: "", Path: p.a.cfg.cookiePath, Domain: p.a.cfg.cookieDomain,
-		MaxAge: -1, Secure: p.a.cfg.secureCookie, HttpOnly: true, SameSite: http.SameSiteLaxMode,
+		Name: "room_ticket", Value: "", Path: cfg.cookiePath, Domain: cfg.cookieDomain,
+		MaxAge: -1, Secure: cfg.secureCookie, HttpOnly: true, SameSite: http.SameSiteLaxMode,
 	})
 	if wantsHTML(r) {
 		h.Set("Content-Type", "text/html; charset=utf-8")

@@ -12,11 +12,12 @@
 #   sudo bash installer.sh                                   # installs /home/rocky/concert-linux-amd64
 #   sudo CONCERT_BINARY=/tmp/concert bash installer.sh       # install a binary from somewhere else
 #   sudo CONCERT_SHA256=<sum> bash installer.sh              # refuse a binary with a different checksum
+#   sudo FORCE_RESTART=1 bash installer.sh                   # restart even if nothing changed
 #   sudo bash installer.sh uninstall                         # remove service, policy, port labels
 #   sudo PURGE=1 bash installer.sh uninstall                 # also remove /etc/concert, /var/lib/concert, the user
 #
-# Settings (first install only; afterwards edit /etc/concert/concert.env and
-# re-run this script so port labels match):
+# Settings (first install only; afterwards edit /etc/concert/concert.env, or
+# change them live in the admin portal):
 #
 #   sudo CONCERT_LISTEN=0.0.0.0:443 \
 #        CONCERT_UPSTREAM=http://127.0.0.1:8080 \
@@ -27,26 +28,46 @@
 #        OPEN_FIREWALL=1 \
 #        bash installer.sh
 #
+# Ports concert may move to while running. Every setting, including the
+# listen and portal addresses, can be changed live in the admin portal. A new
+# port must be one SELinux lets concert bind, and one below 1024 needs
+# CAP_NET_BIND_SERVICE. These are remembered in /etc/concert/installer.env:
+#
+#   CONCERT_EXTRA_PORTS=9090,8443     label these ports for concert now
+#   ALLOW_LOW_PORTS=1                 always grant CAP_NET_BIND_SERVICE
+#   SELINUX_ANY_PORT=1                turn on the concert_bind_any_port boolean:
+#                                     concert may bind any unreserved port
+#                                     (0 turns it off; toggle later with
+#                                     setsebool -P concert_bind_any_port on|off)
+#
 # Other knobs:
 #   CONCERT_BINARY=/path/to/concert   binary to install (default: /home/rocky/concert-linux-amd64,
 #                                     then the installed copy)
 #   CONCERT_SHA256=<sum>              refuse to install a binary with a different checksum
 #   CONCERT_PORTAL_LISTEN / CONCERT_PORTAL_ALLOW   admin portal address and CIDRs
 #   INSTALL_DEPS=0                    don't dnf-install missing SELinux tooling
+#   FORCE_RESTART=1                   restart even when nothing that needs it changed
 #
 # What it does:
 #   1. verifies the binary and installs a root-owned copy
 #   2. compiles and loads an SELinux module that confines concert in concert_t
-#   3. labels the listen, portal and upstream ports
+#   3. labels the listen, portal, upstream and extra ports
 #   4. creates /var/lib/concert for the Let's Encrypt certificate cache and
 #      /var/lib/concert/data for settings.json and bans.json
 #   5. writes /etc/concert/concert.env (secrets generated once, kept on upgrade)
-#   6. installs a hardened systemd unit, starts it, and verifies the process
-#      is running in concert_t with no AVC denials
+#   6. installs a hardened systemd unit and (re)starts concert only when
+#      something that needs a restart changed, then verifies the process is
+#      running in concert_t with no AVC denials
+#
+# A restart empties the waiting queue, which lives in memory; bans and
+# settings changed in the portal are kept in /var/lib/concert/data. So the
+# installer restarts concert only for a new binary, a changed unit, a changed
+# concert.env, a stopped service, or FORCE_RESTART=1. Settings changed in the
+# portal never need a restart.
 #
 # concert reads every setting from CONCERT_* environment variables, so the
-# unit passes no flags: /etc/concert/concert.env is the whole configuration,
-# except for values changed in the admin portal, which concert saves to
+# unit passes no flags: /etc/concert/concert.env is the configuration, except
+# for values changed in the admin portal, which concert saves to
 # /var/lib/concert/data/settings.json and which take priority over the env file.
 #
 # Requires RHEL/Alma/Rocky 8+, CentOS Stream, or Fedora (kernel with the
@@ -61,12 +82,15 @@ DEFAULT_BINARY=/home/rocky/concert-linux-amd64
 BIN=/usr/local/bin/concert
 ETC=/etc/concert
 ENV_FILE="$ETC/concert.env"
+INSTALLER_ENV="$ETC/installer.env"
+ENV_SUM="$ETC/.installer-envsum"
 STATE="$ETC/.installer-state"
 STATE_DIR=/var/lib/concert
 DATA_DIR="$STATE_DIR/data"
 UNIT=/etc/systemd/system/concert.service
 SVC_USER=concert
 MODULE=concert
+SEBOOL=concert_bind_any_port
 DEVEL_MAKEFILE=/usr/share/selinux/devel/Makefile
 
 # ── Settings ─────────────────────────────────────────────────────────
@@ -83,7 +107,16 @@ OPEN_FIREWALL="${OPEN_FIREWALL:-0}"
 BINARY_SRC="${CONCERT_BINARY:-}"
 BINARY_SHA256="${CONCERT_SHA256:-}"
 INSTALL_DEPS="${INSTALL_DEPS:-1}"
+FORCE_RESTART="${FORCE_RESTART:-0}"
 PURGE="${PURGE:-0}"
+
+# Remembered in $INSTALLER_ENV. "given" records whether this run set them,
+# so a plain re-run keeps what an earlier run chose.
+EXTRA_PORTS="${CONCERT_EXTRA_PORTS-}"
+EXTRA_PORTS_GIVEN="${CONCERT_EXTRA_PORTS+1}"
+LOW_PORTS="${ALLOW_LOW_PORTS-}"
+LOW_PORTS_GIVEN="${ALLOW_LOW_PORTS+1}"
+ANY_PORT="${SELINUX_ANY_PORT-}"
 
 # ── Output helpers ───────────────────────────────────────────────────
 
@@ -142,14 +175,20 @@ state_add() {
     grep -qxF "$1" "$STATE" || echo "$1" >> "$STATE"
 }
 
+# ── Restart tracking ─────────────────────────────────────────────────
+
+# Reasons collected while installing; concert restarts only if there are any.
+RESTART_REASONS=()
+need_restart() { RESTART_REASONS+=("$1"); }
+
 # ── Binary ───────────────────────────────────────────────────────────
+
+BINARY_SUM=""
 
 # Source binary, in order: CONCERT_BINARY, the pipeline's upload at
 # $DEFAULT_BINARY, or the copy already at $BIN (reinstalled in place with
 # correct ownership and label).
 resolve_binary() {
-    local sum
-
     if [[ -z "$BINARY_SRC" ]]; then
         if [[ -f "$DEFAULT_BINARY" ]]; then
             BINARY_SRC="$DEFAULT_BINARY"
@@ -165,20 +204,29 @@ resolve_binary() {
     [[ "$(head -c 4 "$BINARY_SRC" | od -An -tx1 | tr -d ' \n')" == "7f454c46" ]] \
         || die "$BINARY_SRC is not an ELF executable"
 
-    sum=$(sha256sum "$BINARY_SRC" | awk '{print $1}')
-    if [[ -n "$BINARY_SHA256" && "$sum" != "$BINARY_SHA256" ]]; then
-        die "sha256 mismatch for $BINARY_SRC: got $sum, expected $BINARY_SHA256"
+    BINARY_SUM=$(sha256sum "$BINARY_SRC" | awk '{print $1}')
+    if [[ -n "$BINARY_SHA256" && "$BINARY_SUM" != "$BINARY_SHA256" ]]; then
+        die "sha256 mismatch for $BINARY_SRC: got $BINARY_SUM, expected $BINARY_SHA256"
     fi
-    ok "Using $BINARY_SRC (sha256 $sum)"
+    ok "Using $BINARY_SRC (sha256 $BINARY_SUM)"
 }
 
 install_binary() {
-    # Always install a fresh root-owned 0755 copy. The uploaded file's owner,
-    # mode and SELinux label come from whoever uploaded it, so it is never
-    # used as-is. restorecon is what applies concert_exec_t; a plain mv would
-    # keep the label the file was created with.
-    install -m 0755 -o root -g root "$BINARY_SRC" "$BIN.new"
-    mv -f -- "$BIN.new" "$BIN"
+    # A fresh root-owned 0755 copy whenever the binary changed. The uploaded
+    # file's owner, mode and SELinux label come from whoever uploaded it, so
+    # it is never used as-is. restorecon is what applies concert_exec_t; a
+    # plain mv would keep the label the file was created with.
+    local installed=""
+    [[ -f "$BIN" ]] && installed=$(sha256sum "$BIN" | awk '{print $1}')
+
+    if [[ "$installed" == "$BINARY_SUM" ]]; then
+        ok "$BIN is already this build"
+    else
+        install -m 0755 -o root -g root "$BINARY_SRC" "$BIN.new"
+        mv -f -- "$BIN.new" "$BIN"
+        need_restart "new binary"
+    fi
+
     if selinux_active; then
         restorecon -F "$BIN"
         [[ "$(stat -c %C "$BIN")" == *concert_exec_t* ]] \
@@ -231,10 +279,18 @@ write_policy() {
     mkdir -p "$dir"
 
     cat > "$dir/$MODULE.te" <<'EOF'
-policy_module(concert, 1.1.0)
+policy_module(concert, 1.2.0)
 
 ########################################
 # Declarations
+
+## <desc>
+## <p>
+## Allow concert to listen on any unreserved port, so its listen and portal
+## addresses can move to ports that were not labeled at install time.
+## </p>
+## </desc>
+gen_tunable(concert_bind_any_port, false)
 
 type concert_t;
 type concert_exec_t;
@@ -248,7 +304,7 @@ files_config_file(concert_etc_t)
 type concert_var_lib_t;
 files_type(concert_var_lib_t)
 
-# Ports concert may listen on (main listener and admin portal).
+# Ports concert may listen on (main listener, admin portal, extra ports).
 type concert_port_t;
 corenet_port(concert_port_t)
 
@@ -292,6 +348,11 @@ manage_files_pattern(concert_t, concert_var_lib_t, concert_var_lib_t)
 # Listening: its own ports, plus the standard web ports (80/443, 8080, ...)
 corenet_tcp_bind_generic_node(concert_t)
 allow concert_t { concert_port_t http_port_t http_cache_port_t }:tcp_socket name_bind;
+
+# Listen addresses changed in the admin portal, on ports nobody labeled.
+tunable_policy(`concert_bind_any_port',`
+	corenet_tcp_bind_all_unreserved_ports(concert_t)
+')
 
 # Upstream origin, and the Let's Encrypt API on 443 (http_port_t)
 allow concert_t { concert_upstream_port_t http_port_t http_cache_port_t }:tcp_socket name_connect;
@@ -338,7 +399,18 @@ load_policy() {
         die "SELinux module failed to compile"
     fi
     semodule -i "$dir/$MODULE.pp"
-    ok "Loaded SELinux module ${BOLD}$MODULE${RESET}"
+    ok "Loaded SELinux module ${BOLD}$MODULE${RESET} (no restart needed)"
+}
+
+# Applies SELINUX_ANY_PORT when this run set it; otherwise leaves the boolean
+# as it is, so a setsebool made by hand survives re-runs.
+apply_selinux_boolean() {
+    case "$ANY_PORT" in
+        1) setsebool -P "$SEBOOL" on  && ok "SELinux boolean $SEBOOL is on: concert may bind any unreserved port" ;;
+        0) setsebool -P "$SEBOOL" off && ok "SELinux boolean $SEBOOL is off" ;;
+        "") ;;
+        *) die "SELINUX_ANY_PORT must be 0 or 1" ;;
+    esac
 }
 
 # ── SELinux: ports ───────────────────────────────────────────────────
@@ -379,6 +451,55 @@ label_port() {
         semanage port -m -t "$want" -p tcp "$port"
     fi
     state_add "port $port"
+}
+
+# ── Installer choices ────────────────────────────────────────────────
+
+# Loads CONCERT_EXTRA_PORTS and ALLOW_LOW_PORTS from $INSTALLER_ENV unless
+# this run set them, validates them, and saves them back.
+load_installer_settings() {
+    local saved_extra="" saved_low="" p
+    if [[ -f "$INSTALLER_ENV" ]]; then
+        saved_extra=$(sed -n 's/^EXTRA_PORTS=//p' "$INSTALLER_ENV" | tail -n 1)
+        saved_low=$(sed -n 's/^ALLOW_LOW_PORTS=//p' "$INSTALLER_ENV" | tail -n 1)
+    fi
+    [[ -n "$EXTRA_PORTS_GIVEN" ]] || EXTRA_PORTS="$saved_extra"
+    [[ -n "$LOW_PORTS_GIVEN" ]]   || LOW_PORTS="$saved_low"
+
+    EXTRA_PORTS="${EXTRA_PORTS// /}"
+    LOW_PORTS="${LOW_PORTS:-0}"
+    [[ "$LOW_PORTS" == "0" || "$LOW_PORTS" == "1" ]] || die "ALLOW_LOW_PORTS must be 0 or 1"
+    for p in ${EXTRA_PORTS//,/ }; do
+        valid_port "$p" || die "invalid port '$p' in CONCERT_EXTRA_PORTS"
+    done
+
+    ( umask 077
+      cat > "$INSTALLER_ENV" <<EOF
+# Choices made by installer.sh, kept for later runs. Not read by concert.
+EXTRA_PORTS=$EXTRA_PORTS
+ALLOW_LOW_PORTS=$LOW_PORTS
+EOF
+    )
+    chown root:root "$INSTALLER_ENV"
+    selinux_active && restorecon -F "$INSTALLER_ENV"
+    return 0
+}
+
+# Every port concert is configured or allowed to listen on.
+listen_ports() {
+    local p
+    for p in "$(port_of_addr "$LISTEN")" "$(port_of_addr "$PORTAL_LISTEN")" ${EXTRA_PORTS//,/ }; do
+        [[ -n "$p" ]] && echo "$p"
+    done | sort -un
+}
+
+needs_low_port_cap() {
+    [[ "$LOW_PORTS" == "1" ]] && return 0
+    local p
+    for p in $(listen_ports); do
+        (( p < 1024 )) && return 0
+    done
+    return 1
 }
 
 # ── User, state directory and configuration ──────────────────────────
@@ -456,10 +577,11 @@ write_env_file() {
 # concert settings. concert reads every setting from these CONCERT_*
 # variables; run "concert -h" for the full list. Only whole-line comments
 # are allowed: systemd makes anything after the "=" part of the value.
-# Values changed in the admin portal are saved to
-# $DATA_DIR/settings.json and take priority over this file;
+# Values changed in the admin portal apply immediately, are saved to
+# $DATA_DIR/settings.json, and take priority over this file;
 # use Reset in the portal to hand a setting back to this file.
-# After editing, re-run installer.sh so port labels match, or at least:
+# After editing this file, re-run installer.sh (it restarts concert because
+# the file changed), or at least:
 #   systemctl restart concert
 CONCERT_LISTEN=$LISTEN
 CONCERT_UPSTREAM=$UPSTREAM
@@ -498,9 +620,7 @@ EOF
 
     # Ports changed in the portal live in settings.json and win over the env
     # file, so the port labels must follow them.
-    settings_override listen        LISTEN
     settings_override upstream      UPSTREAM
-    settings_override portal_listen PORTAL_LISTEN
 
     selinux_active && restorecon -RF "$ETC"
     return 0
@@ -519,15 +639,26 @@ settings_override() {
     fi
 }
 
+# concert.env changes only take effect on a restart; compare it with the
+# copy concert was last (re)started with.
+env_changed() {
+    [[ -f "$ENV_SUM" ]] || return 0
+    [[ "$(sha256sum "$ENV_FILE" | awk '{print $1}')" != "$(cat "$ENV_SUM")" ]]
+}
+
+record_env() {
+    ( umask 077; sha256sum "$ENV_FILE" | awk '{print $1}' > "$ENV_SUM" )
+}
+
 # ── systemd unit ─────────────────────────────────────────────────────
 
 write_unit() {
-    local caps=""
-    if (( $(port_of_addr "$LISTEN") < 1024 )); then
+    local caps="" new="$WORK/concert.service"
+    if needs_low_port_cap; then
         caps="CAP_NET_BIND_SERVICE"
     fi
 
-    cat > "$UNIT" <<EOF
+    cat > "$new" <<EOF
 [Unit]
 Description=Concert FIFO waiting room reverse proxy
 Documentation=https://github.com/andreimerlescu/concert
@@ -549,7 +680,8 @@ LimitNOFILE=65536
 StateDirectory=concert
 StateDirectoryMode=0700
 
-# Hardening
+# Hardening. CAP_NET_BIND_SERVICE is granted only when a listen, portal or
+# extra port is below 1024, or ALLOW_LOW_PORTS=1.
 NoNewPrivileges=yes
 CapabilityBoundingSet=$caps
 AmbientCapabilities=$caps
@@ -574,8 +706,16 @@ SystemCallArchitectures=native
 [Install]
 WantedBy=multi-user.target
 EOF
+
+    if [[ -f "$UNIT" ]] && cmp -s "$new" "$UNIT"; then
+        ok "$UNIT unchanged"
+        return
+    fi
+    install -m 0644 -o root -g root "$new" "$UNIT"
+    selinux_active && restorecon -F "$UNIT"
     systemctl daemon-reload
-    ok "Installed $UNIT"
+    need_restart "unit changed"
+    ok "Installed $UNIT${caps:+ (with $caps)}"
 }
 
 # ── Firewall ─────────────────────────────────────────────────────────
@@ -594,6 +734,35 @@ open_firewall() {
     ok "Opened tcp/$port in firewalld"
 }
 
+# ── Service ──────────────────────────────────────────────────────────
+
+RESTARTED=0
+
+# Starts concert, or restarts it when something that only takes effect at
+# startup changed. Otherwise it keeps running and the queue stays intact.
+apply_service() {
+    systemctl enable --quiet concert
+
+    if ! systemctl is-active --quiet concert; then
+        log "Starting concert"
+        systemctl start concert
+        RESTARTED=1
+    else
+        env_changed && need_restart "$ENV_FILE changed"
+        [[ "$FORCE_RESTART" == "1" ]] && need_restart "FORCE_RESTART=1"
+
+        if (( ${#RESTART_REASONS[@]} == 0 )); then
+            ok "Nothing changed that needs a restart; concert keeps running with its queue intact"
+            return
+        fi
+        local IFS=', '
+        warn "Restarting concert (${RESTART_REASONS[*]}): the waiting queue resets; bans and portal settings are kept"
+        systemctl restart concert
+        RESTARTED=1
+    fi
+    record_env
+}
+
 # ── Verification ─────────────────────────────────────────────────────
 
 # Matches denials against the confined domain, its files, and systemd's
@@ -607,13 +776,15 @@ report_avcs() {
         warn "SELinux denials involving concert:"
         echo "$avcs" | tail -n 20 >&2
         echo "  Inspect:  ausearch -m AVC -ts recent | audit2why" >&2
+        echo "  A denied name_bind means a listen port concert may not use: label it with" >&2
+        echo "  semanage port -a -t concert_port_t -p tcp <port>, or SELINUX_ANY_PORT=1" >&2
         return 1
     fi
     ok "No audited SELinux denials for concert (semodule -DB reveals dontaudit rules; semodule -B restores)"
 }
 
 verify() {
-    sleep 2
+    (( RESTARTED )) && sleep 2
     if ! systemctl is-active --quiet concert; then
         journalctl -u concert -n 30 --no-pager >&2 || true
         report_avcs || true
@@ -636,6 +807,7 @@ verify() {
     local insecure=()
     port=$(port_of_addr "$LISTEN")
     domain=$(env_get CONCERT_TLS_DOMAINS)
+    settings_override tls_domains domain >/dev/null
     domain="${domain%%,*}"
     domain="${domain// /}"
 
@@ -679,6 +851,7 @@ do_install() {
     resolve_binary
     ensure_user
     write_env_file
+    load_installer_settings
 
     for p in "$(port_of_addr "$LISTEN")" "$(port_of_url "$UPSTREAM")" "$(port_of_addr "$PORTAL_LISTEN")"; do
         valid_port "$p" || die "invalid port '$p' in $ENV_FILE or $DATA_DIR/settings.json"
@@ -686,9 +859,13 @@ do_install() {
 
     if selinux_active; then
         load_policy
-        label_port "$(port_of_addr "$LISTEN")"        concert_port_t          http_port_t http_cache_port_t
-        label_port "$(port_of_addr "$PORTAL_LISTEN")" concert_port_t          http_port_t http_cache_port_t
-        label_port "$(port_of_url "$UPSTREAM")"       concert_upstream_port_t http_port_t http_cache_port_t
+        apply_selinux_boolean
+        for p in $(listen_ports); do
+            label_port "$p" concert_port_t http_port_t http_cache_port_t
+        done
+        label_port "$(port_of_url "$UPSTREAM")" concert_upstream_port_t http_port_t http_cache_port_t
+    elif [[ -n "$ANY_PORT" ]]; then
+        warn "SELINUX_ANY_PORT has no effect while SELinux is disabled"
     fi
 
     ensure_state_dir
@@ -697,19 +874,26 @@ do_install() {
     write_unit
     open_firewall
 
-    systemctl enable --quiet concert
-    systemctl restart concert
+    apply_service
     verify
+
+    local anyport="n/a (SELinux disabled)"
+    selinux_active && anyport=$(getsebool "$SEBOOL" 2>/dev/null | awk '{print $NF}')
 
     echo
     echo "${BOLD}concert is installed.${RESET}"
     echo "  binary:   $BIN  (from $BINARY_SRC)"
     echo "  listen:   $LISTEN  ->  $UPSTREAM"
     echo "  portal:   $PORTAL_LISTEN"
-    echo "  config:   $ENV_FILE"
+    echo "  ports:    $(listen_ports | paste -sd, -) may be listened on${EXTRA_PORTS:+ (extra: $EXTRA_PORTS)}"
+    echo "  any port: $SEBOOL is $anyport"
+    echo "  config:   $ENV_FILE  (portal changes: $DATA_DIR/settings.json)"
     echo "  data:     $DATA_DIR  (settings.json, bans.json)"
     echo "  state:    $STATE_DIR"
     echo "  logs:     journalctl -u concert -f"
+    if (( ! RESTARTED )); then
+        echo "  service:  kept running (no restart needed)"
+    fi
     if (( FIRST_INSTALL )); then
         echo
         echo "  Portal password (shown once, stored in $ENV_FILE):"
@@ -740,8 +924,10 @@ do_uninstall() {
         done < "$STATE"
         rm -f -- "$STATE"
     fi
+    rm -f -- "$ENV_SUM"
 
     # Port labels must go before the module, or semodule refuses to remove it.
+    # The concert_bind_any_port boolean goes with the module.
     if selinux_active && semodule -l | grep -qE "^${MODULE}([[:space:]]|$)"; then
         semodule -r "$MODULE" && ok "Removed SELinux module $MODULE"
     fi
