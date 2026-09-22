@@ -36,7 +36,7 @@
     </li>
     <li class="nav-item" role="presentation">
       <button class="nav-link" id="tab-settings-btn" data-bs-toggle="tab" data-bs-target="#tab-settings" type="button" role="tab" aria-controls="tab-settings" aria-selected="false">
-        <i class="bi bi-sliders"></i> Settings
+        <i class="bi bi-sliders"></i> Settings <span class="badge rounded-pill text-bg-warning d-none" id="settings-pending">restart</span>
       </button>
     </li>
     <li class="ms-auto align-self-center small text-body-secondary">
@@ -164,7 +164,7 @@
       </div>
       <p class="small text-body-secondary mt-3 mb-0">
         <i class="bi bi-info-circle"></i> Positions update when each visitor's browser polls, about every 3 seconds.
-        A removed visitor is out immediately; room releases their place in line within the ticket TTL.
+        Removing or banning a visitor takes them out of the line at once; banning also drops everyone else waiting from the same address or range.
       </p>
     </div>
 
@@ -172,6 +172,9 @@
     <div class="tab-pane fade" id="tab-bans" role="tabpanel" aria-labelledby="tab-bans-btn" tabindex="0">
       <div class="alert alert-secondary d-none" id="bans-disabled" role="alert">
         <i class="bi bi-info-circle"></i> The abuse registry is disabled (<code>-abuse=false</code>), so bans are unavailable.
+      </div>
+      <div class="alert alert-warning d-none" id="bans-not-persisted" role="alert">
+        <i class="bi bi-exclamation-triangle"></i> <code>-data-dir</code> is empty, so bans — including permanent ones — are lost when concert restarts.
       </div>
       <div class="d-flex align-items-center gap-2 mb-3">
         <button type="button" class="btn btn-sm btn-danger" id="ban-new"><i class="bi bi-plus-circle"></i> Ban a client or range</button>
@@ -197,63 +200,43 @@
 
     <!-- Settings -->
     <div class="tab-pane fade" id="tab-settings" role="tabpanel" aria-labelledby="tab-settings-btn" tabindex="0">
+      <div class="alert alert-warning d-none" id="settings-restart" role="alert">
+        <i class="bi bi-arrow-repeat"></i> Some saved settings take effect after a restart: <code>systemctl restart concert</code>.
+      </div>
       <div class="row g-3">
-        <div class="col-lg-7">
-          <form class="card stat-card" id="settings-form" novalidate>
-            <div class="card-body">
-              <h2 class="h6 mb-3"><i class="bi bi-sliders"></i> Waiting room</h2>
-              <div class="row g-3">
-                <div class="col-sm-6">
-                  <label for="set-cap" class="form-label">Page slots</label>
-                  <input type="number" min="1" step="1" class="form-control" id="set-cap" required>
-                  <div class="form-text">Concurrent page requests allowed through to the origin.</div>
-                </div>
-                <div class="col-sm-6">
-                  <label for="set-max-queue" class="form-label">Max queue depth</label>
-                  <input type="number" min="0" step="1" class="form-control" id="set-max-queue" required>
-                  <div class="form-text">New arrivals get 503 beyond this. 0 is unlimited.</div>
-                </div>
-                <div class="col-sm-6">
-                  <label for="set-token-ttl" class="form-label">Ticket TTL</label>
-                  <input type="text" class="form-control" id="set-token-ttl" required placeholder="5m0s">
-                  <div class="form-text">How long an abandoned ticket holds its place. 30s–24h.</div>
-                </div>
+        <div class="col-xl-8">
+          <form id="settings-form" novalidate>
+            <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+              <div class="input-group input-group-sm filter-input">
+                <span class="input-group-text"><i class="bi bi-search"></i></span>
+                <input type="search" class="form-control" id="settings-filter" placeholder="Filter by name, flag or variable" aria-label="Filter settings">
               </div>
-
-              <h2 class="h6 mt-4 mb-3"><i class="bi bi-currency-dollar"></i> Skip the line</h2>
-              <div class="row g-3">
-                <div class="col-sm-6">
-                  <label for="set-rate" class="form-label">Price per position</label>
-                  <div class="input-group"><span class="input-group-text">$</span>
-                    <input type="number" min="0" step="0.01" class="form-control" id="set-rate" required></div>
-                </div>
-                <div class="col-sm-6">
-                  <label for="set-surge" class="form-label">Surge per queued visitor</label>
-                  <div class="input-group"><span class="input-group-text">$</span>
-                    <input type="number" min="0" step="0.01" class="form-control" id="set-surge" required></div>
-                </div>
-                <div class="col-sm-8">
-                  <label for="set-skip-url" class="form-label">Payment page URL</label>
-                  <input type="text" class="form-control font-monospace" id="set-skip-url" placeholder="/queue/purchase">
-                  <div class="form-text">Empty hides the skip-the-line card. The path must also be in <code>-bypass</code>.</div>
-                </div>
-                <div class="col-sm-4">
-                  <label for="set-pass-duration" class="form-label">VIP pass lifetime</label>
-                  <input type="text" class="form-control" id="set-pass-duration" required placeholder="0s">
-                  <div class="form-text">0s disables passes; otherwise 1m–24h.</div>
-                </div>
-              </div>
+              <button type="button" class="btn btn-sm btn-outline-secondary ms-auto" id="settings-discard" disabled><i class="bi bi-x-circle"></i> Discard</button>
+              <button type="submit" class="btn btn-sm btn-primary" id="settings-apply" disabled><i class="bi bi-check2-circle"></i> <span id="settings-apply-label">Save changes</span></button>
             </div>
-            <div class="card-footer d-flex align-items-center gap-2">
-              <span class="small text-body-secondary"><i class="bi bi-info-circle"></i> Changes apply immediately and last until restart.</span>
-              <button type="submit" class="btn btn-primary ms-auto"><i class="bi bi-check2-circle"></i> Apply</button>
-            </div>
+            <div id="settings-groups" class="d-grid gap-3"></div>
           </form>
         </div>
-        <div class="col-lg-5">
-          <div class="card stat-card h-100"><div class="card-body">
-            <h2 class="h6 mb-3"><i class="bi bi-lock"></i> Fixed at startup</h2>
-            <dl class="row small mb-0" id="settings-readonly"></dl>
+        <div class="col-xl-4">
+          <div class="card stat-card mb-3"><div class="card-body">
+            <h2 class="h6 mb-3"><i class="bi bi-layers"></i> Where settings come from</h2>
+            <p class="small mb-2">Each setting uses the first of these that has a value:</p>
+            <ol class="small mb-3 ps-3">
+              <li><span class="badge text-bg-success">saved</span> changed here, stored in settings.json</li>
+              <li><span class="badge text-bg-primary">flag</span> command-line flag</li>
+              <li><span class="badge text-bg-info">env</span> <code>CONCERT_*</code> environment variable</li>
+              <li><span class="badge text-bg-light border">default</span> built-in default</li>
+            </ol>
+            <p class="small mb-2">
+              <span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle">restart</span>
+              settings are saved at once and used from the next start. The rest apply immediately.
+              Reset removes a value from settings.json.
+            </p>
+            <p class="small mb-0 text-break">File: <span class="font-monospace" id="settings-file">–</span></p>
+          </div></div>
+          <div class="card stat-card"><div class="card-body">
+            <h2 class="h6 mb-3"><i class="bi bi-lock"></i> Environment only</h2>
+            <dl class="row small mb-0" id="settings-fixed"></dl>
           </div></div>
         </div>
       </div>
@@ -277,18 +260,25 @@
             An address or a CIDR range. IPv6 addresses are banned by their /64.
             Ranges may be as broad as /8 for IPv4 and /16 for IPv6.
             Addresses in the abuse allowlist and trusted proxies stay reachable inside a banned range.
+            Visitors waiting in line from the banned network are dropped immediately.
           </div>
         </div>
-        <label for="ban-duration" class="form-label">Duration</label>
-        <input type="text" class="form-control" id="ban-duration" required value="1h" placeholder="30m, 1h, 24h">
-        <div class="d-flex flex-wrap gap-1 mt-2" id="ban-presets">
-          <button type="button" class="btn btn-sm btn-outline-secondary" data-duration="15m">15m</button>
-          <button type="button" class="btn btn-sm btn-outline-secondary" data-duration="1h">1h</button>
-          <button type="button" class="btn btn-sm btn-outline-secondary" data-duration="6h">6h</button>
-          <button type="button" class="btn btn-sm btn-outline-secondary" data-duration="24h">24h</button>
-          <button type="button" class="btn btn-sm btn-outline-secondary" data-duration="168h">7 days</button>
-          <button type="button" class="btn btn-sm btn-outline-secondary" data-duration="720h">30 days</button>
+        <div class="form-check form-switch mb-3">
+          <input class="form-check-input" type="checkbox" role="switch" id="ban-permanent">
+          <label class="form-check-label" for="ban-permanent">Permanent — lasts until someone unbans it</label>
         </div>
+        <fieldset id="ban-duration-group">
+          <label for="ban-duration" class="form-label">Duration</label>
+          <input type="text" class="form-control" id="ban-duration" required value="1h" placeholder="30m, 1h, 24h">
+          <div class="d-flex flex-wrap gap-1 mt-2" id="ban-presets">
+            <button type="button" class="btn btn-sm btn-outline-secondary" data-duration="15m">15m</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" data-duration="1h">1h</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" data-duration="6h">6h</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" data-duration="24h">24h</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" data-duration="168h">7 days</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" data-duration="720h">30 days</button>
+          </div>
+        </fieldset>
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>

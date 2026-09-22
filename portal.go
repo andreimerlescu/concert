@@ -14,12 +14,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"html/template"
+	"io"
 	"io/fs"
 	"log"
-	"math"
 	"mime"
 	"net"
 	"net/http"
@@ -32,7 +31,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/andreimerlescu/goenv/env"
 	"github.com/gin-gonic/gin"
 )
 
@@ -75,6 +73,7 @@ const (
 	loginLockout       = 15 * time.Minute
 	readyForgetAfter   = time.Minute
 	ctxPortalNonce     = "portal.nonce"
+	settingsBodyLimit  = 1 << 20
 )
 
 var (
@@ -85,6 +84,9 @@ var (
 
 // ─── configuration ───────────────────────────────────────────────────────────
 
+// portalConfig holds the admin portal's settings. Its flags are declared
+// from settingDefs in settings.go with every other flag, and pass is read in
+// parseConfig from CONCERT_PORTAL_PASS alongside concert's other secrets.
 type portalConfig struct {
 	listen       string
 	allowSpec    string
@@ -93,18 +95,6 @@ type portalConfig struct {
 
 	pass  string         // CONCERT_PORTAL_PASS; env-only
 	allow []netip.Prefix // parsed allowSpec
-}
-
-func registerPortalFlags(fs *flag.FlagSet, pc *portalConfig) {
-	fs.StringVar(&pc.listen, "portal-listen", env.String("CONCERT_PORTAL_LISTEN", "127.0.0.1:8081"), "admin portal address; the portal only starts when CONCERT_PORTAL_PASS is set")
-	fs.StringVar(&pc.allowSpec, "portal-allow", env.String("CONCERT_PORTAL_ALLOW", "127.0.0.1/32,::1/128"), "comma-separated CIDRs allowed to reach the admin portal")
-	fs.DurationVar(&pc.sessionTTL, "portal-session-ttl", env.Duration("CONCERT_PORTAL_SESSION_TTL", 8*time.Hour), "admin portal sign-in lifetime")
-	fs.BoolVar(&pc.secureCookie, "portal-secure-cookie", env.Bool("CONCERT_PORTAL_SECURE_COOKIE", false), "mark the portal session cookie Secure (portal served over HTTPS)")
-}
-
-// loadSecrets reads values that must never be passed as flags.
-func (pc *portalConfig) loadSecrets() {
-	pc.pass = env.String("CONCERT_PORTAL_PASS", "")
 }
 
 func (pc *portalConfig) enabled() bool {
@@ -166,8 +156,6 @@ type portal struct {
 	static     fs.FS
 	sessionKey []byte
 	passDigest [sha256.Size]byte
-	rateBits   atomic.Uint64
-	surgeBits  atomic.Uint64
 	occupants  *occupantStore
 	kicked     *kickList
 	fails      *loginLimiter
@@ -219,9 +207,11 @@ func newPortal(a *app) (*portal, error) {
 	p.untracked = append(p.untracked, parsePaths(a.cfg.bypass)...)
 	p.untracked = append(p.untracked, pathRule{path: "/_room", prefix: true})
 
-	// Pricing becomes adjustable at runtime. Same formula as -rate/-surge.
-	p.setPricing(a.cfg.rate, a.cfg.surge)
-	a.room.SetRateFunc(p.price)
+	// Pricing is adjustable at runtime; the price lives on the app.
+	a.room.SetRateFunc(a.price)
+
+	// Every new ban drops that network's waiting visitors at once.
+	a.abuse.setOnBan(p.dropBanned)
 
 	p.engine = p.routes()
 
@@ -271,21 +261,9 @@ func (p *portal) janitor(ctx context.Context) {
 	}
 }
 
-// ─── pricing ─────────────────────────────────────────────────────────────────
-
-func (p *portal) setPricing(rate, surge float64) {
-	p.rateBits.Store(math.Float64bits(rate))
-	p.surgeBits.Store(math.Float64bits(surge))
-}
-
-func (p *portal) pricing() (rate, surge float64) {
-	return math.Float64frombits(p.rateBits.Load()), math.Float64frombits(p.surgeBits.Load())
-}
-
-// price is installed as room's RateFunc: base + depth × surge per position.
+// price is the skip-the-line price at queue depth; see app.price.
 func (p *portal) price(depth int64) float64 {
-	rate, surge := p.pricing()
-	return rate + float64(depth)*surge
+	return p.a.price(depth)
 }
 
 // ─── routes ──────────────────────────────────────────────────────────────────
@@ -313,6 +291,7 @@ func (p *portal) routes() *gin.Engine {
 	api.DELETE("/bans", p.apiUnban)
 	api.GET("/settings", p.apiSettings)
 	api.POST("/settings", p.apiSettingsSave)
+	api.DELETE("/settings", p.apiSettingsReset)
 
 	r.NoRoute(func(c *gin.Context) { c.String(http.StatusNotFound, "not found") })
 	return r
@@ -537,7 +516,7 @@ func portalActor(c *gin.Context) string {
 
 func (p *portal) apiOverview(c *gin.Context) {
 	a, wr, stats := p.a, p.a.room, p.a.stats
-	rate, surge := p.pricing()
+	rate, surge := a.pricing()
 	c.JSON(http.StatusOK, gin.H{
 		"cap":                          wr.Cap(),
 		"occupancy":                    wr.Len(),
@@ -570,6 +549,7 @@ func (p *portal) apiOverview(c *gin.Context) {
 		"rate":                         rate,
 		"surge":                        surge,
 		"skip_url":                     wr.SkipURL(),
+		"restart_pending":              a.pendingRestart(),
 	})
 }
 
@@ -635,15 +615,21 @@ func (p *portal) apiKick(c *gin.Context) {
 			return
 		}
 		banFor = left
+		p.a.saveBansNow()
 	}
 
 	p.kicked.add(occ.token, now.Add(p.a.room.TokenTTL()+time.Minute))
 	p.occupants.remove(occ.token)
+	releaseTicket(p.a.room, occ.token)
 	log.Printf("portal: %s removed %s (%s) from the line, ban=%v", portalActor(c), occ.id, occ.ip, body.Ban)
+	secs := int(banFor / time.Second)
+	if banFor == banForeverLeft {
+		secs = 0
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"kicked":      occ.id,
 		"banned":      body.Ban,
-		"ban_seconds": int(banFor / time.Second),
+		"ban_seconds": secs,
 	})
 }
 
@@ -651,23 +637,30 @@ func (p *portal) apiKick(c *gin.Context) {
 
 func (p *portal) apiBans(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
-		"enabled": p.a.abuse != nil,
-		"tracked": p.a.abuse.tracked(),
-		"ranges":  p.a.abuse.rangeCount(),
-		"bans":    p.a.abuse.bans(time.Now()),
+		"enabled":   p.a.abuse != nil,
+		"tracked":   p.a.abuse.tracked(),
+		"ranges":    p.a.abuse.rangeCount(),
+		"persisted": p.a.bansPath != "",
+		"bans":      p.a.abuse.bans(time.Now()),
 	})
 }
 
-// apiBanSave creates a ban or replaces the remaining time of an existing one.
-// The client may be a single address (IPv6 is banned by its /64) or a CIDR
-// range such as 203.0.0.0/16.
+// apiBanSave creates a ban or replaces an existing one. The client may be a
+// single address (IPv6 is banned by its /64) or a CIDR range such as
+// 203.0.0.0/16. A permanent ban lasts until it is lifted. Waiting visitors
+// the ban covers are dropped from the line at once; "dropped" counts them.
 func (p *portal) apiBanSave(c *gin.Context) {
 	var body struct {
-		Client   string `json:"client"`
-		Duration string `json:"duration"`
+		Client    string `json:"client"`
+		Duration  string `json:"duration"`
+		Permanent bool   `json:"permanent"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		jsonError(c, http.StatusBadRequest, "client and duration are required")
+		return
+	}
+	if p.a.abuse == nil {
+		jsonError(c, http.StatusConflict, errAbuseDisabled.Error())
 		return
 	}
 	target, err := parseBanTarget(body.Client)
@@ -675,12 +668,26 @@ func (p *portal) apiBanSave(c *gin.Context) {
 		jsonError(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	d, err := time.ParseDuration(strings.TrimSpace(body.Duration))
-	if err != nil || d < time.Minute || d > 365*24*time.Hour {
-		jsonError(c, http.StatusBadRequest, "duration must be between 1m and 8760h, for example 30m or 24h")
-		return
+	var d time.Duration // 0 = permanent
+	if !body.Permanent {
+		d, err = time.ParseDuration(strings.TrimSpace(body.Duration))
+		if err != nil || d < time.Minute || d > 365*24*time.Hour {
+			jsonError(c, http.StatusBadRequest, "duration must be between 1m and 8760h, for example 30m or 24h, or the ban must be permanent")
+			return
+		}
 	}
 	now := time.Now()
+	var until any
+	if !body.Permanent {
+		until = now.Add(d).UTC()
+	}
+	lasting := "permanently"
+	if !body.Permanent {
+		lasting = "for " + d.String()
+	}
+
+	// Counted before the ban, because the ban removes them from the line.
+	dropped := p.occupants.countWhere(p.inScope(target.scope()))
 
 	if target.single {
 		key, err := p.a.abuse.banFor(target.prefix.Addr(), d, now)
@@ -692,8 +699,15 @@ func (p *portal) apiBanSave(c *gin.Context) {
 			jsonError(c, http.StatusBadRequest, err.Error())
 			return
 		}
-		log.Printf("portal: %s banned %s for %s", portalActor(c), displayKey(key), d)
-		c.JSON(http.StatusOK, gin.H{"client": displayKey(key), "until": now.Add(d).UTC(), "range": false})
+		p.a.saveBansNow()
+		log.Printf("portal: %s banned %s %s, dropped %d waiting", portalActor(c), displayKey(key), lasting, dropped)
+		c.JSON(http.StatusOK, gin.H{
+			"client":    displayKey(key),
+			"until":     until,
+			"range":     false,
+			"permanent": body.Permanent,
+			"dropped":   dropped,
+		})
 		return
 	}
 
@@ -701,12 +715,16 @@ func (p *portal) apiBanSave(c *gin.Context) {
 		jsonError(c, http.StatusConflict, err.Error())
 		return
 	}
+	p.a.saveBansNow()
 	exempt := p.a.abuse.exemptWithin(target.prefix)
-	log.Printf("portal: %s banned range %s for %s (exempt within: %v)", portalActor(c), target.prefix, d, exempt)
+	log.Printf("portal: %s banned range %s %s, dropped %d waiting (exempt within: %v)",
+		portalActor(c), target.prefix, lasting, dropped, exempt)
 	c.JSON(http.StatusOK, gin.H{
 		"client":        target.prefix.String(),
-		"until":         now.Add(d).UTC(),
+		"until":         until,
 		"range":         true,
+		"permanent":     body.Permanent,
+		"dropped":       dropped,
 		"exempt_within": exempt,
 	})
 }
@@ -725,177 +743,111 @@ func (p *portal) apiUnban(c *gin.Context) {
 		jsonError(c, http.StatusNotFound, "that client is not tracked")
 		return
 	}
+	p.a.saveBansNow()
 	log.Printf("portal: %s unbanned %s", portalActor(c), target)
 	c.JSON(http.StatusOK, gin.H{"unbanned": target.String()})
-}
-
-// banFor sets ip's ban to end d from now. A new ban counts as an offense
-// for future escalation; changing an active ban does not.
-func (r *abuseRegistry) banFor(ip netip.Addr, d time.Duration, now time.Time) (netip.Addr, error) {
-	if r == nil {
-		return netip.Addr{}, errAbuseDisabled
-	}
-	if !ip.IsValid() {
-		return netip.Addr{}, errors.New("invalid address")
-	}
-	k, ok := r.trackable(ip)
-	if !ok {
-		return netip.Addr{}, errClientExempt
-	}
-	n := now.UnixNano()
-	sh := r.shard(k)
-	sh.mu.Lock()
-	defer sh.mu.Unlock()
-
-	e := r.entryLocked(sh, k, n)
-	if e == nil {
-		return netip.Addr{}, errRegistryFull
-	}
-	if e.bannedUntil <= n {
-		e.offenses++
-		r.stats.abuseBans.Add(1)
-	}
-	e.bannedUntil = n + int64(d)
-	e.strikes = 0
-	e.windowStart = n
-	return k, nil
 }
 
 // ─── API: settings ───────────────────────────────────────────────────────────
 
 func (p *portal) settingsView() gin.H {
-	a, wr := p.a, p.a.room
-	rate, surge := p.pricing()
+	views, file := p.a.settingsViews()
+	pending := 0
+	for _, v := range views {
+		if v.Pending {
+			pending++
+		}
+	}
 	return gin.H{
-		"cap":           wr.Cap(),
-		"max_queue":     wr.MaxQueueDepth(),
-		"rate":          rate,
-		"surge":         surge,
-		"skip_url":      wr.SkipURL(),
-		"pass_duration": wr.PassDuration().String(),
-		"token_ttl":     wr.TokenTTL().String(),
-		"readonly": gin.H{
-			"Upstream":              a.cfg.upstream,
-			"Asset cap":             strconv.Itoa(a.assets.global.Cap()),
-			"Per-user assets":       fmt.Sprintf("%d HTTP/1.1 · %d HTTP/2", a.cfg.assetUserCapH1, a.cfg.assetUserCapH2),
-			"Admission pass TTL":    a.cfg.admitTTL.String(),
-			"Abuse registry":        fmt.Sprintf("%v · %d strikes / %s · cooldown %s → %s", a.abuse != nil, a.cfg.abuseStrikes, a.cfg.abuseWindow, a.cfg.abuseCooldown, a.cfg.abuseMaxCooldown),
-			"Trusted proxies":       orNone(a.cfg.trustedProxies),
-			"Abuse allowlist":       orNone(a.cfg.abuseAllow),
-			"Bypass paths":          orNone(a.cfg.bypass),
-			"Asset paths":           orNone(a.cfg.assets),
-			"Public asset paths":    orNone(a.cfg.assetPublic),
-			"Ban paths":             orNone(a.cfg.banPaths),
-			"Portal allowlist":      p.cfg.allowSpec,
-			"Portal session length": p.cfg.sessionTTL.String(),
-		},
+		"settings":        views,
+		"persisted":       file != "",
+		"file":            file,
+		"restart_pending": pending,
+		"fixed":           p.a.fixedSettings(),
 	}
-}
-
-func orNone(s string) string {
-	if strings.TrimSpace(s) == "" {
-		return "none"
-	}
-	return s
 }
 
 func (p *portal) apiSettings(c *gin.Context) {
 	c.JSON(http.StatusOK, p.settingsView())
 }
 
-type settingsUpdate struct {
-	Cap          *int32   `json:"cap"`
-	MaxQueue     *int64   `json:"max_queue"`
-	Rate         *float64 `json:"rate"`
-	Surge        *float64 `json:"surge"`
-	SkipURL      *string  `json:"skip_url"`
-	PassDuration *string  `json:"pass_duration"`
-	TokenTTL     *string  `json:"token_ttl"`
+// apiSettingsSave takes a JSON object of setting keys to new values, for
+// example {"cap": 40, "abuse_cooldown": "10m"}. Every value is validated
+// before any is saved or applied; see app.changeSettings.
+func (p *portal) apiSettingsSave(c *gin.Context) {
+	var set map[string]json.RawMessage
+	if err := json.NewDecoder(io.LimitReader(c.Request.Body, settingsBodyLimit)).Decode(&set); err != nil || len(set) == 0 {
+		jsonError(c, http.StatusBadRequest, "send a JSON object of the settings to change")
+		return
+	}
+	ip, _ := remoteAddr(c.Request)
+	if err := p.a.changeSettings(set, nil, ip); err != nil {
+		jsonError(c, settingsStatus(err), err.Error())
+		return
+	}
+	log.Printf("portal: %s changed settings: %s", portalActor(c), strings.Join(sortedKeys(set), ", "))
+	c.JSON(http.StatusOK, p.settingsView())
 }
 
-// apiSettingsSave validates every field before applying any of them, so a
-// bad value never leaves the room half-updated. Changes last until restart.
-func (p *portal) apiSettingsSave(c *gin.Context) {
-	var u settingsUpdate
-	if err := c.ShouldBindJSON(&u); err != nil {
-		jsonError(c, http.StatusBadRequest, "invalid settings: "+err.Error())
+// apiSettingsReset removes ?key=… (repeatable) from settings.json, so those
+// settings follow flags, environment or defaults again.
+func (p *portal) apiSettingsReset(c *gin.Context) {
+	keys := c.QueryArray("key")
+	if len(keys) == 0 {
+		jsonError(c, http.StatusBadRequest, "key is required")
 		return
 	}
-
-	var passD, ttlD time.Duration
-	var problems []string
-	if u.Cap != nil && *u.Cap < 1 {
-		problems = append(problems, "cap must be at least 1")
-	}
-	if u.MaxQueue != nil && *u.MaxQueue < 0 {
-		problems = append(problems, "max queue must be 0 (unlimited) or more")
-	}
-	for name, v := range map[string]*float64{"rate": u.Rate, "surge": u.Surge} {
-		if v != nil && (math.IsNaN(*v) || math.IsInf(*v, 0) || *v < 0 || *v > 1e6) {
-			problems = append(problems, name+" must be between 0 and 1000000")
-		}
-	}
-	if u.SkipURL != nil {
-		s := strings.TrimSpace(*u.SkipURL)
-		*u.SkipURL = s
-		valid := s == "" || strings.HasPrefix(s, "/") || strings.HasPrefix(s, "https://") || strings.HasPrefix(s, "http://")
-		if !valid || len(s) > 2048 || strings.ContainsAny(s, " \t\r\n\"<>") {
-			problems = append(problems, "skip URL must be empty, a path starting with /, or an http(s) URL")
-		}
-	}
-	if u.PassDuration != nil {
-		d, err := time.ParseDuration(strings.TrimSpace(*u.PassDuration))
-		if err != nil || (d != 0 && (d < time.Minute || d > 24*time.Hour)) {
-			problems = append(problems, "VIP pass duration must be 0s or between 1m and 24h")
-		}
-		passD = d
-	}
-	if u.TokenTTL != nil {
-		d, err := time.ParseDuration(strings.TrimSpace(*u.TokenTTL))
-		if err != nil || d < 30*time.Second || d > 24*time.Hour {
-			problems = append(problems, "ticket TTL must be between 30s and 24h")
-		}
-		ttlD = d
-	}
-	if len(problems) > 0 {
-		jsonError(c, http.StatusBadRequest, strings.Join(problems, "; "))
+	ip, _ := remoteAddr(c.Request)
+	if err := p.a.changeSettings(nil, keys, ip); err != nil {
+		jsonError(c, settingsStatus(err), err.Error())
 		return
 	}
-
-	wr := p.a.room
-	apply := []struct {
-		set bool
-		fn  func() error
-	}{
-		{u.Cap != nil, func() error { return wr.SetCap(*u.Cap) }},
-		{u.MaxQueue != nil, func() error { return wr.SetMaxQueueDepth(*u.MaxQueue) }},
-		{u.PassDuration != nil, func() error { return wr.SetPassDuration(passD) }},
-		{u.TokenTTL != nil, func() error { return wr.SetTokenTTL(ttlD) }},
-	}
-	for _, step := range apply {
-		if step.set {
-			if err := step.fn(); err != nil {
-				jsonError(c, http.StatusBadRequest, err.Error())
-				return
-			}
-		}
-	}
-	if u.Rate != nil || u.Surge != nil {
-		rate, surge := p.pricing()
-		if u.Rate != nil {
-			rate = *u.Rate
-		}
-		if u.Surge != nil {
-			surge = *u.Surge
-		}
-		p.setPricing(rate, surge)
-	}
-	if u.SkipURL != nil {
-		wr.SetSkipURL(*u.SkipURL)
-	}
-
-	log.Printf("portal: %s updated settings", portalActor(c))
+	log.Printf("portal: %s reset settings: %s", portalActor(c), strings.Join(keys, ", "))
 	c.JSON(http.StatusOK, p.settingsView())
+}
+
+// ─── dropping banned visitors ────────────────────────────────────────────────
+
+// inScope matches waiting visitors a ban on scope covers. Exempt addresses
+// stay reachable inside a banned range, so they are never matched.
+func (p *portal) inScope(scope netip.Prefix) func(*occupant) bool {
+	return func(o *occupant) bool {
+		ip := o.ip.Unmap()
+		return ip.IsValid() && scope.Contains(ip) && !p.a.abuse.isExempt(ip)
+	}
+}
+
+// dropBanned is the abuse registry's ban callback. It removes every waiting
+// visitor the ban covers from the line and invalidates their tickets, so an
+// unban means rejoining at the back. The visitors' next status poll is
+// answered by the ban check (see app.rejectBanned) and their page reloads
+// into the block notice. It runs outside every registry lock.
+func (p *portal) dropBanned(scope netip.Prefix) {
+	dropped := p.occupants.removeWhere(p.inScope(scope))
+	if len(dropped) == 0 {
+		return
+	}
+	until := time.Now().Add(p.a.room.TokenTTL() + time.Minute)
+	for _, o := range dropped {
+		p.kicked.add(o.token, until)
+		releaseTicket(p.a.room, o.token)
+	}
+	log.Printf("portal: ban on %s dropped %d waiting visitor(s)", scope, len(dropped))
+}
+
+// ticketRemover is a waiting room that can release a ticket immediately.
+// The room API concert uses has no such call, so a dropped visitor's ticket
+// still counts in room's queue_depth until the reaper removes it. When room
+// gains RemoveToken with this signature, releaseTicket starts using it with
+// no other change.
+type ticketRemover interface {
+	RemoveToken(token string) error
+}
+
+func releaseTicket(wr any, token string) {
+	if r, ok := wr.(ticketRemover); ok {
+		_ = r.RemoveToken(token)
+	}
 }
 
 // ─── queue tracking on the main listener ─────────────────────────────────────
@@ -923,8 +875,12 @@ func (p *portal) wrap(next http.Handler) http.Handler {
 		}
 		isStatus := reqPath == "/queue/status"
 		if token != "" && p.kicked.has(token, now) {
-			p.rejectKicked(w, r, isStatus)
-			return
+			// A banned visitor is answered by the ban check in the main
+			// handler, which shows the block notice rather than the removal notice.
+			if _, banned := p.a.abuse.banned(clientIP(r, p.a.cfg.trusted), now); !banned {
+				p.rejectKicked(w, r, isStatus)
+				return
+			}
 		}
 
 		tw := &trackWriter{ResponseWriter: w, capture: isStatus && token != ""}
@@ -1173,6 +1129,34 @@ func (s *occupantStore) remove(token string) {
 		delete(s.byID, o.id)
 	}
 	s.mu.Unlock()
+}
+
+// removeWhere removes and returns every visitor match accepts.
+func (s *occupantStore) removeWhere(match func(*occupant) bool) []occupant {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []occupant
+	for token, o := range s.byToken {
+		if match(o) {
+			out = append(out, *o)
+			delete(s.byToken, token)
+			delete(s.byID, o.id)
+		}
+	}
+	return out
+}
+
+// countWhere counts the visitors match accepts.
+func (s *occupantStore) countWhere(match func(*occupant) bool) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, o := range s.byToken {
+		if match(o) {
+			n++
+		}
+	}
+	return n
 }
 
 func (s *occupantStore) count() int {

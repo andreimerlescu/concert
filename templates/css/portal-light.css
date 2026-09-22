@@ -93,3 +93,13 @@ main {
 .toast-container {
     z-index: 1090;
 }
+
+/* Settings: the first row after a group heading needs no divider, and a
+   changed-but-unsaved row is marked with a warning bar. */
+.settings-group .setting-row:first-of-type {
+    border-top: 0 !important;
+}
+
+.setting-row.setting-changed {
+    box-shadow: inset 3px 0 0 var(--bs-warning);
+}

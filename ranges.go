@@ -15,6 +15,9 @@ import (
 // A single client — an IPv4 /32 or an IPv6 /64 or narrower — is still
 // tracked in the per-client table in main.go, with strikes and escalation.
 //
+// A range ban may be permanent: it then lasts until an administrator lifts
+// it, and like every ban it survives restarts (see persist.go).
+//
 // Addresses in -abuse-allow and -trusted-proxies stay reachable even inside
 // a banned range.
 
@@ -93,8 +96,18 @@ func (t banTarget) String() string {
 	return t.prefix.String()
 }
 
+// scope is every address the ban covers: the client key's prefix (an IPv4
+// /32 or an IPv6 /64) for single clients, the CIDR block for ranges.
+func (t banTarget) scope() netip.Prefix {
+	if t.single {
+		k, _ := abuseKey(t.prefix.Addr())
+		return keyPrefix(k)
+	}
+	return t.prefix
+}
+
 type rangeBan struct {
-	until    int64 // unix nanos
+	until    int64 // unix nanos; banForever when permanent
 	offenses int
 }
 
@@ -126,17 +139,27 @@ func (r *abuseRegistry) rangeBanned(ip netip.Addr, now int64) (time.Duration, bo
 	if until == 0 || containsAddr(r.exempt, ip) {
 		return 0, false
 	}
+	if until == banForever {
+		return banForeverLeft, true
+	}
 	return time.Duration(until - now), true
 }
 
-// banRange sets the range's ban to end d from now. A new ban counts as an
-// offense; changing an active ban does not.
+// banRange sets the range's ban to end d from now; d <= 0 makes it
+// permanent. A new ban counts as an offense; changing an active ban does not.
+// Waiting visitors inside the range are dropped (see abuseRegistry.onBan).
 func (r *abuseRegistry) banRange(p netip.Prefix, d time.Duration, now time.Time) error {
 	if r == nil {
 		return errAbuseDisabled
 	}
-	n := now.UnixNano()
+	if err := r.setRange(p, d, now.UnixNano()); err != nil {
+		return err
+	}
+	r.notifyBan(p)
+	return nil
+}
 
+func (r *abuseRegistry) setRange(p netip.Prefix, d time.Duration, n int64) error {
 	r.ranges.mu.Lock()
 	defer r.ranges.mu.Unlock()
 	if r.ranges.m == nil {
@@ -155,7 +178,11 @@ func (r *abuseRegistry) banRange(p netip.Prefix, d time.Duration, now time.Time)
 		b.offenses++
 		r.stats.abuseBans.Add(1)
 	}
-	b.until = n + int64(d)
+	if d <= 0 {
+		b.until = banForever
+	} else {
+		b.until = n + int64(d)
+	}
 	return nil
 }
 
@@ -170,6 +197,7 @@ func (r *abuseRegistry) unbanRange(p netip.Prefix) bool {
 	}
 	delete(r.ranges.m, p)
 	r.ranges.n.Add(-1)
+	r.dirty.Store(true)
 	return true
 }
 
@@ -193,20 +221,22 @@ func (r *abuseRegistry) rangeViews(now int64) []banView {
 	defer r.ranges.mu.RUnlock()
 	out := make([]banView, 0, len(r.ranges.m))
 	for p, b := range r.ranges.m {
-		if b.until > now {
-			out = append(out, banView{
-				Client:           p.String(),
-				Until:            time.Unix(0, b.until).UTC(),
-				RemainingSeconds: int((time.Duration(b.until-now) + time.Second - 1) / time.Second),
-				Offenses:         b.offenses,
-				Range:            true,
-			})
+		if b.until <= now {
+			continue
 		}
+		v := banView{Client: p.String(), Offenses: b.offenses, Range: true}
+		if b.until == banForever {
+			v.Permanent = true
+		} else {
+			v.Until = time.Unix(0, b.until).UTC()
+			v.RemainingSeconds = int((time.Duration(b.until-now) + time.Second - 1) / time.Second)
+		}
+		out = append(out, v)
 	}
 	return out
 }
 
-// sweepRanges removes expired range bans.
+// sweepRanges removes expired range bans. Permanent bans never expire.
 func (r *abuseRegistry) sweepRanges(now time.Time) int {
 	if r == nil || r.ranges.n.Load() == 0 {
 		return 0

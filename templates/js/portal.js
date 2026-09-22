@@ -64,6 +64,7 @@
     function fmtNum(v) { return typeof v === 'number' ? numberFormat.format(v) : '–'; }
     function fmtMoney(v) { return '$' + Number(v || 0).toFixed(2); }
     function fmtTime(iso) { return new Date(iso).toLocaleString(); }
+    function plural(n, word) { return `${n} ${word}${n === 1 ? '' : 's'}`; }
 
     function fmtSeconds(total) {
         const s = Math.max(0, Math.round(total));
@@ -94,7 +95,7 @@
         t.append(row);
         wrap.append(t);
         t.addEventListener('hidden.bs.toast', () => t.remove());
-        bootstrap.Toast.getOrCreateInstance(t, { delay: 4500 }).show();
+        bootstrap.Toast.getOrCreateInstance(t, { delay: 5500 }).show();
     }
 
     function setBar(id, used, cap) {
@@ -149,6 +150,9 @@
             setText('stat-price', d.skip_url ? fmtMoney(d.rate) + ' + ' + fmtMoney(d.surge) + ' per queued' : 'off');
             setText('queue-count', fmtNum(d.occupants_tracked));
             setText('ban-count', fmtNum(d.active_bans));
+            const pending = byId('settings-pending');
+            pending.classList.toggle('d-none', !(d.restart_pending > 0));
+            pending.title = d.restart_pending > 0 ? plural(d.restart_pending, 'setting') + ' waiting for a restart' : '';
             setText('updated-at', 'updated ' + new Date().toLocaleTimeString());
         } catch (e) {
             setText('updated-at', 'update failed: ' + e.message);
@@ -223,7 +227,7 @@
         const prompts = {
             promote: 'Move this visitor to the front of the line?',
             kick: 'Remove this visitor from the line? They can rejoin at the back.',
-            ban: 'Remove this visitor and ban their address for the abuse cooldown?',
+            ban: 'Remove this visitor and ban their address for the abuse cooldown? Everyone else waiting from that address is dropped too.',
         };
         if (!window.confirm(prompts[action])) return;
         btn.disabled = true;
@@ -233,7 +237,9 @@
                 toast('Visitor moved to the front of the line.');
             } else {
                 const r = await api('POST', '/api/queue/kick', { id, ban: action === 'ban' });
-                toast(r.banned ? `Visitor removed and banned for ${fmtSeconds(r.ban_seconds)}.` : 'Visitor removed from the line.', 'warning');
+                let msg = 'Visitor removed from the line.';
+                if (r.banned) msg = r.ban_seconds > 0 ? `Visitor removed and banned for ${fmtSeconds(r.ban_seconds)}.` : 'Visitor removed; their address is banned permanently.';
+                toast(msg, 'warning');
             }
         } catch (e) {
             toast(e.message, 'danger');
@@ -246,7 +252,12 @@
     // ── Bans ───────────────────────────────────────────────────────────────
     const banModalEl = byId('ban-modal');
 
-    function openBanModal(client, duration) {
+    function setPermanent(on) {
+        byId('ban-permanent').checked = on;
+        byId('ban-duration-group').disabled = on;
+    }
+
+    function openBanModal(client, duration, permanent) {
         const editing = Boolean(client);
         setText('ban-modal-title', editing ? 'Change ban' : 'Ban a client');
         setText('ban-submit-label', editing ? 'Save' : 'Ban');
@@ -254,6 +265,7 @@
         clientInput.value = client || '';
         clientInput.readOnly = editing;
         byId('ban-duration').value = duration || '1h';
+        setPermanent(Boolean(permanent));
         bootstrap.Modal.getOrCreateInstance(banModalEl).show();
     }
 
@@ -267,19 +279,31 @@
             return;
         }
         byId('bans-disabled').classList.toggle('d-none', d.enabled);
+        byId('bans-not-persisted').classList.toggle('d-none', !d.enabled || d.persisted);
         byId('ban-new').disabled = !d.enabled;
         tbody.replaceChildren();
         if (!d.bans.length) emptyRow(tbody, 5, d.enabled ? 'No active bans.' : 'Bans are unavailable.');
         for (const b of d.bans) {
             const tr = node('tr');
-            tr.append(node('td', 'font-monospace', b.client));
-            tr.append(node('td', 'text-nowrap', fmtTime(b.until)));
-            tr.append(node('td', 'text-nowrap', fmtSeconds(b.remaining_seconds)));
+            const clientCell = node('td', 'font-monospace', b.client);
+            if (b.range) { clientCell.append(' '); clientCell.append(node('span', 'badge text-bg-secondary', 'range')); }
+            tr.append(clientCell);
+            if (b.permanent) {
+                const until = node('td');
+                until.append(node('span', 'badge text-bg-danger', 'permanent'));
+                tr.append(until);
+                tr.append(node('td', 'text-nowrap text-body-secondary', '—'));
+            } else {
+                tr.append(node('td', 'text-nowrap', fmtTime(b.until)));
+                tr.append(node('td', 'text-nowrap', fmtSeconds(b.remaining_seconds)));
+            }
             tr.append(node('td', null, b.offenses));
             const actions = node('td', 'text-end text-nowrap');
             const group = node('div', 'btn-group btn-group-sm');
             group.setAttribute('role', 'group');
-            group.append(iconButton('edit', 'btn-outline-secondary', 'bi-pencil', 'Change duration', { client: b.client, remaining: String(b.remaining_seconds) }));
+            group.append(iconButton('edit', 'btn-outline-secondary', 'bi-pencil', 'Change ban', {
+                client: b.client, remaining: String(b.remaining_seconds), permanent: b.permanent ? '1' : '0',
+            }));
             group.append(iconButton('unban', 'btn-outline-success', 'bi-unlock', 'Unban', { client: b.client }));
             actions.append(group);
             tr.append(actions);
@@ -287,8 +311,9 @@
         }
     }
 
-    byId('ban-new').addEventListener('click', () => openBanModal('', '1h'));
+    byId('ban-new').addEventListener('click', () => openBanModal('', '1h', false));
     byId('bans-refresh').addEventListener('click', refreshBans);
+    byId('ban-permanent').addEventListener('change', (ev) => setPermanent(ev.target.checked));
 
     byId('ban-presets').addEventListener('click', (ev) => {
         const b = ev.target.closest('[data-duration]');
@@ -298,13 +323,18 @@
     byId('ban-form').addEventListener('submit', async (ev) => {
         ev.preventDefault();
         const client = byId('ban-client').value.trim();
-        const duration = byId('ban-duration').value.trim();
+        const permanent = byId('ban-permanent').checked;
+        const duration = permanent ? '' : byId('ban-duration').value.trim();
         try {
-            const r = await api('POST', '/api/bans', { client, duration });
+            const r = await api('POST', '/api/bans', { client, duration, permanent });
             bootstrap.Modal.getOrCreateInstance(banModalEl).hide();
-            toast(`${r.client} banned until ${fmtTime(r.until)}.`, 'warning');
+            let msg = r.permanent ? `${r.client} banned permanently.` : `${r.client} banned until ${fmtTime(r.until)}.`;
+            if (r.dropped > 0) msg += ` ${plural(r.dropped, 'waiting visitor')} dropped from the line.`;
+            if (r.exempt_within && r.exempt_within.length) msg += ` Still reachable inside it: ${r.exempt_within.join(', ')}.`;
+            toast(msg, 'warning');
             refreshBans();
             refreshOverview();
+            if (activeTab() === 'tab-queue') refreshQueue();
         } catch (e) {
             toast(e.message, 'danger');
         }
@@ -313,9 +343,9 @@
     byId('ban-rows').addEventListener('click', async (ev) => {
         const btn = ev.target.closest('button[data-action]');
         if (!btn) return;
-        const { action, client, remaining } = btn.dataset;
+        const { action, client, remaining, permanent } = btn.dataset;
         if (action === 'edit') {
-            openBanModal(client, Math.max(1, Math.ceil(Number(remaining) / 60)) + 'm');
+            openBanModal(client, Math.max(1, Math.ceil(Number(remaining) / 60)) + 'm', permanent === '1');
             return;
         }
         if (!window.confirm(`Unban ${client}? Their offense history is forgotten.`)) return;
@@ -332,46 +362,225 @@
     });
 
     // ── Settings ───────────────────────────────────────────────────────────
-    async function loadSettings() {
-        try {
-            const s = await api('GET', '/api/settings');
-            byId('set-cap').value = s.cap;
-            byId('set-max-queue').value = s.max_queue;
-            byId('set-token-ttl').value = s.token_ttl;
-            byId('set-rate').value = s.rate;
-            byId('set-surge').value = s.surge;
-            byId('set-skip-url').value = s.skip_url;
-            byId('set-pass-duration').value = s.pass_duration;
+    const SOURCE_BADGES = {
+        default: ['text-bg-light border', 'default', 'Built-in default'],
+        env: ['text-bg-info', 'env', 'From the environment variable'],
+        flag: ['text-bg-primary', 'flag', 'From the command-line flag'],
+        file: ['text-bg-success', 'saved', 'Saved in settings.json; overrides flag and environment'],
+    };
+    let settingsData = null;
 
-            const dl = byId('settings-readonly');
-            dl.replaceChildren();
-            Object.keys(s.readonly).sort().forEach((label) => {
-                dl.append(node('dt', 'col-sm-5 text-body-secondary fw-normal', label));
-                dl.append(node('dd', 'col-sm-7 font-monospace text-break', s.readonly[label]));
+    function fmtSetting(v) {
+        return v === '' || v === null || v === undefined ? '(empty)' : String(v);
+    }
+
+    function settingInput(s, persisted) {
+        const id = 'set-' + s.key;
+        let wrap;
+        let input;
+        if (s.kind === 'bool') {
+            wrap = node('div', 'form-check form-switch mt-1');
+            input = node('input', 'form-check-input');
+            input.type = 'checkbox';
+            input.setAttribute('role', 'switch');
+            input.checked = s.value === true;
+            wrap.append(input);
+        } else {
+            const mono = s.kind === 'string' || s.kind === 'duration' ? ' font-monospace' : '';
+            input = node('input', 'form-control form-control-sm' + mono);
+            if (s.kind === 'int') { input.type = 'number'; input.step = '1'; }
+            else if (s.kind === 'float') { input.type = 'number'; input.step = 'any'; }
+            else input.type = 'text';
+            if (s.kind === 'duration') input.placeholder = 'e.g. 30s, 5m, 24h';
+            input.value = s.value === null || s.value === undefined ? '' : String(s.value);
+            wrap = input;
+        }
+        input.id = id;
+        input.dataset.key = s.key;
+        input.dataset.kind = s.kind;
+        input.dataset.label = s.label;
+        input.dataset.live = String(s.live);
+        input.dataset.original = inputValue(input);
+        if (!s.live && !persisted) {
+            input.disabled = true;
+            input.title = 'Set -data-dir to change settings that apply on restart';
+        }
+        return wrap;
+    }
+
+    function inputValue(input) {
+        return input.dataset.kind === 'bool' ? String(input.checked) : input.value.trim();
+    }
+
+    function typedValue(input) {
+        const raw = inputValue(input);
+        const label = input.dataset.label;
+        switch (input.dataset.kind) {
+            case 'bool':
+                return input.checked;
+            case 'int': {
+                const n = Number(raw);
+                if (raw === '' || !Number.isInteger(n)) throw new Error(`${label} must be a whole number.`);
+                return n;
+            }
+            case 'float': {
+                const n = Number(raw);
+                if (raw === '' || !Number.isFinite(n)) throw new Error(`${label} must be a number.`);
+                return n;
+            }
+            default:
+                return raw;
+        }
+    }
+
+    function settingRow(s, persisted) {
+        const row = node('div', 'row g-2 align-items-start py-2 border-top setting-row');
+        row.dataset.search = [s.label, s.key, s.flag, s.env, s.help].join(' ').toLowerCase();
+
+        const left = node('div', 'col-md-6');
+        const label = node('label', 'form-label mb-0 fw-semibold', s.label);
+        label.htmlFor = 'set-' + s.key;
+        left.append(label);
+        const badges = node('span', 'd-inline-flex flex-wrap gap-1 ms-2 align-middle');
+        const [cls, text, title] = SOURCE_BADGES[s.source] || SOURCE_BADGES.default;
+        const src = node('span', 'badge ' + cls, text);
+        src.title = title;
+        badges.append(src);
+        if (!s.live) {
+            const r = node('span', 'badge bg-warning-subtle text-warning-emphasis border border-warning-subtle', 'restart');
+            r.title = 'Takes effect the next time concert starts';
+            badges.append(r);
+        }
+        if (s.pending) badges.append(node('span', 'badge text-bg-warning', 'pending restart'));
+        left.append(badges);
+        left.append(node('div', 'form-text mt-1', s.help));
+        left.append(node('div', 'form-text font-monospace', '-' + s.flag + ' · ' + s.env));
+
+        const mid = node('div', 'col-md-5');
+        mid.append(settingInput(s, persisted));
+        if (s.pending) mid.append(node('div', 'form-text', 'running now: ' + fmtSetting(s.running)));
+
+        const right = node('div', 'col-md-1 text-md-end');
+        if (s.source === 'file') {
+            right.append(iconButton('reset', 'btn-sm btn-outline-secondary', 'bi-arrow-counterclockwise',
+                'Reset: remove from settings.json', { key: s.key }));
+        }
+        row.append(left, mid, right);
+        return row;
+    }
+
+    function renderSettings(d) {
+        settingsData = d;
+        const groups = byId('settings-groups');
+        groups.replaceChildren();
+        const bodies = new Map();
+        for (const s of d.settings) {
+            let body = bodies.get(s.group);
+            if (!body) {
+                const card = node('div', 'card stat-card settings-group');
+                body = node('div', 'card-body');
+                body.append(node('h2', 'h6 mb-2', s.group));
+                card.append(body);
+                groups.append(card);
+                bodies.set(s.group, body);
+            }
+            body.append(settingRow(s, d.persisted));
+        }
+
+        const dl = byId('settings-fixed');
+        dl.replaceChildren();
+        Object.keys(d.fixed).sort().forEach((k) => {
+            dl.append(node('dt', 'col-sm-5 text-body-secondary fw-normal', k));
+            dl.append(node('dd', 'col-sm-7 font-monospace text-break', d.fixed[k]));
+        });
+        setText('settings-file', d.persisted ? d.file : 'not saved (-data-dir is empty; only live settings can change)');
+        byId('settings-restart').classList.toggle('d-none', !(d.restart_pending > 0));
+        updateDirty();
+        applySettingsFilter();
+    }
+
+    function changedInputs() {
+        return [...document.querySelectorAll('#settings-groups [data-original]')]
+            .filter((i) => !i.disabled && inputValue(i) !== i.dataset.original);
+    }
+
+    function updateDirty() {
+        const changed = changedInputs();
+        document.querySelectorAll('.setting-row.setting-changed').forEach((r) => r.classList.remove('setting-changed'));
+        changed.forEach((i) => i.closest('.setting-row').classList.add('setting-changed'));
+        const n = changed.length;
+        byId('settings-apply').disabled = n === 0;
+        byId('settings-discard').disabled = n === 0;
+        setText('settings-apply-label', n ? `Save ${plural(n, 'change')}` : 'Save changes');
+    }
+
+    function applySettingsFilter() {
+        const f = byId('settings-filter').value.trim().toLowerCase();
+        document.querySelectorAll('.settings-group').forEach((card) => {
+            let visible = 0;
+            card.querySelectorAll('.setting-row').forEach((r) => {
+                const show = !f || r.dataset.search.includes(f);
+                r.classList.toggle('d-none', !show);
+                if (show) visible++;
             });
+            card.classList.toggle('d-none', visible === 0);
+        });
+    }
+
+    async function loadSettings() {
+        // Never clobber edits the operator hasn't saved yet.
+        if (settingsData && changedInputs().length) return;
+        try {
+            renderSettings(await api('GET', '/api/settings'));
         } catch (e) {
             toast(e.message, 'danger');
         }
     }
 
+    byId('settings-groups').addEventListener('input', updateDirty);
+    byId('settings-groups').addEventListener('change', updateDirty);
+    byId('settings-filter').addEventListener('input', applySettingsFilter);
+    byId('settings-discard').addEventListener('click', () => { if (settingsData) renderSettings(settingsData); });
+
+    byId('settings-groups').addEventListener('click', async (ev) => {
+        const btn = ev.target.closest('button[data-action="reset"]');
+        if (!btn) return;
+        const s = settingsData.settings.find((x) => x.key === btn.dataset.key);
+        if (!window.confirm(`Reset "${s.label}"? It is removed from settings.json and follows the flag, environment or default again.`)) return;
+        btn.disabled = true;
+        try {
+            renderSettings(await api('DELETE', '/api/settings?key=' + encodeURIComponent(s.key)));
+            toast(s.live ? `${s.label} reset and applied.` : `${s.label} reset; takes effect after a restart.`, s.live ? 'success' : 'warning');
+            refreshOverview();
+        } catch (e) {
+            btn.disabled = false;
+            toast(e.message, 'danger');
+        }
+    });
+
     byId('settings-form').addEventListener('submit', async (ev) => {
         ev.preventDefault();
-        const body = {
-            cap: parseInt(byId('set-cap').value, 10),
-            max_queue: parseInt(byId('set-max-queue').value, 10),
-            token_ttl: byId('set-token-ttl').value.trim(),
-            rate: parseFloat(byId('set-rate').value),
-            surge: parseFloat(byId('set-surge').value),
-            skip_url: byId('set-skip-url').value.trim(),
-            pass_duration: byId('set-pass-duration').value.trim(),
-        };
+        const changed = changedInputs();
+        if (!changed.length) return;
+        const body = {};
         try {
-            await api('POST', '/api/settings', body);
-            toast('Settings applied.');
-            loadSettings();
+            for (const i of changed) body[i.dataset.key] = typedValue(i);
+        } catch (e) {
+            toast(e.message, 'danger');
+            return;
+        }
+        const restart = changed.filter((i) => i.dataset.live !== 'true').length;
+        const btn = byId('settings-apply');
+        btn.disabled = true;
+        try {
+            renderSettings(await api('POST', '/api/settings', body));
+            toast(restart
+                ? `Saved. ${plural(restart, 'change')} take${restart === 1 ? 's' : ''} effect after a restart.`
+                : 'Settings saved and applied.', restart ? 'warning' : 'success');
             refreshOverview();
         } catch (e) {
             toast(e.message, 'danger');
+            updateDirty();
         }
     });
 
