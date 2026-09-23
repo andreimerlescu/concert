@@ -144,6 +144,7 @@ func testConfig(upstream string) config {
 		admitSecret:      []byte("concert-test-secret-0123456789abcdef"),
 		accessLogEnabled: false,
 		accessLog:        io.Discard,
+		streamCap:        64,
 		trustedProxies:   "", // test clients are the real clients
 		abuseEnabled:     true,
 		abuseStrikes:     20,
@@ -417,32 +418,36 @@ func TestParseConfig_UnknownFlag(t *testing.T) {
 
 func TestParseConfig_Invalid(t *testing.T) {
 	cases := map[string][]string{
-		"no scheme":           {"-upstream", "not a url"},
-		"ftp scheme":          {"-upstream", "ftp://files.example"},
-		"no host":             {"-upstream", "http://"},
-		"zero cap":            {"-cap", "0"},
-		"negative cap":        {"-cap", "-5"},
-		"overflows i32":       {"-cap", "3000000000"},
-		"negative asset cap":  {"-asset-cap", "-1"},
-		"zero h1 user cap":    {"-asset-user-cap-h1", "0"},
-		"zero h2 user cap":    {"-asset-user-cap-h2", "0"},
-		"negative asset wait": {"-asset-wait", "-1s"},
-		"short admit ttl":     {"-admit-ttl", "5s"},
-		"catch-all bypass":    {"-bypass", "/*"},
-		"reserved asset":      {"-assets", "/_room/*"},
-		"reserved status":     {"-asset-public", "/queue/status"},
-		"reserved ban path":   {"-ban-paths", "/_room/stats"},
-		"catch-all ban path":  {"-ban-paths", "/*"},
-		"duplicate path":      {"-bypass", "/x", "-assets", "/x"},
-		"ban overlaps asset":  {"-assets", "/x", "-ban-paths", "/x"},
-		"bad trusted proxy":   {"-trusted-proxies", "nope"},
-		"bad allow cidr":      {"-abuse-allow", "10.0.0.0/99"},
-		"zero strikes":        {"-abuse-strikes", "0"},
-		"zero window":         {"-abuse-window", "0s"},
-		"zero cooldown":       {"-abuse-cooldown", "0s"},
-		"max below cooldown":  {"-abuse-cooldown", "10m", "-abuse-max-cooldown", "5m"},
-		"zero max entries":    {"-abuse-max-entries", "0"},
-		"ban paths w/o abuse": {"-abuse=false", "-ban-paths", "/.env"},
+		"no scheme":              {"-upstream", "not a url"},
+		"ftp scheme":             {"-upstream", "ftp://files.example"},
+		"no host":                {"-upstream", "http://"},
+		"zero cap":               {"-cap", "0"},
+		"negative cap":           {"-cap", "-5"},
+		"overflows i32":          {"-cap", "3000000000"},
+		"negative asset cap":     {"-asset-cap", "-1"},
+		"zero h1 user cap":       {"-asset-user-cap-h1", "0"},
+		"zero h2 user cap":       {"-asset-user-cap-h2", "0"},
+		"negative asset wait":    {"-asset-wait", "-1s"},
+		"short admit ttl":        {"-admit-ttl", "5s"},
+		"catch-all bypass":       {"-bypass", "/*"},
+		"reserved asset":         {"-assets", "/_room/*"},
+		"reserved status":        {"-asset-public", "/queue/status"},
+		"reserved ban path":      {"-ban-paths", "/_room/stats"},
+		"catch-all ban path":     {"-ban-paths", "/*"},
+		"duplicate path":         {"-bypass", "/x", "-assets", "/x"},
+		"ban overlaps asset":     {"-assets", "/x", "-ban-paths", "/x"},
+		"stream overlaps bypass": {"-bypass", "/ws", "-stream-paths", "/ws"},
+		"zero stream cap":        {"-stream-cap", "0"},
+		"grace below room min":   {"-first-poll-grace", "5s"},
+		"grace below retries":    {"-first-poll-grace", "10s", "-retry-after", "6"},
+		"bad trusted proxy":      {"-trusted-proxies", "nope"},
+		"bad allow cidr":         {"-abuse-allow", "10.0.0.0/99"},
+		"zero strikes":           {"-abuse-strikes", "0"},
+		"zero window":            {"-abuse-window", "0s"},
+		"zero cooldown":          {"-abuse-cooldown", "0s"},
+		"max below cooldown":     {"-abuse-cooldown", "10m", "-abuse-max-cooldown", "5m"},
+		"zero max entries":       {"-abuse-max-entries", "0"},
+		"ban paths w/o abuse":    {"-abuse=false", "-ban-paths", "/.env"},
 	}
 	for name, args := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -453,7 +458,6 @@ func TestParseConfig_Invalid(t *testing.T) {
 		})
 	}
 }
-
 func TestParseConfig_ShortSecretRejected(t *testing.T) {
 	clearConcertEnv(t)
 	t.Setenv("CONCERT_ADMIT_SECRET", "too-short")
@@ -1582,7 +1586,7 @@ func TestAbuse_TicketChurnBans(t *testing.T) {
 	cfg := testConfig(up.URL())
 	cfg.capacity = 1
 	cfg.abuseStrikes = 3
-	_, front := newTestApp(t, cfg, up)
+	a, front := newTestApp(t, cfg, up)
 	fillSlot(t, front, up)
 
 	for i := 1; i <= 3; i++ {
@@ -1591,6 +1595,12 @@ func TestAbuse_TicketChurnBans(t *testing.T) {
 			t.Fatalf("churn %d: got %d %q, want a queued 429", i, resp.StatusCode, body)
 		}
 	}
+	// Churn strikes come from room's EventQueue callback, which runs in its
+	// own goroutine, so the ban lands a moment after the third arrival.
+	eventually(t, 2*time.Second, func() bool {
+		_, banned := a.abuse.banned(netip.MustParseAddr("127.0.0.1"), time.Now())
+		return banned
+	}, "three cookie-less arrivals never banned the client")
 	if resp, body := get(t, front.URL+"/api/x", nil); !isBlocked(resp, body) {
 		t.Errorf("after churn: got %d %q, want blocked", resp.StatusCode, body)
 	}

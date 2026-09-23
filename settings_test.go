@@ -451,8 +451,8 @@ func TestBan_PortalBanDropsWaitingVisitors(t *testing.T) {
 	fillSlot(t, front, up)
 
 	client := queueJarClient(t, front)
-	if p.occupants.count() != 1 {
-		t.Fatalf("occupants: %d", p.occupants.count())
+	if n := len(p.queueViews(time.Now())); n != 1 {
+		t.Fatalf("in line: %d", n)
 	}
 
 	ck, csrf := portalLogin(t, p)
@@ -464,7 +464,7 @@ func TestBan_PortalBanDropsWaitingVisitors(t *testing.T) {
 	if v["permanent"] != true || v["dropped"] != float64(1) || v["until"] != nil {
 		t.Errorf("response: %v", v)
 	}
-	if p.occupants.count() != 0 {
+	if n := len(p.queueViews(time.Now())); n != 0 {
 		t.Error("banned visitor is still in the line")
 	}
 
@@ -483,13 +483,12 @@ func TestBan_PortalBanDropsWaitingVisitors(t *testing.T) {
 		t.Errorf("list: %v", list)
 	}
 }
-
 func TestBan_BanPathDropsWaitingVisitor(t *testing.T) {
 	up := newFakeUpstream(t)
 	cfg := portalTestConfig(up.URL())
 	cfg.capacity = 1
 	cfg.banPaths = "/.env"
-	_, p, front := newTestPortal(t, cfg, up)
+	a, _, front := newTestPortal(t, cfg, up)
 	fillSlot(t, front, up)
 
 	client := queueJarClient(t, front)
@@ -497,11 +496,10 @@ func TestBan_BanPathDropsWaitingVisitor(t *testing.T) {
 	if !isBlocked(resp, body) {
 		t.Fatalf("ban path: %d %s", resp.StatusCode, body)
 	}
-	if p.occupants.count() != 0 {
-		t.Error("a strike-path ban must drop the visitor from the line")
-	}
+	// A strike-path ban drops waiting visitors through the batched drop loop.
+	eventually(t, 2*time.Second, func() bool { return a.room.LiveQueueDepth() == 0 },
+		"a ban-path ban must drop the visitor from the line")
 }
-
 func TestBan_RangeBanSparesExemptVisitors(t *testing.T) {
 	up := newFakeUpstream(t)
 	cfg := portalTestConfig(up.URL())
@@ -518,7 +516,7 @@ func TestBan_RangeBanSparesExemptVisitors(t *testing.T) {
 	}
 	var v map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &v)
-	if v["dropped"] != float64(0) || p.occupants.count() != 1 {
-		t.Errorf("an allowlisted visitor inside the range must stay in line: %v, %d", v, p.occupants.count())
+	if v["dropped"] != float64(0) || len(p.queueViews(time.Now())) != 1 {
+		t.Errorf("an allowlisted visitor inside the range must stay in line: %v, %d", v, len(p.queueViews(time.Now())))
 	}
 }

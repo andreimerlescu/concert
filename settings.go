@@ -31,17 +31,19 @@ import (
 // Resetting a setting in the portal removes it from the file again.
 //
 // Every change applies immediately, without restarting concert: see
-// reload.go. Secrets (CONCERT_ADMIN_TOKEN, CONCERT_ADMIT_SECRET,
-// CONCERT_PORTAL_PASS) and -data-dir itself are never stored in the file and
-// are the only settings that need a restart.
+// reload.go. The listen addresses are the exception: they are set by flag
+// or environment and take a restart. Secrets (CONCERT_ADMIN_TOKEN,
+// CONCERT_ADMIT_SECRET, CONCERT_PORTAL_PASS) and -data-dir itself are never
+// stored in the file.
 
 const (
 	settingsFileName    = "settings.json"
 	settingsFileVersion = 1
 )
 
-// defaultDataDir is where settings.json and bans.json live unless -data-dir
-// or CONCERT_DATA_DIR says otherwise. Tests point it somewhere empty.
+// defaultDataDir is where settings.json, bans.json and the saved queue live
+// unless -data-dir or CONCERT_DATA_DIR says otherwise. Tests point it
+// somewhere empty.
 var defaultDataDir = "/var/lib/concert/data"
 
 // Where a setting's current value came from.
@@ -69,6 +71,7 @@ const (
 	groupCookies = "Cookies"
 	groupPaths   = "Paths"
 	groupAssets  = "Asset tier"
+	groupStreams = "Streams"
 	groupAbuse   = "Abuse registry"
 	groupTLS     = "Let's Encrypt"
 	groupPortal  = "Admin portal"
@@ -103,6 +106,9 @@ var settingDefs = []settingDef{
 	{key: "token_ttl", flag: "token-ttl", env: "CONCERT_TOKEN_TTL", group: groupRoom, label: "Ticket TTL",
 		def: time.Duration(0), usage: "sliding TTL for queued tokens, 30s-24h (0 = room default, 5m)",
 		ptr: func(c *config) any { return &c.tokenTTL }, check: durationZeroOrBetween(30*time.Second, 24*time.Hour)},
+	{key: "first_poll_grace", flag: "first-poll-grace", env: "CONCERT_FIRST_POLL_GRACE", group: groupRoom, label: "First-poll grace",
+		def: 30 * time.Second, usage: "reclaim a new ticket whose visitor has not polled within this time, 10s-24h and at least twice -retry-after (0 = off)",
+		ptr: func(c *config) any { return &c.firstPollGrace }, check: durationZeroOrBetween(minFirstPollGrace, maxFirstPollGrace)},
 	{key: "reaper", flag: "reaper", env: "CONCERT_REAPER", group: groupRoom, label: "Reaper interval",
 		def: 36 * time.Second, usage: "reaper interval for abandoned tickets, 5s-24h",
 		ptr: func(c *config) any { return &c.reaper }, check: durationBetween(5*time.Second, 24*time.Hour)},
@@ -118,7 +124,7 @@ var settingDefs = []settingDef{
 
 	// ---- Skip the line ----
 	{key: "rate", flag: "rate", env: "CONCERT_RATE", group: groupSkip, label: "Price per position",
-		def: 0.0, usage: "base cost per queue position",
+		def: 0.0, usage: "base cost per queue position (0 with -surge 0 turns paid skip-the-line off)",
 		ptr: func(c *config) any { return &c.rate }, check: floatBetween(0, 1e6)},
 	{key: "surge", flag: "surge", env: "CONCERT_SURGE", group: groupSkip, label: "Surge per queued visitor",
 		def: 0.0, usage: "extra cost per position for each client in the queue",
@@ -197,6 +203,14 @@ var settingDefs = []settingDef{
 	{key: "client_proto_header", flag: "client-proto-header", env: "CONCERT_CLIENT_PROTO_HEADER", group: groupAssets, label: "Client protocol header",
 		def: "", usage: "header set by a trusted TLS terminator carrying the client's HTTP protocol",
 		ptr: func(c *config) any { return &c.clientProtoHeader }},
+
+	// ---- Streams; see stream.go ----
+	{key: "stream_paths", flag: "stream-paths", env: "CONCERT_STREAM_PATHS", group: groupStreams, label: "Stream paths",
+		def: "", usage: "comma-separated WebSocket and server-sent event paths: outside the waiting room, admission pass required; suffix /* for a prefix",
+		ptr: func(c *config) any { return &c.streamPaths }},
+	{key: "stream_cap", flag: "stream-cap", env: "CONCERT_STREAM_CAP", group: groupStreams, label: "Concurrent streams",
+		def: 1000, usage: "most stream connections open at once; more get 503",
+		ptr: func(c *config) any { return &c.streamCap }, check: intAtLeast(1)},
 
 	// ---- Abuse registry ----
 	{key: "abuse", flag: "abuse", env: "CONCERT_ABUSE", group: groupAbuse, label: "Abuse registry enabled",
@@ -797,7 +811,7 @@ func (a *app) fixedSettings() map[string]string {
 	cfg := a.current().cfg
 	dataDir := cfg.dataDir
 	if dataDir == "" {
-		dataDir = "none: changes last until concert restarts"
+		dataDir = "none: changes and the queue last until concert restarts"
 	}
 	secret := "set (CONCERT_ADMIT_SECRET)"
 	if cfg.admitSecretGenerated {
