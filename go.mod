@@ -4,7 +4,7 @@ go 1.26.1
 
 require (
 	github.com/andreimerlescu/goenv v1.0.0
-	github.com/andreimerlescu/room v1.2.1
+	github.com/andreimerlescu/room v1.3.0
 	github.com/gin-gonic/gin v1.12.0
 )
 
