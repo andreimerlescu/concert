@@ -102,20 +102,23 @@
               <dt class="col-8">Moved to the front</dt><dd class="col-4 text-end" data-stat="promoted_total">–</dd>
               <dt class="col-8">Abandoned tickets reaped</dt><dd class="col-4 text-end" data-stat="evicted_total">–</dd>
               <dt class="col-8">Gave up before admission</dt><dd class="col-4 text-end" data-stat="timeouts_total">–</dd>
-              <dt class="col-8">Tracked in the portal</dt><dd class="col-4 text-end" data-stat="occupants_tracked">–</dd>
+              <dt class="col-8">Removed by bans and admins</dt><dd class="col-4 text-end" data-stat="removed_total">–</dd>
               <dt class="col-8">Removed, still blocked</dt><dd class="col-4 text-end" data-stat="kicked_active">–</dd>
             </dl>
           </div></div>
         </div>
         <div class="col-lg-4">
           <div class="card stat-card h-100"><div class="card-body">
-            <h2 class="h6 mb-3"><i class="bi bi-images"></i> Asset tier</h2>
+            <h2 class="h6 mb-3"><i class="bi bi-images"></i> Assets and streams</h2>
             <dl class="row stat-list mb-0">
-              <dt class="col-8">Served</dt><dd class="col-4 text-end" data-stat="asset_served_total">–</dd>
-              <dt class="col-8">Denied (no pass)</dt><dd class="col-4 text-end" data-stat="asset_denied_total">–</dd>
+              <dt class="col-8">Assets served</dt><dd class="col-4 text-end" data-stat="asset_served_total">–</dd>
+              <dt class="col-8">Assets denied (no pass)</dt><dd class="col-4 text-end" data-stat="asset_denied_total">–</dd>
               <dt class="col-8">Per-user throttled</dt><dd class="col-4 text-end" data-stat="asset_user_throttled_total">–</dd>
               <dt class="col-8">Global throttled</dt><dd class="col-4 text-end" data-stat="asset_global_throttled_total">–</dd>
               <dt class="col-8">Active passes</dt><dd class="col-4 text-end" data-stat="asset_users">–</dd>
+              <dt class="col-8">Streams open</dt><dd class="col-4 text-end" id="stat-streams">–</dd>
+              <dt class="col-8">Streams refused (full)</dt><dd class="col-4 text-end" data-stat="stream_throttled_total">–</dd>
+              <dt class="col-8">Streams denied (no pass)</dt><dd class="col-4 text-end" data-stat="stream_denied_total">–</dd>
             </dl>
           </div></div>
         </div>
@@ -165,7 +168,7 @@
         </div>
       </div>
       <p class="small text-body-secondary mt-3 mb-0">
-        <i class="bi bi-info-circle"></i> Positions update when each visitor's browser polls, about every 3 seconds.
+        <i class="bi bi-info-circle"></i> Positions come straight from the waiting room; the table lists the front of the line.
         Removing or banning a visitor takes them out of the line at once; banning also drops everyone else waiting from the same address or range.
       </p>
     </div>
@@ -229,11 +232,11 @@
               <li><span class="badge text-bg-info">env</span> <code>CONCERT_*</code> environment variable</li>
               <li><span class="badge text-bg-light border">default</span> built-in default</li>
             </ol>
-                        <p class="small mb-2">
-                          Every change applies immediately. Settings marked
-                          <span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle">restart</span>
-                          are changed in concert.env and take effect when concert restarts. Reset removes a value from settings.json.
-                        </p>
+            <p class="small mb-2">
+              Every change applies immediately. Settings marked
+              <span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle">restart</span>
+              are changed in concert.env and take effect when concert restarts. Reset removes a value from settings.json.
+            </p>
             <p class="small mb-0 text-break">File: <span class="font-monospace" id="settings-file">–</span></p>
           </div></div>
           <div class="card stat-card"><div class="card-body">
@@ -262,7 +265,7 @@
             An address or a CIDR range. IPv6 addresses are banned by their /64.
             Ranges may be as broad as /8 for IPv4 and /16 for IPv6.
             Addresses in the abuse allowlist and trusted proxies stay reachable inside a banned range.
-            Visitors waiting in line from the banned network are dropped immediately.
+            Visitors waiting in line from the banned network are removed immediately.
           </div>
         </div>
         <div class="form-check form-switch mb-3">

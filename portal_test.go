@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"io/fs"
 	"math"
@@ -98,6 +99,25 @@ func portalLogin(t *testing.T, p *portal) (*http.Cookie, string) {
 		t.Fatalf("dashboard has no CSRF meta tag: %s", page.Body.String())
 	}
 	return ck, m[1]
+}
+
+// tamperSession returns a copy of the session cookie with one bit flipped
+// in the raw byte at offset. Flipping a decoded bit always changes the
+// value, unlike replacing a base64 character with a fixed one, which is a
+// no-op whenever the random character already matches.
+func tamperSession(t *testing.T, ck *http.Cookie, offset int) *http.Cookie {
+	t.Helper()
+	raw, err := base64.RawURLEncoding.DecodeString(ck.Value)
+	if err != nil || len(raw) != portalRawLen {
+		t.Fatalf("session cookie is not %d raw bytes: %v", portalRawLen, err)
+	}
+	raw[offset] ^= 0x01
+	bad := *ck
+	bad.Value = base64.RawURLEncoding.EncodeToString(raw)
+	if bad.Value == ck.Value {
+		t.Fatal("tampering did not change the cookie")
+	}
+	return &bad
 }
 
 func decodeJSON(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
@@ -268,10 +288,21 @@ func TestPortal_APIRequiresSession(t *testing.T) {
 		t.Errorf("no session: got %d, want 401", rec.Code)
 	}
 	ck, _ := portalLogin(t, p)
-	bad := *ck
-	bad.Value = bad.Value[:10] + "A" + bad.Value[11:]
-	if rec := portalDo(p, http.MethodGet, "/api/overview", "", &bad, "", false); rec.Code != http.StatusUnauthorized {
-		t.Errorf("tampered session: got %d, want 401", rec.Code)
+	if rec := portalDo(p, http.MethodGet, "/api/overview", "", ck, "", false); rec.Code != http.StatusOK {
+		t.Fatalf("valid session: got %d, want 200", rec.Code)
+	}
+
+	// One flipped bit anywhere in the cookie (nonce, expiry or MAC) must
+	// invalidate it.
+	for name, offset := range map[string]int{
+		"nonce":  0,
+		"expiry": portalExpOff,
+		"mac":    portalBodyLen,
+	} {
+		bad := tamperSession(t, ck, offset)
+		if rec := portalDo(p, http.MethodGet, "/api/overview", "", bad, "", false); rec.Code != http.StatusUnauthorized {
+			t.Errorf("tampered session (%s): got %d, want 401", name, rec.Code)
+		}
 	}
 }
 
@@ -414,27 +445,19 @@ func TestPortal_TracksQueueAndKicks(t *testing.T) {
 	fillSlot(t, front, up)
 
 	client := queueJarClient(t, front)
-	list := p.occupants.list(time.Now())
-	if len(list) != 1 || list[0].Client != "127.0.0.1" || list[0].Path != "/api/wait" {
-		t.Fatalf("occupants: %+v", list)
+	list := p.queueViews(time.Now())
+	if len(list) != 1 || list[0].Client != "127.0.0.1" || list[0].Path != "/api/wait" || list[0].Position < 1 {
+		t.Fatalf("queue view: %+v", list)
 	}
 	id := list[0].ID
-
-	resp, _ := doReq(t, client, http.MethodGet, front.URL+"/queue/status", nil, nil)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status poll: %d", resp.StatusCode)
-	}
-	if occ, _ := p.occupants.find(id); occ.position < 1 {
-		t.Errorf("position was not observed from the status reply: %d", occ.position)
-	}
 
 	ck, csrf := portalLogin(t, p)
 	rec := portalDo(p, http.MethodPost, "/api/queue/kick", `{"id":"`+id+`"}`, ck, csrf, false)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("kick: got %d %s", rec.Code, rec.Body.String())
 	}
-	if p.occupants.count() != 0 {
-		t.Error("kicked visitor still listed")
+	if n := len(p.queueViews(time.Now())); n != 0 {
+		t.Errorf("kicked visitor still in room's line: %d", n)
 	}
 
 	_, body := doReq(t, client, http.MethodGet, front.URL+"/queue/status", nil, nil)
@@ -442,7 +465,7 @@ func TestPortal_TracksQueueAndKicks(t *testing.T) {
 		t.Errorf("kicked poll should report ready so the page reloads: %s", body)
 	}
 
-	resp, body = doReq(t, client, http.MethodGet, front.URL+"/page", map[string]string{"Accept": "text/html"}, nil)
+	resp, body := doReq(t, client, http.MethodGet, front.URL+"/page", map[string]string{"Accept": "text/html"}, nil)
 	if resp.StatusCode != http.StatusForbidden || !strings.Contains(string(body), "removed from the line") {
 		t.Errorf("kicked page load: got %d %s", resp.StatusCode, body)
 	}
@@ -451,8 +474,8 @@ func TestPortal_TracksQueueAndKicks(t *testing.T) {
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Errorf("a kicked visitor should be able to rejoin at the back: got %d", resp.StatusCode)
 	}
-	if p.occupants.count() != 1 {
-		t.Errorf("rejoined visitor should be tracked with a new ticket: %d", p.occupants.count())
+	if n := len(p.queueViews(time.Now())); n != 1 {
+		t.Errorf("rejoined visitor should be in line with a new ticket: %d", n)
 	}
 }
 
@@ -464,7 +487,7 @@ func TestPortal_KickAndBan(t *testing.T) {
 	fillSlot(t, front, up)
 
 	queueJarClient(t, front)
-	id := p.occupants.list(time.Now())[0].ID
+	id := p.queueViews(time.Now())[0].ID
 
 	ck, csrf := portalLogin(t, p)
 	rec := portalDo(p, http.MethodPost, "/api/queue/kick", `{"id":"`+id+`","ban":true}`, ck, csrf, false)
@@ -477,13 +500,17 @@ func TestPortal_KickAndBan(t *testing.T) {
 	if _, banned := a.abuse.banned(netip.MustParseAddr("127.0.0.1"), time.Now()); !banned {
 		t.Error("visitor's address was not banned")
 	}
+	if n := len(p.queueViews(time.Now())); n != 0 {
+		t.Errorf("banned visitor still in line: %d", n)
+	}
 	if resp, body := get(t, front.URL+"/hello", nil); !isBlocked(resp, body) {
 		t.Errorf("banned visitor: got %d", resp.StatusCode)
 	}
 }
 
 // Promotes the second visitor in line past the first. A single queued visitor
-// is already at position 1, where "move to front" has nothing to do.
+// is already at position 1, where "move to front" has nothing to do. Pricing
+// is off (rate 0), so this also proves the portal needs no RateFunc.
 func TestPortal_Promote(t *testing.T) {
 	up := newFakeUpstream(t)
 	cfg := portalTestConfig(up.URL())
@@ -494,8 +521,8 @@ func TestPortal_Promote(t *testing.T) {
 	queueJarClient(t, front)           // position 1
 	second := queueJarClient(t, front) // position 2
 	id := occupantID(ticketOf(t, second, front))
-	if _, ok := p.occupants.find(id); !ok {
-		t.Fatal("second visitor is not tracked")
+	if _, ok := p.lookup(id); !ok {
+		t.Fatal("second visitor is not listed")
 	}
 
 	ck, csrf := portalLogin(t, p)
@@ -532,7 +559,9 @@ func TestPortal_Overview(t *testing.T) {
 	v := decodeJSON(t, portalDo(p, http.MethodGet, "/api/overview", "", ck, "", false))
 	for _, k := range []string{
 		"cap", "occupancy", "live_queue_depth", "asset_cap", "asset_in_flight",
-		"active_bans", "occupants_tracked", "kicked_active", "rate", "surge", "abuse_enabled",
+		"active_bans", "notes_tracked", "kicked_active", "removed_total",
+		"stream_cap", "stream_active", "first_poll_grace",
+		"rate", "surge", "abuse_enabled",
 	} {
 		if _, ok := v[k]; !ok {
 			t.Errorf("overview missing %q", k)
@@ -540,16 +569,14 @@ func TestPortal_Overview(t *testing.T) {
 	}
 }
 
-func TestOccupantStore_Bounded(t *testing.T) {
-	s := newOccupantStore(1)
-	now := time.Now()
-	ip := netip.MustParseAddr("192.0.2.1")
-	s.join("a", ip, "ua", "/", now)
-	s.join("b", ip, "ua", "/", now)
+func TestNoteStore_BoundedAndPruned(t *testing.T) {
+	s := newNoteStore(1)
+	s.add("a", "ua", "/")
+	s.add("b", "ua", "/")
 	if s.count() != 1 || s.dropped.Load() != 1 {
 		t.Errorf("count=%d dropped=%d, want 1 and 1", s.count(), s.dropped.Load())
 	}
-	if n := s.sweep(now.Add(time.Hour), time.Minute, time.Minute); n != 1 {
-		t.Errorf("sweep: %d", n)
+	if n := s.prune(func(string) bool { return false }); n != 1 || s.count() != 0 {
+		t.Errorf("prune: removed %d, left %d", n, s.count())
 	}
 }

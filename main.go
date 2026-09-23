@@ -84,6 +84,14 @@ const (
 	strikeTicketChurn  = 1 // queued arrival without a room_ticket cookie
 )
 
+// First-poll grace limits. room accepts 10s-24h (0 turns it off). concert
+// also keeps it at least twice -retry-after, so an API client that retries
+// on schedule instead of polling /queue/status is not reclaimed.
+const (
+	minFirstPollGrace = 10 * time.Second
+	maxFirstPollGrace = 24 * time.Hour
+)
+
 // Permanent bans. A client or range whose ban ends at banForever stays
 // banned until an administrator lifts it; banned() reports banForeverLeft.
 const (
@@ -96,30 +104,31 @@ const (
 //	room_ticket   — HttpOnly queue session
 //	room_pass     — HttpOnly VIP pass
 //	room_probe    — non-HttpOnly cookie-support probe
-//	concert_admit — HttpOnly signed admission pass for the asset tier
+//	concert_admit — HttpOnly signed admission pass for the asset and stream tiers
 var proxyCookies = []string{"room_ticket", "room_pass", "room_probe", admitCookie}
 
 type config struct {
-	listen        string
-	upstream      string
-	capacity      int
-	maxQueue      int64
-	reaper        time.Duration
-	tokenTTL      time.Duration
-	secureCookie  bool
-	cookiePath    string
-	cookieDomain  string
-	preserveHost  bool
-	bypass        string
-	htmlFile      string
-	skipURL       string
-	rate          float64
-	surge         float64
-	passDuration  time.Duration
-	headerTimeout time.Duration
-	apiJSON       bool
-	retryAfter    int
-	adminToken    string
+	listen         string
+	upstream       string
+	capacity       int
+	maxQueue       int64
+	reaper         time.Duration
+	tokenTTL       time.Duration
+	firstPollGrace time.Duration
+	secureCookie   bool
+	cookiePath     string
+	cookieDomain   string
+	preserveHost   bool
+	bypass         string
+	htmlFile       string
+	skipURL        string
+	rate           float64
+	surge          float64
+	passDuration   time.Duration
+	headerTimeout  time.Duration
+	apiJSON        bool
+	retryAfter     int
+	adminToken     string
 
 	assets            string
 	assetPublic       string
@@ -131,6 +140,11 @@ type config struct {
 	admitTTL          time.Duration
 	clientProtoHeader string
 	accessLogEnabled  bool
+
+	// Long-lived WebSocket and SSE paths; see stream.go. They skip the
+	// waiting room but need an admission pass and a slot under streamCap.
+	streamPaths string
+	streamCap   int
 
 	// Let's Encrypt; see tls.go. TLS on -listen is enabled when tlsDomains
 	// names at least one host.
@@ -153,8 +167,8 @@ type config struct {
 	// declared with every other flag, from settingDefs in settings.go.
 	portal portalConfig
 
-	// dataDir holds settings.json and bans.json; see settings.go and
-	// persist.go. Empty disables persistence.
+	// dataDir holds settings.json, bans.json and the saved queue; see
+	// settings.go, persist.go and queue.go. Empty disables persistence.
 	dataDir string
 
 	// Filled by parseConfig; see loadSettingsLayer. Nil for configs built
@@ -178,11 +192,16 @@ type counters struct {
 	evicted  atomic.Int64
 	timeouts atomic.Int64
 	promoted atomic.Int64
+	removed  atomic.Int64 // room EventRemove: bans, kicks and removals by concert
 
 	assetServed          atomic.Int64
 	assetDenied          atomic.Int64
 	assetUserThrottled   atomic.Int64
 	assetGlobalThrottled atomic.Int64
+
+	streamServed    atomic.Int64
+	streamDenied    atomic.Int64
+	streamThrottled atomic.Int64
 
 	abuseStrikes  atomic.Int64
 	abuseBans     atomic.Int64
@@ -203,7 +222,9 @@ type app struct {
 	abuse     *abuseRegistry // always present; current().abuse is nil while -abuse=false
 	handler   http.Handler   // serves every request with the current generation
 	settings  *settingsManager
+	drops     *dropper      // bans waiting to be removed from the line; see queue.go
 	bansPath  string        // bans.json, or "" when bans are not persisted
+	queuePath string        // saved queue, or "" when the queue is not persisted
 	rateBits  atomic.Uint64 // skip-the-line base price, float64 bits
 	surgeBits atomic.Uint64 // skip-the-line surge, float64 bits
 	gen       atomic.Pointer[generation]
@@ -213,7 +234,7 @@ type app struct {
 
 	stop     chan struct{}
 	stopOnce sync.Once
-	wg       sync.WaitGroup // background writers that flush on Close
+	wg       sync.WaitGroup // background writers and the drop loop, awaited on Close
 }
 
 func main() {
@@ -251,7 +272,7 @@ func parseConfig(fs *flag.FlagSet, args []string) (config, bool, error) {
 
 	// -data-dir says where settings.json is, so it cannot itself live there.
 	fs.StringVar(&cfg.dataDir, "data-dir", env.String("CONCERT_DATA_DIR", defaultDataDir),
-		"directory for settings.json and bans.json (empty disables persistence)")
+		"directory for settings.json, bans.json and the saved queue (empty disables persistence)")
 
 	showVersion := fs.Bool("version", false, "show version")
 
@@ -292,6 +313,16 @@ func (c *config) normalize() error {
 	if c.retryAfter < 1 {
 		c.retryAfter = 1
 	}
+	if g := c.firstPollGrace; g != 0 {
+		if g < minFirstPollGrace || g > maxFirstPollGrace {
+			return fmt.Errorf("invalid -first-poll-grace %s: must be 0 (off) or between %s and %s",
+				g, minFirstPollGrace, maxFirstPollGrace)
+		}
+		if min := 2 * time.Duration(c.retryAfter) * time.Second; g < min {
+			return fmt.Errorf("invalid -first-poll-grace %s: must be at least twice -retry-after (%s), "+
+				"so API clients that retry instead of polling keep their place", g, min)
+		}
+	}
 	if c.assetCap < 0 || c.assetCap > math.MaxInt32 {
 		return fmt.Errorf("invalid -asset-cap %d: must be 0 (derived) or between 1 and %d", c.assetCap, math.MaxInt32)
 	}
@@ -306,6 +337,9 @@ func (c *config) normalize() error {
 	}
 	if c.admitTTL < 30*time.Second {
 		return fmt.Errorf("invalid -admit-ttl %s: must be at least 30s", c.admitTTL)
+	}
+	if c.streamCap < 1 || c.streamCap > math.MaxInt32 {
+		return fmt.Errorf("invalid -stream-cap %d: must be between 1 and %d", c.streamCap, math.MaxInt32)
 	}
 
 	if c.tlsHosts, err = parseTLSDomains(c.tlsDomains); err != nil {
@@ -461,6 +495,7 @@ func validateRoutes(c *config) error {
 		{"-bypass", c.bypass},
 		{"-assets", c.assets},
 		{"-asset-public", c.assetPublic},
+		{"-stream-paths", c.streamPaths},
 		{"-ban-paths", c.banPaths},
 	}
 	for _, g := range groups {
@@ -484,8 +519,13 @@ func validateRoutes(c *config) error {
 
 // newApp builds the waiting room, abuse registry, admission signer and the
 // first generation without binding a port. With -data-dir set it also
-// restores bans.json and starts the ban writer. Callers must Close the
-// returned app.
+// restores bans.json and the saved queue, and starts the ban writer.
+// Callers must Close the returned app.
+//
+// Order matters for the queue: room's settings (including the ticket TTL
+// and first-poll grace, which judge what is stale) are applied by commit
+// before the saved queue is imported, and nothing is served until newApp
+// returns.
 func newApp(cfg config) (*app, error) {
 	if err := cfg.normalize(); err != nil {
 		return nil, err
@@ -497,6 +537,7 @@ func newApp(cfg config) (*app, error) {
 		stats: stats,
 		admit: newAdmitter(cfg.admitSecret, cfg.admitTTL, cfg.cookiePath, cfg.cookieDomain, cfg.secureCookie),
 		abuse: newAbuseRegistry(cfg, stats),
+		drops: newDropper(),
 		stop:  make(chan struct{}),
 	}
 	a.settings = newSettingsManager(cfg)
@@ -506,11 +547,17 @@ func newApp(cfg config) (*app, error) {
 		return nil, fmt.Errorf("room init: %w", err)
 	}
 	a.room = wr
-	// The price is read on every quote, so pricing changes need no new
-	// RateFunc. It is always installed: the portal's "move to front" is a
-	// promotion, and room refuses promotions without a RateFunc.
-	wr.SetRateFunc(a.price)
-	registerRoomEvents(wr, stats)
+
+	// room keys each queued visitor by the address concert resolved in
+	// identify. gin's own ClientIP would name the TLS terminator: concert
+	// turns gin's proxy trust off and applies -trusted-proxies itself.
+	wr.SetClientKeyFunc(func(c *gin.Context) string {
+		if ip := clientIPFrom(c); ip.IsValid() {
+			return ip.String()
+		}
+		return ""
+	})
+	registerRoomEvents(wr, a)
 
 	g, err := a.buildGeneration(cfg, nil)
 	if err != nil {
@@ -535,9 +582,24 @@ func newApp(cfg config) (*app, error) {
 		if n > 0 {
 			log.Printf("bans: restored %d ban record(s) from %s", n, a.bansPath)
 		}
+
+		a.queuePath = queueFilePath(cfg.dataDir)
+		if err := a.restoreQueue(); err != nil {
+			g.assets.users.close()
+			wr.Stop()
+			return nil, err
+		}
 	}
 
+	// Every new ban drops that network's waiting visitors from room's line.
+	a.abuse.setOnBan(a.queueDrop)
+
 	go a.abuse.janitor(a.stop)
+	a.wg.Add(1)
+	go func() {
+		defer a.wg.Done()
+		a.dropLoop()
+	}()
 	if a.bansPath != "" {
 		a.wg.Add(1)
 		go func() {
@@ -554,12 +616,17 @@ func (a *app) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	a.current().engine.ServeHTTP(w, r)
 }
 
-// Close stops the janitors, flushes unsaved bans, and stops the waiting
-// room's background workers.
+// Close stops the janitors and the drop loop, flushes unsaved bans, saves
+// the queue, and stops the waiting room's background workers. run calls it
+// after the listeners have drained, so no new tickets arrive while the
+// queue is being saved.
 func (a *app) Close() {
 	a.stopOnce.Do(func() {
 		close(a.stop)
 		a.wg.Wait()
+		if a.queuePath != "" {
+			a.saveQueue()
+		}
 		if g := a.current(); g != nil {
 			g.assets.users.close()
 		}
@@ -575,9 +642,12 @@ func (a *app) saveBansNow() {
 	}
 }
 
-// registerRoomEvents counts room's per-request events and logs its
-// edge-triggered ones. Registered once; room keeps them across changes.
-func registerRoomEvents(wr *room.WaitingRoom, stats *counters) {
+// registerRoomEvents counts room's per-request events, logs its
+// edge-triggered ones, and strikes ticket churn. Registered once; room keeps
+// them across changes. Callbacks run in their own goroutines, so none of
+// them may block. Snapshot.Token is a bearer credential and is never logged.
+func registerRoomEvents(wr *room.WaitingRoom, a *app) {
+	stats := a.stats
 	wr.On(room.EventFull, func(s room.Snapshot) {
 		log.Printf("upstream saturated: %d/%d slots, %d queued (%d live)",
 			s.Occupancy, s.Capacity, s.QueueDepth, wr.LiveQueueDepth())
@@ -586,15 +656,40 @@ func registerRoomEvents(wr *room.WaitingRoom, stats *counters) {
 		log.Printf("draining: %d/%d slots, %d queued (%d live)",
 			s.Occupancy, s.Capacity, s.QueueDepth, wr.LiveQueueDepth())
 	})
-	wr.On(room.EventQueue, func(room.Snapshot) { stats.queued.Add(1) })
+	wr.On(room.EventQueue, func(s room.Snapshot) {
+		stats.queued.Add(1)
+		// A visitor who arrived with no room_ticket at all took a fresh
+		// place in line: a script discarding cookies does this on every
+		// retry. An unrecognised ticket (StaleTicket) is a browser whose old
+		// ticket expired or was removed, and is not struck.
+		if !s.StaleTicket {
+			a.churnStrike(s.ClientKey)
+		}
+	})
 	wr.On(room.EventEvict, func(room.Snapshot) { stats.evicted.Add(1) })
 	wr.On(room.EventTimeout, func(room.Snapshot) { stats.timeouts.Add(1) })
 	wr.On(room.EventPromote, func(room.Snapshot) { stats.promoted.Add(1) })
+	wr.On(room.EventRemove, func(room.Snapshot) { stats.removed.Add(1) })
+}
+
+// churnStrike records a ticket-churn strike against the client room keyed
+// the arrival by. The key is the address concert resolved in identify.
+func (a *app) churnStrike(key string) {
+	reg := a.current().abuse
+	if reg == nil || key == "" {
+		return
+	}
+	ip, err := netip.ParseAddr(key)
+	if err != nil {
+		return
+	}
+	reg.strike(ip, strikeTicketChurn, time.Now())
 }
 
 // run builds the app, starts the admin portal when configured, binds the
-// main listener, and serves until ctx is cancelled. Both listeners can move
-// later without a restart; see server.go and reload.go.
+// main listener, and serves until ctx is cancelled. Both listeners are
+// endpoints (see server.go); the deferred Close saves the queue after they
+// have drained.
 func run(ctx context.Context, cfg config) error {
 	a, err := newApp(cfg)
 	if err != nil {
@@ -636,9 +731,13 @@ func run(ctx context.Context, cfg config) error {
 	if c.assetCap == 0 {
 		derived = " (derived)"
 	}
-	log.Printf("concert %s -> %s (cap=%d, max-queue=%d, token-ttl=%s, asset-cap=%d%s, asset-user-cap=%d h1 / %d h2)",
-		ln.Addr(), c.target, c.capacity, c.maxQueue, a.room.TokenTTL(),
+	log.Printf("concert %s -> %s (cap=%d, max-queue=%d, token-ttl=%s, first-poll-grace=%s, asset-cap=%d%s, asset-user-cap=%d h1 / %d h2)",
+		ln.Addr(), c.target, c.capacity, c.maxQueue, a.room.TokenTTL(), a.room.FirstPollGrace(),
 		g.assets.global.Cap(), derived, c.assetUserCapH1, c.assetUserCapH2)
+	if rules := parsePaths(c.streamPaths); len(rules) > 0 {
+		log.Printf("streams: %d path(s) outside the waiting room, admission pass required, at most %d at once",
+			len(rules), c.streamCap)
+	}
 	if tlsCfg != nil {
 		directory := "production"
 		if c.tlsStaging {
@@ -656,9 +755,9 @@ func run(ctx context.Context, cfg config) error {
 	}
 	if c.dataDir != "" {
 		if err := ensureWritableDir(c.dataDir); err != nil {
-			log.Printf("data dir: %v; settings and bans changed now will not be saved", err)
+			log.Printf("data dir: %v; settings, bans and the queue changed now will not be saved", err)
 		} else {
-			log.Printf("data dir: %s (settings.json overrides flags and environment; bans.json keeps bans across restarts)", c.dataDir)
+			log.Printf("data dir: %s (settings.json overrides flags and environment; bans and the queue survive restarts)", c.dataDir)
 		}
 	}
 	if c.admitSecretGenerated {
@@ -670,9 +769,9 @@ func run(ctx context.Context, cfg config) error {
 }
 
 // buildRouter wires routes in the order that determines what is guarded:
-// client identification and ban enforcement first, then ops, bypass, and
-// asset routes (outside the room), then churn detection and the API
-// interceptor, then room's middleware, then the gated proxy catch-all.
+// client identification and ban enforcement first, then ops, bypass, asset
+// and stream routes (outside the room), then the API interceptor, then
+// room's middleware, then the gated proxy catch-all.
 // Route conflicts make gin panic; they are returned as errors instead.
 func buildRouter(g *generation) (engine *gin.Engine, err error) {
 	defer func() {
@@ -710,11 +809,9 @@ func buildRouter(g *generation) (engine *gin.Engine, err error) {
 	registerPaths(r, parsePaths(cfg.bypass), g.forward)
 	registerPaths(r, parsePaths(cfg.assets), g.assets.private, g.forward)
 	registerPaths(r, parsePaths(cfg.assetPublic), g.assets.public, g.forward)
+	registerPaths(r, parsePaths(cfg.streamPaths), g.streams.handle, g.forward)
 
 	// ---- Run ahead of room's middleware on gated requests only. ----
-	if g.abuse != nil {
-		r.Use(g.watchChurn)
-	}
 	if cfg.apiJSON {
 		r.Use(apiQueueResponses(cfg.retryAfter))
 	}
@@ -789,7 +886,8 @@ func (a *app) pricing() (rate, surge float64) {
 	return math.Float64frombits(a.rateBits.Load()), math.Float64frombits(a.surgeBits.Load())
 }
 
-// price is installed as room's RateFunc: base + depth × surge per position.
+// price is room's RateFunc while paid skip-the-line is configured (-rate or
+// -surge above 0): base + depth × surge per position. See applyRoom.
 func (a *app) price(depth int64) float64 {
 	rate, surge := a.pricing()
 	return rate + float64(depth)*surge
@@ -798,7 +896,8 @@ func (a *app) price(depth int64) float64 {
 // ─── client identity and abuse enforcement ───────────────────────────────────
 
 // identify resolves the client IP, rejects banned clients, and bans clients
-// that touch a ban path. Hot path: one map lookup, no logging.
+// that touch a ban path. Hot path: one map lookup, no logging. The address
+// it stores is also room's client key (see newApp).
 func (g *generation) identify(c *gin.Context) {
 	ip := clientIP(c.Request, g.cfg.trusted)
 	c.Set(ctxClientIP, ip)
@@ -822,29 +921,6 @@ func (g *generation) identify(c *gin.Context) {
 			if left, banned := g.abuse.banNow(ip, now); banned {
 				g.rejectBanned(c, left)
 			}
-			return
-		}
-	}
-}
-
-// watchChurn strikes clients that arrive without a room_ticket and are
-// issued a new one: a script discarding cookies to take fresh places in line.
-func (g *generation) watchChurn(c *gin.Context) {
-	if c.FullPath() != "" {
-		c.Next()
-		return
-	}
-	_, err := c.Request.Cookie("room_ticket")
-	hadTicket := err == nil
-
-	c.Next()
-
-	if hadTicket || c.GetBool(ctxAdmitted) {
-		return
-	}
-	for _, v := range c.Writer.Header().Values("Set-Cookie") {
-		if strings.HasPrefix(v, "room_ticket=") {
-			g.strike(c, strikeTicketChurn)
 			return
 		}
 	}
@@ -876,10 +952,10 @@ const blockedPage = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 // rejectBanned answers a banned client.
 //
 // A waiting-room page polling /queue/status is told it is ready, so it
-// reloads at once and the reload shows the block notice: a new ban drops
-// waiting visitors on their next poll instead of leaving them in line until
-// room reaps the ticket. The room_ticket cookie is cleared, so a client
-// whose ban ends rejoins at the back of the line.
+// reloads at once and the reload shows the block notice. The ban itself
+// also removes the client's ticket from room's line (see queue.go). The
+// room_ticket cookie is cleared, so a client whose ban ends rejoins at the
+// back of the line.
 //
 // Temporary bans answer 429 with Retry-After; permanent bans answer 403.
 // Browsers get a short HTML page, everything else JSON.
@@ -1025,7 +1101,7 @@ type abuseRegistry struct {
 	ranges rangeSet // CIDR range bans; see ranges.go
 
 	// onBan is called, outside every registry lock, with the addresses a new
-	// or changed ban covers. The admin portal uses it to drop waiting visitors.
+	// or changed ban covers. The app uses it to drop waiting visitors.
 	onBan atomic.Pointer[func(netip.Prefix)]
 
 	// Persistence; see persist.go.
@@ -1469,7 +1545,7 @@ func (g *generation) requireAdmin(c *gin.Context) bool {
 
 func registerOps(r *gin.Engine, g *generation) {
 	a, cfg := g.a, g.cfg
-	wr, stats, assets := a.room, a.stats, g.assets
+	wr, stats, assets, streams := a.room, a.stats, g.assets, g.streams
 
 	r.GET("/_room/healthz", func(c *gin.Context) {
 		c.String(http.StatusOK, "ok")
@@ -1485,10 +1561,12 @@ func registerOps(r *gin.Engine, g *generation) {
 			"max_queue_depth":              wr.MaxQueueDepth(),
 			"utilization":                  wr.UtilizationSmoothed(),
 			"token_ttl":                    wr.TokenTTL().String(),
+			"first_poll_grace":             wr.FirstPollGrace().String(),
 			"queued_total":                 stats.queued.Load(),
 			"evicted_total":                stats.evicted.Load(),
 			"timeouts_total":               stats.timeouts.Load(),
 			"promoted_total":               stats.promoted.Load(),
+			"removed_total":                stats.removed.Load(),
 			"asset_cap":                    assets.global.Cap(),
 			"asset_in_flight":              assets.global.Len(),
 			"asset_users":                  assets.users.count.Load(),
@@ -1498,6 +1576,11 @@ func registerOps(r *gin.Engine, g *generation) {
 			"asset_denied_total":           stats.assetDenied.Load(),
 			"asset_user_throttled_total":   stats.assetUserThrottled.Load(),
 			"asset_global_throttled_total": stats.assetGlobalThrottled.Load(),
+			"stream_cap":                   streams.sem.Cap(),
+			"stream_active":                streams.sem.Len(),
+			"stream_served_total":          stats.streamServed.Load(),
+			"stream_denied_total":          stats.streamDenied.Load(),
+			"stream_throttled_total":       stats.streamThrottled.Load(),
 			"abuse_enabled":                g.abuse != nil,
 			"abuse_tracked":                g.abuse.tracked(),
 			"abuse_range_bans":             g.abuse.rangeCount(),
@@ -1698,8 +1781,9 @@ func (a *admitter) refresh(w http.ResponseWriter, r *http.Request, now time.Time
 	return status
 }
 
-// check runs on every private asset request. It also slides the pass past
-// half-life, so pages that lazy-load assets without navigating stay admitted.
+// check runs on every private asset and stream request. It also slides the
+// pass past half-life, so pages that lazy-load assets without navigating
+// stay admitted.
 func (a *admitter) check(w http.ResponseWriter, r *http.Request, now time.Time) (passID, passStatus) {
 	ck, err := r.Cookie(admitCookie)
 	if err != nil {
@@ -1919,7 +2003,7 @@ func isMultiplexed(r *http.Request, header string) bool {
 // apiQueueResponses rewrites room's own responses (waiting-room HTML, breaker
 // 503) into JSON for clients that did not ask for HTML. It applies only to
 // gated catch-all requests: registered routes (/queue/status, /_room/*,
-// bypass and asset paths) have a non-empty FullPath and are left alone.
+// bypass, asset and stream paths) have a non-empty FullPath and are left alone.
 func apiQueueResponses(retryAfter int) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c.FullPath() != "" || wantsHTML(c.Request) {

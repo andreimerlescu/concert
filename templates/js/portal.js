@@ -149,9 +149,10 @@
             setText('stat-queue-depth', fmtNum(d.queue_depth));
             setText('stat-assets', fmtNum(d.asset_in_flight) + ' / ' + fmtNum(d.asset_cap));
             setBar('bar-assets', d.asset_in_flight, d.asset_cap);
+            setText('stat-streams', fmtNum(d.stream_active) + ' / ' + fmtNum(d.stream_cap));
             setText('stat-bans', d.abuse_enabled ? fmtNum(d.active_bans) : 'off');
             setText('stat-price', d.skip_url ? fmtMoney(d.rate) + ' + ' + fmtMoney(d.surge) + ' per queued' : 'off');
-            setText('queue-count', fmtNum(d.occupants_tracked));
+            setText('queue-count', fmtNum(d.live_queue_depth));
             setText('ban-count', fmtNum(d.active_bans));
             setText('updated-at', 'updated ' + new Date().toLocaleTimeString());
         } catch (e) {
@@ -177,18 +178,19 @@
         for (const o of rows) {
             const tr = node('tr');
             tr.append(node('td', 'fw-semibold', o.position > 0 ? '#' + o.position : '—'));
-            tr.append(node('td', 'font-monospace', o.client));
+            tr.append(node('td', 'font-monospace', o.client || '—'));
 
             const state = node('td');
             if (o.ready) state.append(node('span', 'badge text-bg-success', 'ready'));
             else if (o.idle_seconds > 15) state.append(node('span', 'badge text-bg-secondary', 'idle'));
             else state.append(node('span', 'badge text-bg-primary', 'waiting'));
+            if (o.promoted) { state.append(' '); state.append(node('span', 'badge text-bg-info', 'moved up')); }
             if (o.has_pass) { state.append(' '); state.append(node('span', 'badge text-bg-warning', 'VIP')); }
             tr.append(state);
 
             tr.append(node('td', 'text-nowrap', fmtAgo(o.joined)));
             tr.append(node('td', 'text-nowrap', fmtAgo(o.last_seen) + ' ago'));
-            const pathCell = node('td', 'text-truncate cell-path font-monospace small', o.path);
+            const pathCell = node('td', 'text-truncate cell-path font-monospace small', o.path || '—');
             pathCell.title = o.path;
             tr.append(pathCell);
             const uaCell = node('td', 'text-truncate cell-ua small', o.user_agent || '—');
@@ -205,7 +207,8 @@
             tr.append(actions);
             tbody.append(tr);
         }
-        setText('queue-summary', `${fmtNum(lastQueue.tracked)} tracked · ${fmtNum(lastQueue.live_queue_depth)} live tickets · ${fmtNum(lastQueue.kicked)} removed`);
+        setText('queue-summary',
+            `${fmtNum(lastQueue.listed)} shown of ${fmtNum(lastQueue.live_queue_depth)} waiting · ${fmtNum(lastQueue.kicked)} removed`);
     }
 
     async function refreshQueue() {
@@ -227,7 +230,7 @@
         const prompts = {
             promote: 'Move this visitor to the front of the line?',
             kick: 'Remove this visitor from the line? They can rejoin at the back.',
-            ban: 'Remove this visitor and ban their address for the abuse cooldown? Everyone else waiting from that address is dropped too.',
+            ban: 'Remove this visitor and ban their address for the abuse cooldown? Everyone else waiting from that address is removed too.',
         };
         if (!window.confirm(prompts[action])) return;
         btn.disabled = true;
@@ -329,7 +332,7 @@
             const r = await api('POST', '/api/bans', { client, duration, permanent });
             bootstrap.Modal.getOrCreateInstance(banModalEl).hide();
             let msg = r.permanent ? `${r.client} banned permanently.` : `${r.client} banned until ${fmtTime(r.until)}.`;
-            if (r.dropped > 0) msg += ` ${plural(r.dropped, 'waiting visitor')} dropped from the line.`;
+            if (r.dropped > 0) msg += ` ${plural(r.dropped, 'waiting visitor')} removed from the line.`;
             if (r.exempt_within && r.exempt_within.length) msg += ` Still reachable inside it: ${r.exempt_within.join(', ')}.`;
             toast(msg, 'warning');
             refreshBans();

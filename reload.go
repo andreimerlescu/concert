@@ -10,7 +10,6 @@ import (
 	"net/http/httputil"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/andreimerlescu/room"
 	"github.com/andreimerlescu/sema"
@@ -21,11 +20,12 @@ import (
 //
 // Everything concert serves is built from one configuration into a
 // generation: the gin engine with its routes and middleware, the reverse
-// proxy, the asset pools and the ban rules. Each request loads the current
-// generation once, so a change never alters the rules halfway through a
-// request. Changing a setting builds a complete new generation, binds any
-// new listen address, saves settings.json, and then swaps everything in at
-// once. If any step before the save fails, nothing that is running changes.
+// proxy, the asset and stream pools and the ban rules. Each request loads
+// the current generation once, so a change never alters the rules halfway
+// through a request. Changing a setting builds a complete new generation,
+// binds any new listen address, saves settings.json, and then swaps
+// everything in at once. If any step before the save fails, nothing that is
+// running changes.
 //
 // State that must outlive a change is not rebuilt: the waiting room and its
 // queue, the abuse registry with its bans and strikes, the admission pass
@@ -37,10 +37,6 @@ import (
 // on the old pool, so for a moment the total in flight can exceed the new
 // limit by what the old pool still holds.
 
-// roomDefaultTokenTTL is room's ticket TTL when none is set. -token-ttl 0
-// means this value.
-const roomDefaultTokenTTL = 5 * time.Minute
-
 // generation is everything built from one configuration.
 type generation struct {
 	a         *app
@@ -49,6 +45,7 @@ type generation struct {
 	banRules  []pathRule
 	untracked []pathRule // paths the portal's queue view ignores
 	assets    *assetGuard
+	streams   *streamGuard
 	proxy     *httputil.ReverseProxy
 	forward   gin.HandlerFunc
 	engine    *gin.Engine
@@ -77,6 +74,7 @@ func (a *app) buildGeneration(next config, prev *generation) (*generation, error
 	g.untracked = append(g.untracked, parsePaths(next.assets)...)
 	g.untracked = append(g.untracked, parsePaths(next.assetPublic)...)
 	g.untracked = append(g.untracked, parsePaths(next.bypass)...)
+	g.untracked = append(g.untracked, parsePaths(next.streamPaths)...)
 	g.untracked = append(g.untracked, pathRule{path: "/_room", prefix: true})
 
 	if prev != nil && sameProxy(prev.cfg, next) {
@@ -109,6 +107,19 @@ func (a *app) buildGeneration(next config, prev *generation) (*generation, error
 		strike:      g.strike,
 	}
 
+	var streamSem sema.Semaphore
+	if prev != nil && prev.streams.sem.Cap() == next.streamCap {
+		streamSem = prev.streams.sem
+	} else if streamSem, err = sema.New(next.streamCap); err != nil {
+		return nil, fmt.Errorf("stream semaphore: %w", err)
+	}
+	g.streams = &streamGuard{
+		admit:  a.admit,
+		sem:    streamSem,
+		stats:  a.stats,
+		strike: g.strike,
+	}
+
 	engine, err := buildRouter(g)
 	if err != nil {
 		return nil, err
@@ -138,23 +149,29 @@ func readWaitingRoomHTML(cfg config) ([]byte, error) {
 }
 
 // applyRoom configures the waiting room from cfg. A nil html restores
-// room's built-in page. Every value is validated before it gets here, so an
-// error means room's own limits changed.
-func applyRoom(wr *room.WaitingRoom, cfg config, html []byte) error {
-	ttl := cfg.tokenTTL
-	if ttl == 0 {
-		ttl = roomDefaultTokenTTL
-	}
+// room's built-in page, and a zero ticket TTL restores room's default.
+// price becomes room's RateFunc only while paid skip-the-line is configured
+// (-rate or -surge above 0); otherwise room has none, and paid promotion is
+// off. The portal's "move to front" uses AdminPromote, which needs no
+// RateFunc. Every value is validated before it gets here, so an error means
+// room's own limits changed.
+func applyRoom(wr *room.WaitingRoom, cfg config, html []byte, price func(int64) float64) error {
 	wr.SetSecureCookie(cfg.secureCookie)
 	wr.SetCookiePath(cfg.cookiePath)
 	wr.SetCookieDomain(cfg.cookieDomain)
 	wr.SetHTML(html)
 	wr.SetSkipURL(cfg.skipURL)
+	if cfg.rate > 0 || cfg.surge > 0 {
+		wr.SetRateFunc(price)
+	} else {
+		wr.SetRateFunc(nil)
+	}
 	return errors.Join(
 		wr.SetCap(int32(cfg.capacity)),
 		wr.SetMaxQueueDepth(cfg.maxQueue),
 		wr.SetReaperInterval(cfg.reaper),
-		wr.SetTokenTTL(ttl),
+		wr.SetTokenTTL(cfg.tokenTTL),
+		wr.SetFirstPollGrace(cfg.firstPollGrace),
 		wr.SetPassDuration(cfg.passDuration),
 	)
 }
@@ -166,7 +183,7 @@ func (a *app) commit(g *generation, lp *listenPlan) error {
 	prev := a.current()
 	cfg := g.cfg
 
-	roomErr := applyRoom(a.room, cfg, g.html)
+	roomErr := applyRoom(a.room, cfg, g.html, a.price)
 	a.admit.configure(cfg.admitTTL, cfg.cookiePath, cfg.cookieDomain, cfg.secureCookie)
 	a.abuse.setParams(abuseParamsFrom(cfg))
 	a.setPricing(cfg.rate, cfg.surge)
