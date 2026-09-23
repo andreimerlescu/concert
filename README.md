@@ -149,6 +149,33 @@ The default trusts loopback only. That is safe even when Concert faces the inter
 
     -trusted-proxies "127.0.0.1/32,::1/128,10.0.0.0/8"
 
+## Persistent settings and bans
+
+Concert keeps two files in `-data-dir` (default `/var/lib/concert/data`), created with mode `0600`:
+
+| File | Holds |
+|---|---|
+| `settings.json` | Settings changed in the admin portal or with `POST /_room/cap` |
+| `bans.json` | Every ban, permanent bans, and offense history |
+
+Each setting takes the first value it finds, in this order:
+
+    settings.json  >  command-line flag  >  CONCERT_* environment variable  >  built-in default
+
+`settings.json` only holds values an operator changed, so everything else keeps following your flags and `concert.env`. **Reset** in the portal removes a value from the file. Every change is validated by building a throwaway copy of Concert before it is written, so a saved file always starts. If you edit the file by hand and Concert refuses to start, the error names the file: fix it or delete it.
+
+Page slots, queue depth, ticket TTL, pricing, the skip URL and VIP pass lifetime apply immediately. Every other setting is saved at once and takes effect on the next `systemctl restart concert`; the portal marks those as *pending restart*. Secrets (`CONCERT_ADMIN_TOKEN`, `CONCERT_ADMIT_SECRET`, `CONCERT_PORTAL_PASS`) and `-data-dir` itself are never stored in the file.
+
+Bans are restored at startup. Administrator bans are written before the API answers; automatic bans within a second. Addresses added to `-abuse-allow` since a ban was made are not restored as banned. A corrupt `bans.json` stops startup rather than silently lifting permanent bans. Set `-data-dir ""` to keep everything in memory as before.
+
+### Permanent bans
+
+The portal's ban dialog has a **Permanent** switch, for single addresses and ranges alike. A permanently banned client gets `403 Forbidden` with `{"error":"blocked","permanent":true}`, or a short HTML notice in a browser, until someone unbans it.
+
+### Bans drop waiting visitors
+
+Any new ban, whether from the portal, a ban path or strikes, removes that address's or range's visitors from the line at once. Their next `/queue/status` poll returns `ready:true`, so the waiting room page reloads straight into the block notice, and their `room_ticket` is invalidated so an unban means rejoining at the back. room's internal `queue_depth` keeps counting the old ticket until the reaper removes it; `live_queue_depth` and the portal are accurate immediately.
+
 ## Assets
 
 List the paths that hold your stylesheets, scripts, fonts and images in `-assets`:

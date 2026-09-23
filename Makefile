@@ -11,7 +11,7 @@ ext  = $(if $(filter windows,$(call os,$1)),.exe,)
 
 .PHONY: all test test-race lint clean bench build $(PLATFORMS)
 
-all: lint clean test test-race bench build
+all: lint clean test test-race bench summary build
 
 test:
 	go test -count=1 -v ./...
@@ -28,6 +28,9 @@ lint:
 clean:
 	go clean ./...
 	rm -rf $(BIN_DIR)
+
+summary:
+	summarize -s useExpanded,templates/lib,.git,.idea,summaries,lemmings -x useExpanded,jpg,LICENSE
 
 build: $(PLATFORMS)
 
