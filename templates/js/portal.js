@@ -56,14 +56,14 @@
     // Every value from the server is attacker-influenced (user agents, paths),
     // so the DOM is built with textContent only — never innerHTML.
     function node(tag, className, text) {
-        const e = document.createElement(tag);
-        if (className) e.className = className;
-        if (text !== undefined && text !== null) e.textContent = String(text);
-        return e;
+        const el = document.createElement(tag);
+        if (className) el.className = className;
+        if (text !== undefined && text !== null) el.textContent = String(text);
+        return el;
     }
 
     function byId(id) { return document.getElementById(id); }
-    function setText(id, text) { const e = byId(id); if (e) e.textContent = text; }
+    function setText(id, text) { const el = byId(id); if (el) el.textContent = text; }
     function fmtNum(v) { return typeof v === 'number' ? numberFormat.format(v) : '–'; }
     function fmtMoney(v) { return '$' + Number(v || 0).toFixed(2); }
     function fmtTime(iso) { return new Date(iso).toLocaleString(); }
@@ -136,6 +136,13 @@
         return b;
     }
 
+    // rankBadge shows a Concert-Priority rank granted by the application.
+    function rankBadge(rank) {
+        const b = node('span', 'badge text-bg-primary', rank);
+        b.title = 'Priority rank granted by the application (Concert-Priority)';
+        return b;
+    }
+
     function activeTab() {
         const pane = document.querySelector('.tab-pane.active');
         return pane ? pane.id : '';
@@ -162,8 +169,8 @@
             setText('ban-count', fmtNum(d.active_bans));
             setText('history-count', fmtNum(d.history_clients));
             setText('updated-at', 'updated ' + new Date().toLocaleTimeString());
-        } catch (e) {
-            setText('updated-at', 'update failed: ' + e.message);
+        } catch (err) {
+            setText('updated-at', 'update failed: ' + err.message);
         }
     }
 
@@ -193,6 +200,7 @@
             else state.append(node('span', 'badge text-bg-primary', 'waiting'));
             if (o.promoted) { state.append(' '); state.append(node('span', 'badge text-bg-info', 'moved up')); }
             if (o.has_pass) { state.append(' '); state.append(node('span', 'badge text-bg-warning', 'VIP')); }
+            if (o.rank) { state.append(' '); state.append(rankBadge(o.rank)); }
             tr.append(state);
 
             tr.append(node('td', 'text-nowrap', fmtAgo(o.joined)));
@@ -222,8 +230,8 @@
         try {
             lastQueue = await api('GET', '/api/queue');
             renderQueue();
-        } catch (e) {
-            toast(e.message, 'danger');
+        } catch (err) {
+            toast(err.message, 'danger');
         }
     }
 
@@ -251,8 +259,8 @@
                 if (r.banned) msg = r.ban_seconds > 0 ? `Visitor removed and banned for ${fmtSeconds(r.ban_seconds)}.` : 'Visitor removed; their address is banned permanently.';
                 toast(msg, 'warning');
             }
-        } catch (e) {
-            toast(e.message, 'danger');
+        } catch (err) {
+            toast(err.message, 'danger');
         } finally {
             refreshQueue();
             refreshOverview();
@@ -284,8 +292,8 @@
         let d;
         try {
             d = await api('GET', '/api/bans');
-        } catch (e) {
-            toast(e.message, 'danger');
+        } catch (err) {
+            toast(err.message, 'danger');
             return;
         }
         byId('bans-disabled').classList.toggle('d-none', d.enabled);
@@ -346,8 +354,8 @@
             refreshOverview();
             if (activeTab() === 'tab-queue') refreshQueue();
             if (activeTab() === 'tab-history') refreshHistory();
-        } catch (e) {
-            toast(e.message, 'danger');
+        } catch (err) {
+            toast(err.message, 'danger');
         }
     });
 
@@ -364,8 +372,8 @@
         try {
             await api('DELETE', '/api/bans?client=' + encodeURIComponent(client));
             toast(`${client} unbanned.`);
-        } catch (e) {
-            toast(e.message, 'danger');
+        } catch (err) {
+            toast(err.message, 'danger');
         } finally {
             refreshBans();
             refreshOverview();
@@ -500,28 +508,40 @@
         const table = node('table', 'table table-sm table-portal mb-0');
         const thead = node('thead');
         const hr = node('tr');
-        ['Time', 'Request', 'Status', 'Response', 'Ban', 'Browser'].forEach((h) => hr.append(node('th', null, h)));
+        ['Time', 'Request', 'Status', 'Response', 'Notes', 'Browser'].forEach((h) => hr.append(node('th', null, h)));
         thead.append(hr);
         table.append(thead);
+
         const tbody = node('tbody');
         if (!d.entries.length) emptyRow(tbody, 6, 'No requests kept.');
-        for (const e of d.entries) {
-            const tr = node('tr', e.triggered_ban ? 'history-trigger' : e.blocked ? 'history-blocked' : '');
-            tr.append(node('td', 'small text-nowrap', fmtTime(e.at)));
-            const req = node('td', 'small font-monospace text-truncate cell-hist-path', `${e.method} ${e.path}`);
-            req.title = e.path;
+        for (const entry of d.entries) {
+            const tr = node('tr', entry.triggered_ban ? 'history-trigger' : entry.blocked ? 'history-blocked' : '');
+
+            tr.append(node('td', 'small text-nowrap', fmtTime(entry.at)));
+
+            const req = node('td', 'small font-monospace text-truncate cell-hist-path', `${entry.method} ${entry.path}`);
+            req.title = entry.path;
             tr.append(req);
-            const st = node('td');
-            st.append(statusBadge(e.status));
-            tr.append(st);
-            tr.append(node('td', 'small text-nowrap', fmtMS(e.latency_ms)));
-            const ban = node('td', 'text-nowrap');
-            if (e.triggered_ban) ban.append(node('span', 'badge text-bg-danger', 'started ban'));
-            else if (e.blocked) ban.append(node('span', 'badge text-bg-warning', 'during ban'));
-            tr.append(ban);
-            const ua = node('td', 'small text-truncate cell-ua', e.user_agent || '—');
-            ua.title = e.user_agent;
+
+            const status = node('td');
+            status.append(statusBadge(entry.status));
+            tr.append(status);
+
+            tr.append(node('td', 'small text-nowrap', fmtMS(entry.latency_ms)));
+
+            const notes = node('td', 'text-nowrap');
+            if (entry.triggered_ban) notes.append(node('span', 'badge text-bg-danger', 'started ban'));
+            else if (entry.blocked) notes.append(node('span', 'badge text-bg-warning', 'during ban'));
+            if (entry.rank) {
+                if (notes.childNodes.length) notes.append(' ');
+                notes.append(rankBadge(entry.rank));
+            }
+            tr.append(notes);
+
+            const ua = node('td', 'small text-truncate cell-ua', entry.user_agent || '—');
+            ua.title = entry.user_agent;
             tr.append(ua);
+
             tbody.append(tr);
         }
         table.append(tbody);
@@ -544,27 +564,34 @@
             const key = String(w.id);
             const open = historyOpen.bans.has(key);
             const tr = node('tr');
+
             const tog = node('td', 'history-toggle');
             tog.append(toggleButton(open, { id: key }));
             tr.append(tog);
+
             const target = node('td', 'font-monospace text-nowrap', w.target);
             if (w.range) { target.append(' '); target.append(node('span', 'badge text-bg-secondary', 'range')); }
             tr.append(target);
+
             const state = node('td');
             state.append(banStateBadge(w));
             tr.append(state);
+
             tr.append(node('td', 'small text-nowrap', w.began ? fmtTime(w.began) : 'before restart'));
             tr.append(node('td', 'small', banEndText(w)));
             tr.append(node('td', w.requests ? 'fw-semibold text-danger' : 'text-body-secondary', fmtNum(w.requests)));
+
             let top = w.paths.map((x) => `${x.name} ×${fmtNum(x.hits)}`).join(', ');
             if (w.distinct_paths > w.paths.length) top += ` and ${fmtNum(w.distinct_paths - w.paths.length)} more`;
             const topCell = node('td', 'small font-monospace text-truncate cell-hist-path', top || '—');
             topCell.title = top;
             tr.append(topCell);
+
             const started = w.trigger ? `${w.trigger.method} ${w.trigger.path}` : (w.source || '—');
             const startedCell = node('td', 'small text-truncate cell-hist-path' + (w.trigger ? ' font-monospace' : ''), started);
             startedCell.title = started;
             tr.append(startedCell);
+
             tbody.append(tr);
             if (open) tbody.append(detailRow(8, historyCache.bans.get(key), renderWindow));
         }
@@ -581,9 +608,11 @@
         for (const cl of d.clients) {
             const open = historyOpen.clients.has(cl.client);
             const tr = node('tr');
+
             const tog = node('td', 'history-toggle');
             tog.append(toggleButton(open, { client: cl.client }));
             tr.append(tog);
+
             tr.append(node('td', 'font-monospace text-nowrap', cl.client));
 
             const state = node('td', 'text-nowrap');
@@ -595,6 +624,7 @@
             } else {
                 state.append(node('span', 'badge text-bg-light border', 'ok'));
             }
+            if (cl.rank) { state.append(' '); state.append(rankBadge(cl.rank)); }
             tr.append(state);
 
             tr.append(node('td', null, fmtNum(cl.requests)));
@@ -613,6 +643,7 @@
             ban.disabled = cl.banned_now || !d.abuse_enabled;
             actions.append(ban);
             tr.append(actions);
+
             tbody.append(tr);
             if (open) tbody.append(detailRow(9, historyCache.clients.get(cl.client), renderClientDetail));
         }
@@ -637,16 +668,16 @@
     async function loadClient(ip) {
         try {
             historyCache.clients.set(ip, await api('GET', '/api/history/client?client=' + encodeURIComponent(ip)));
-        } catch (e) {
-            historyCache.clients.set(ip, { error: e.message });
+        } catch (err) {
+            historyCache.clients.set(ip, { error: err.message });
         }
     }
 
     async function loadBan(id) {
         try {
             historyCache.bans.set(id, (await api('GET', '/api/history/ban?id=' + encodeURIComponent(id))).ban);
-        } catch (e) {
-            historyCache.bans.set(id, { error: e.message });
+        } catch (err) {
+            historyCache.bans.set(id, { error: err.message });
         }
     }
 
@@ -663,8 +694,8 @@
             ]);
             historyData = d;
             renderHistory();
-        } catch (e) {
-            toast(e.message, 'danger');
+        } catch (err) {
+            toast(err.message, 'danger');
         }
     }
 
@@ -872,8 +903,8 @@
         if (settingsData && changedInputs().length) return;
         try {
             renderSettings(await api('GET', '/api/settings'));
-        } catch (e) {
-            toast(e.message, 'danger');
+        } catch (err) {
+            toast(err.message, 'danger');
         }
     }
 
@@ -928,9 +959,9 @@
             renderSettings(d);
             toast(`${s.label} reset and applied.`);
             refreshOverview();
-        } catch (e) {
+        } catch (err) {
             btn.disabled = false;
-            toast(e.message, 'danger');
+            toast(err.message, 'danger');
         }
     });
 
@@ -941,8 +972,8 @@
         const body = {};
         try {
             for (const i of changed) body[i.dataset.key] = typedValue(i);
-        } catch (e) {
-            toast(e.message, 'danger');
+        } catch (err) {
+            toast(err.message, 'danger');
             return;
         }
         const portalChange = 'portal_listen' in body;
@@ -963,8 +994,8 @@
                 ? `Saved. The main listener moved to ${body.listen}; open connections finish on the old address.`
                 : 'Settings saved and applied.');
             refreshOverview();
-        } catch (e) {
-            toast(e.message, 'danger');
+        } catch (err) {
+            toast(err.message, 'danger');
             updateDirty();
         }
     });
