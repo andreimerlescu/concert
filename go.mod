@@ -4,7 +4,7 @@ go 1.26.1
 
 require (
 	github.com/andreimerlescu/goenv v1.0.0
-	github.com/andreimerlescu/room v1.3.0
+	github.com/andreimerlescu/room v1.4.0
 	github.com/andreimerlescu/sema v1.1.0
 	github.com/gin-gonic/gin v1.12.0
 	golang.org/x/crypto v0.57.0

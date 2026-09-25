@@ -4,6 +4,8 @@ github.com/andreimerlescu/goenv v1.0.0 h1:S+cz2HppreKnTCcbNs/z90mlReT+jD+srDMVMn
 github.com/andreimerlescu/goenv v1.0.0/go.mod h1:ehn80sBXiQAH4v3FUUVze1Oh23OeHWIk/gYwxTl6WKw=
 github.com/andreimerlescu/room v1.3.0 h1:++dFRJLC+pJTo+An2ytJawuDUlKvyhIPioj2b6GPvWM=
 github.com/andreimerlescu/room v1.3.0/go.mod h1:BK9Xi3TDygwKyeerWKM2pHyLTGUdXyKYV30zMywpQS0=
+github.com/andreimerlescu/room v1.4.0 h1:FT11J5549C6OkoJaQlzI5mU3WC62PLSjDmh2HeeNWa4=
+github.com/andreimerlescu/room v1.4.0/go.mod h1:BK9Xi3TDygwKyeerWKM2pHyLTGUdXyKYV30zMywpQS0=
 github.com/andreimerlescu/sema v1.1.0 h1:0ivMbf9oWXIJZrrgltBA58DNdUrz1d2hS5PdFgnjNgQ=
 github.com/andreimerlescu/sema v1.1.0/go.mod h1:VCRQkKVknOKKPtAqvrNHL7hxxfoX5O7it2lWBzVxUs0=
 github.com/bytedance/gopkg v0.1.3 h1:TPBSwH8RsouGCBcMBktLt1AymVo2TVsBVCY4b6TnZ/M=

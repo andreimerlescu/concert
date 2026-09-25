@@ -406,14 +406,14 @@ Your application ranks its own visitors by adding a header to any page response:
 | Rank | Value | Send it when | While the room is full | Default TTL |
 |---|---|---|---|---|
 | 0 | `guest` | Anonymous, or to clear a grant | First come, first served | — |
-| 1 | `member` | Signed in, nothing bought yet | Waits, ahead of guests | 8h |
-| 2 | `prospect` | On a buying page, items in cart | Waits, ahead of members | 30m |
+| 1 | `member` | Signed in, nothing bought yet | Waits in arrival order | 8h |
+| 2 | `prospect` | On a buying page, items in cart | Waits in arrival order | 30m |
 | 3 | `customer` | Has bought before | Priority lane | 8h |
 | 4 | `subscriber` | Has an active subscription | Priority lane | 8h |
 | 5 | `checkout` | Payment in progress | Priority lane | 30m |
 | 6 | `staff` | Operators and support | Priority lane, served first | 8h |
 
-Concert removes the header before the response reaches the browser. It stores the rank in `concert_priority`, a signed cookie bound to the visitor's admission pass. Browsers can't set it, forge it, or move it to another pass.
+While the room is busy, ranks at or above `-priority-lane-rank` skip the line through the priority lane: a separate pool of `-priority-cap` slots, so the origin sees at most `-cap + -priority-cap` page requests at once. A lane request waits up to `-priority-wait` for a slot, highest rank first, then joins the line. Ranks below it wait in arrival order for now; set the lane rank to 2 to let prospects skip the line too. Bans apply at every rank.
 
 - The latest header wins, so the application can raise, lower or clear (`guest`) a rank, and every header renews it.
 - `ttl` is seconds or a duration, clamped to 1m–24h.

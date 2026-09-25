@@ -267,7 +267,6 @@
         <button type="button" class="btn btn-sm btn-outline-secondary ms-auto" id="history-refresh"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
       </div>
 
-
       <div class="card stat-card mb-4">
         <div class="card-body pb-2 d-flex flex-wrap align-items-baseline gap-2">
           <h2 class="h6 mb-0"><i class="bi bi-person-lines-fill"></i> Clients</h2>
@@ -320,7 +319,6 @@
           </table>
         </div>
       </div>
-
     </div>
 
     <!-- Settings -->

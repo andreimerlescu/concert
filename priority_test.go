@@ -181,9 +181,10 @@ func TestRankedSem_HighestRankFirst(t *testing.T) {
 	}
 }
 
-// Checks the ranked line, and with it that room's AdminPromote takes a
-// target position.
-func TestPriority_RankedLineOrder(t *testing.T) {
+// Until room can order its line by rank (see orderLineByRank), ranked
+// visitors below the lane rank wait in arrival order, and the portal still
+// shows their rank.
+func TestPriority_RankedVisitorsWaitInArrivalOrder(t *testing.T) {
 	up := newFakeUpstream(t)
 	cfg := portalTestConfig(up.URL())
 	cfg.capacity = 1
@@ -199,27 +200,19 @@ func TestPriority_RankedLineOrder(t *testing.T) {
 		}
 		return ticketOf(t, c, front)
 	}
-	guest1 := join(nil)
-	guest2 := join(nil)
+	guest := join(nil)
 	prospect := join(withGrant(pass, grantFor(t, a, pass, rankProspect)))
 	member := join(withGrant(pass, grantFor(t, a, pass, rankMember)))
 
-	want := []string{prospect, member, guest1, guest2}
-	eventually(t, 2*time.Second, func() bool {
-		line := a.room.Queue(10)
-		if len(line) != len(want) {
-			return false
-		}
-		for i := range want {
-			if line[i].Token != want[i] {
-				return false
-			}
-		}
-		return true
-	}, "the line is not ordered by rank (prospect, member, then guests in arrival order)")
-
+	line := a.room.Queue(10)
+	if len(line) != 3 || line[0].Token != guest || line[1].Token != prospect || line[2].Token != member {
+		t.Fatalf("the line should stay in arrival order: %+v", line)
+	}
+	if a.prio.placed.Load() != 0 {
+		t.Errorf("nobody should be moved while orderLineByRank is off: %d", a.prio.placed.Load())
+	}
 	views := p.queueViews(time.Now())
-	if views[0].Rank != "prospect" || views[1].Rank != "member" || views[2].Rank != "" {
+	if views[0].Rank != "" || views[1].Rank != "prospect" || views[2].Rank != "member" {
 		t.Errorf("queue view ranks: %q %q %q", views[0].Rank, views[1].Rank, views[2].Rank)
 	}
 }

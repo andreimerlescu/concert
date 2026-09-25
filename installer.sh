@@ -770,8 +770,10 @@ apply_service() {
 report_avcs() {
     selinux_active && command -v ausearch &>/dev/null || return 0
     local avcs
-    avcs=$(ausearch -m AVC,USER_AVC,SELINUX_ERR -ts recent 2>/dev/null \
-        | grep -E 'concert_(t|exec_t|var_lib_t|etc_t)|comm="\(?concert\)?"|name="concert"' || true)
+
+    avcs=$(timeout 15 ausearch --input-logs -m AVC,USER_AVC,SELINUX_ERR -ts recent </dev/null 2>/dev/null \
+            | grep -E 'concert_(t|exec_t|var_lib_t|etc_t)|comm="\(?concert\)?"|name="concert"' || true)
+
     if [[ -n "$avcs" ]]; then
         warn "SELinux denials involving concert:"
         echo "$avcs" | tail -n 20 >&2
@@ -816,8 +818,7 @@ verify() {
         [[ "$(env_get CONCERT_TLS_STAGING)" == "true" ]] && insecure=(-k)
         url="https://$domain:$port/"
         log "Requesting $url (the first request obtains the certificate)"
-        code=$(curl -s "${insecure[@]}" -o /dev/null -w '%{http_code}' --max-time 60 \
-            --resolve "$domain:$port:127.0.0.1" "$url" || true)
+        code=$(curl -s "${insecure[@]}" -o /dev/null -w '%{http_code}' --max-time 6 --resolve "$domain:$port:127.0.0.1" "$url" || true)
     else
         host="${LISTEN%:*}"
         [[ -z "$host" || "$host" == "0.0.0.0" || "$host" == "[::]" ]] && host=127.0.0.1

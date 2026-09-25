@@ -39,19 +39,19 @@ import (
 // Ranks, lowest to highest, and what they get while the room is busy:
 //
 //	0 guest       anonymous; no header needed        first come, first served
-//	1 member      signed in, nothing bought          waits, ahead of guests
-//	2 prospect    buying page, items in cart         waits, ahead of members
+//	1 member      signed in, nothing bought          waits in arrival order
+//	2 prospect    buying page, items in cart         waits in arrival order
 //	3 customer    has bought before                  priority lane
 //	4 subscriber  active subscription                priority lane
 //	5 checkout    payment in progress                priority lane
 //	6 staff       operators and support              priority lane, first
 //
-// Ranked visitors below -priority-lane-rank still wait, but room's line is
-// kept ordered by rank, first come first served within a rank. Visitors at
-// or above it take the priority lane: a separate pool of -priority-cap
-// slots, so the origin never sees more than -cap + -priority-cap page
-// requests at once. A lane request waits up to -priority-wait for a slot,
-// highest rank first, and otherwise joins the line at the front of its rank.
+// Ranked visitors below -priority-lane-rank wait in arrival order for now;
+// see orderLineByRank. Visitors at or above it take the priority lane: a
+// separate pool of -priority-cap slots, so the origin never sees more than
+// -cap + -priority-cap page requests at once. A lane request waits up to
+// -priority-wait for a slot, highest rank first, and otherwise joins the
+// line.
 //
 // With -priority-forms, a form submission (any method but GET and HEAD) from
 // a visitor holding a valid admission pass also uses the lane, at its own
@@ -78,6 +78,14 @@ const (
 	grantMACLen  = 16
 	grantRawLen  = grantBodyLen + grantMACLen
 )
+
+// orderLineByRank moves ranked visitors ahead of lower ranks in room's line.
+// Off until room can order its line by rank itself: room's AdminPromote
+// gives a ticket the same position as the one already there, and ties go to
+// whoever arrived first, so strict rank order is not possible through it.
+// Ranked visitors below the lane rank wait in arrival order meanwhile; their
+// rank is still recorded for the portal.
+const orderLineByRank = false
 
 // ─── ranks ───────────────────────────────────────────────────────────────────
 
@@ -355,8 +363,9 @@ func (l *rankedLine) rankOf(token string) priorityRank {
 	return l.m[token]
 }
 
-// place moves token up room's line behind every waiting visitor of equal or
-// higher rank. It reports whether the ticket moved.
+// place records token's rank for the portal and, once orderLineByRank is on,
+// moves it up room's line behind every waiting visitor of equal or higher
+// rank. It reports whether the ticket moved.
 func (l *rankedLine) place(wr *room.WaitingRoom, token string, rank priorityRank) bool {
 	l.mu.Lock()
 	if _, ok := l.m[token]; !ok && len(l.m) >= rankedLineMax {
@@ -364,6 +373,10 @@ func (l *rankedLine) place(wr *room.WaitingRoom, token string, rank priorityRank
 		return false
 	}
 	l.m[token] = rank
+	if !orderLineByRank {
+		l.mu.Unlock()
+		return false
+	}
 	ahead := make([]string, 0, len(l.m))
 	for t, r := range l.m {
 		if t != token && r >= rank {
