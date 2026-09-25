@@ -81,6 +81,12 @@
 
     function fmtAgo(iso) { return fmtSeconds((Date.now() - Date.parse(iso)) / 1000); }
 
+    function fmtMS(ms) {
+        if (ms < 1) return '<1 ms';
+        if (ms < 1000) return Math.round(ms) + ' ms';
+        return (ms / 1000).toFixed(1) + ' s';
+    }
+
     function toast(message, kind) {
         const wrap = byId('toasts');
         if (!wrap) return;
@@ -154,6 +160,7 @@
             setText('stat-price', d.skip_url ? fmtMoney(d.rate) + ' + ' + fmtMoney(d.surge) + ' per queued' : 'off');
             setText('queue-count', fmtNum(d.live_queue_depth));
             setText('ban-count', fmtNum(d.active_bans));
+            setText('history-count', fmtNum(d.history_clients));
             setText('updated-at', 'updated ' + new Date().toLocaleTimeString());
         } catch (e) {
             setText('updated-at', 'update failed: ' + e.message);
@@ -338,6 +345,7 @@
             refreshBans();
             refreshOverview();
             if (activeTab() === 'tab-queue') refreshQueue();
+            if (activeTab() === 'tab-history') refreshHistory();
         } catch (e) {
             toast(e.message, 'danger');
         }
@@ -362,6 +370,344 @@
             refreshBans();
             refreshOverview();
         }
+    });
+
+    // ── History ────────────────────────────────────────────────────────────
+    // Clients and bans the operator expanded, and their fetched details.
+    // Details are refetched on every refresh so expanded rows stay live.
+    const historyOpen = { clients: new Set(), bans: new Set() };
+    const historyCache = { clients: new Map(), bans: new Map() };
+    let historyData = null;
+    let historyFilterTimer = 0;
+
+    function statusBadge(code) {
+        let cls = 'text-bg-success';
+        if (code >= 500) cls = 'text-bg-danger';
+        else if (code >= 400) cls = 'text-bg-warning';
+        else if (code >= 300) cls = 'text-bg-info';
+        else if (code < 200) cls = 'text-bg-secondary';
+        return node('span', 'badge ' + cls, String(code));
+    }
+
+    function banStateBadge(w) {
+        if (w.active) return node('span', 'badge text-bg-danger', w.permanent ? 'permanent' : 'active');
+        return node('span', 'badge text-bg-light border', w.end_reason === 'lifted' ? 'lifted' : 'expired');
+    }
+
+    function banEndText(w) {
+        if (w.active) {
+            if (w.permanent) return 'Never: permanent until someone unbans it';
+            return `${fmtTime(w.until)} (${fmtSeconds(w.remaining_seconds)} left)`;
+        }
+        if (w.end_reason === 'lifted') return `Lifted ${fmtTime(w.ended)}` + (w.lifted_by ? ` by ${w.lifted_by}` : '');
+        return `Expired ${fmtTime(w.ended)}`;
+    }
+
+    function toggleButton(open, data) {
+        return iconButton('toggle', 'btn-sm btn-link text-body p-0', open ? 'bi-chevron-down' : 'bi-chevron-right',
+            open ? 'Hide details' : 'Show details', data);
+    }
+
+    function detailRow(cols, data, render) {
+        const tr = node('tr', 'history-detail');
+        const td = node('td');
+        td.colSpan = cols;
+        if (!data) td.append(node('div', 'small text-body-secondary py-2', 'Loading…'));
+        else if (data.error) td.append(node('div', 'small text-danger py-2', data.error));
+        else td.append(render(data));
+        tr.append(td);
+        return tr;
+    }
+
+    function countTable(title, rows, other, otherLabel) {
+        const col = node('div', 'col-md-6');
+        col.append(node('div', 'small fw-semibold mb-1', title));
+        const table = node('table', 'table table-sm table-portal mb-0');
+        const tbody = node('tbody');
+        for (const r of rows) {
+            const tr = node('tr');
+            tr.append(node('td', 'small font-monospace text-break', r.name));
+            tr.append(node('td', 'small text-end fw-semibold text-nowrap', fmtNum(r.hits)));
+            tbody.append(tr);
+        }
+        if (other > 0) {
+            const tr = node('tr');
+            tr.append(node('td', 'small text-body-secondary', otherLabel));
+            tr.append(node('td', 'small text-end fw-semibold', fmtNum(other)));
+            tbody.append(tr);
+        }
+        if (!rows.length && !(other > 0)) emptyRow(tbody, 2, 'None');
+        table.append(tbody);
+        col.append(table);
+        return col;
+    }
+
+    function renderWindow(w) {
+        const card = node('div', 'history-ban border rounded p-3 mb-3');
+        const head = node('div', 'd-flex flex-wrap align-items-center gap-2 mb-2');
+        head.append(node('i', 'bi bi-slash-circle text-danger'));
+        head.append(node('span', 'fw-semibold font-monospace', w.target));
+        if (w.range) head.append(node('span', 'badge text-bg-secondary', 'range'));
+        head.append(banStateBadge(w));
+        card.append(head);
+
+        const dl = node('dl', 'row small mb-2');
+        const add = (k, v) => {
+            dl.append(node('dt', 'col-sm-3 text-body-secondary fw-normal', k));
+            dl.append(node('dd', 'col-sm-9 mb-1 text-break', v));
+        };
+        add('Began', w.began ? fmtTime(w.began) : 'Before concert last started (restored from bans.json)');
+        add(w.active ? 'Ends' : 'Ended', banEndText(w));
+        if (w.trigger) {
+            add('Started by', `${w.trigger.method} ${w.trigger.path} → ${w.trigger.status}, from ${w.trigger.client} at ${fmtTime(w.trigger.at)}`);
+        } else if (!w.source && w.began) {
+            add('Started by', 'Strikes that added up over several requests; see the client\'s requests below the ban start');
+        }
+        if (w.source) add('Issued', w.source);
+        if (w.changes) add('Changed', plural(w.changes, 'time') + ' while in force');
+        add('Requests during ban', w.requests
+            ? `${fmtNum(w.requests)} blocked · first ${fmtTime(w.first_hit)} · last ${fmtTime(w.last_hit)}`
+            : 'None: nothing from this network arrived while it was banned');
+        card.append(dl);
+
+        if (w.requests) {
+            const row = node('div', 'row g-3');
+            row.append(countTable('Paths requested while banned', w.paths, w.other_paths, 'Other paths (not itemised)'));
+            row.append(countTable('Addresses that made them', w.clients, w.other_clients, 'Other addresses (not itemised)'));
+            card.append(row);
+        }
+        return card;
+    }
+
+    function renderClientDetail(d) {
+        const box = node('div', 'py-2');
+        const c = d.client;
+        box.append(node('div', 'small text-body-secondary mb-1',
+            `First seen ${fmtTime(c.first_seen)} · last seen ${fmtTime(c.last_seen)} · `
+            + `${fmtNum(c.requests)} recorded, ${fmtNum(c.blocked)} blocked, ${fmtNum(c.errors)} errors`));
+        if (d.user_agents.length) {
+            box.append(node('div', 'small text-body-secondary mb-3 text-break',
+                'Browsers: ' + d.user_agents.map((u) => u || '(none sent)').join(' · ')));
+        }
+
+        if (d.bans.length) {
+            box.append(node('div', 'small fw-semibold mb-2', plural(d.bans.length, 'ban') + ' covering this address'));
+            d.bans.forEach((w) => box.append(renderWindow(w)));
+        }
+
+        box.append(node('div', 'small fw-semibold mb-2', `Requests, newest first (last ${fmtNum(d.entries.length)} kept)`));
+        const wrap = node('div', 'table-responsive');
+        const table = node('table', 'table table-sm table-portal mb-0');
+        const thead = node('thead');
+        const hr = node('tr');
+        ['Time', 'Request', 'Status', 'Response', 'Ban', 'Browser'].forEach((h) => hr.append(node('th', null, h)));
+        thead.append(hr);
+        table.append(thead);
+        const tbody = node('tbody');
+        if (!d.entries.length) emptyRow(tbody, 6, 'No requests kept.');
+        for (const e of d.entries) {
+            const tr = node('tr', e.triggered_ban ? 'history-trigger' : e.blocked ? 'history-blocked' : '');
+            tr.append(node('td', 'small text-nowrap', fmtTime(e.at)));
+            const req = node('td', 'small font-monospace text-truncate cell-hist-path', `${e.method} ${e.path}`);
+            req.title = e.path;
+            tr.append(req);
+            const st = node('td');
+            st.append(statusBadge(e.status));
+            tr.append(st);
+            tr.append(node('td', 'small text-nowrap', fmtMS(e.latency_ms)));
+            const ban = node('td', 'text-nowrap');
+            if (e.triggered_ban) ban.append(node('span', 'badge text-bg-danger', 'started ban'));
+            else if (e.blocked) ban.append(node('span', 'badge text-bg-warning', 'during ban'));
+            tr.append(ban);
+            const ua = node('td', 'small text-truncate cell-ua', e.user_agent || '—');
+            ua.title = e.user_agent;
+            tr.append(ua);
+            tbody.append(tr);
+        }
+        table.append(tbody);
+        wrap.append(table);
+        box.append(wrap);
+        return box;
+    }
+
+    function renderBanLog() {
+        const tbody = byId('history-ban-rows');
+        tbody.replaceChildren();
+        const bans = historyData.bans;
+        if (!bans.length) {
+            let text = 'No bans recorded since concert started.';
+            if (byId('history-filter').value.trim()) text = 'No bans match the filter.';
+            else if (!historyData.abuse_enabled) text = 'No bans recorded. The abuse registry is off.';
+            emptyRow(tbody, 8, text);
+        }
+        for (const w of bans) {
+            const key = String(w.id);
+            const open = historyOpen.bans.has(key);
+            const tr = node('tr');
+            const tog = node('td', 'history-toggle');
+            tog.append(toggleButton(open, { id: key }));
+            tr.append(tog);
+            const target = node('td', 'font-monospace text-nowrap', w.target);
+            if (w.range) { target.append(' '); target.append(node('span', 'badge text-bg-secondary', 'range')); }
+            tr.append(target);
+            const state = node('td');
+            state.append(banStateBadge(w));
+            tr.append(state);
+            tr.append(node('td', 'small text-nowrap', w.began ? fmtTime(w.began) : 'before restart'));
+            tr.append(node('td', 'small', banEndText(w)));
+            tr.append(node('td', w.requests ? 'fw-semibold text-danger' : 'text-body-secondary', fmtNum(w.requests)));
+            let top = w.paths.map((x) => `${x.name} ×${fmtNum(x.hits)}`).join(', ');
+            if (w.distinct_paths > w.paths.length) top += ` and ${fmtNum(w.distinct_paths - w.paths.length)} more`;
+            const topCell = node('td', 'small font-monospace text-truncate cell-hist-path', top || '—');
+            topCell.title = top;
+            tr.append(topCell);
+            const started = w.trigger ? `${w.trigger.method} ${w.trigger.path}` : (w.source || '—');
+            const startedCell = node('td', 'small text-truncate cell-hist-path' + (w.trigger ? ' font-monospace' : ''), started);
+            startedCell.title = started;
+            tr.append(startedCell);
+            tbody.append(tr);
+            if (open) tbody.append(detailRow(8, historyCache.bans.get(key), renderWindow));
+        }
+    }
+
+    function renderHistoryClients() {
+        const tbody = byId('history-client-rows');
+        tbody.replaceChildren();
+        const d = historyData;
+        if (!d.clients.length) {
+            const filtered = byId('history-filter').value.trim() || byId('history-flagged').checked;
+            emptyRow(tbody, 9, filtered ? 'No clients match.' : 'No requests recorded yet.');
+        }
+        for (const cl of d.clients) {
+            const open = historyOpen.clients.has(cl.client);
+            const tr = node('tr');
+            const tog = node('td', 'history-toggle');
+            tog.append(toggleButton(open, { client: cl.client }));
+            tr.append(tog);
+            tr.append(node('td', 'font-monospace text-nowrap', cl.client));
+
+            const state = node('td', 'text-nowrap');
+            if (cl.banned_now) {
+                state.append(node('span', 'badge text-bg-danger',
+                    cl.ban_permanent ? 'banned permanently' : 'banned · ' + fmtSeconds(cl.ban_remaining_seconds) + ' left'));
+            } else if (cl.bans_triggered || cl.blocked) {
+                state.append(node('span', 'badge text-bg-warning', 'was banned'));
+            } else {
+                state.append(node('span', 'badge text-bg-light border', 'ok'));
+            }
+            tr.append(state);
+
+            tr.append(node('td', null, fmtNum(cl.requests)));
+            tr.append(node('td', cl.blocked ? 'fw-semibold text-danger' : 'text-body-secondary', fmtNum(cl.blocked)));
+            tr.append(node('td', cl.errors ? 'fw-semibold' : 'text-body-secondary', fmtNum(cl.errors)));
+            tr.append(node('td', 'small text-nowrap', fmtAgo(cl.last_seen) + ' ago'));
+
+            const last = node('td', 'small text-truncate cell-hist-path');
+            last.title = cl.last_path;
+            last.append(statusBadge(cl.last_status), ' ');
+            last.append(node('span', 'font-monospace', `${cl.last_method} ${cl.last_path}`));
+            tr.append(last);
+
+            const actions = node('td', 'text-end text-nowrap');
+            const ban = iconButton('ban', 'btn-sm btn-outline-danger', 'bi-slash-circle', 'Ban this address', { client: cl.client });
+            ban.disabled = cl.banned_now || !d.abuse_enabled;
+            actions.append(ban);
+            tr.append(actions);
+            tbody.append(tr);
+            if (open) tbody.append(detailRow(9, historyCache.clients.get(cl.client), renderClientDetail));
+        }
+    }
+
+    function renderHistory() {
+        if (!historyData) return;
+        const d = historyData;
+        renderBanLog();
+        renderHistoryClients();
+        let summary = `${fmtNum(d.listed)} shown of ${fmtNum(d.matched)} matching · ${fmtNum(d.tracked)} addresses recorded`;
+        if (d.evicted) summary += ` · ${fmtNum(d.evicted)} forgotten to make room`;
+        setText('history-summary', summary);
+        const l = d.limits;
+        setText('history-limits',
+            `Kept in memory: the last ${fmtNum(l.per_client)} requests from each of up to ${fmtNum(l.max_clients)} addresses, `
+            + `until ${l.retention_hours}h after an address's last request; bans are kept ${l.retention_hours}h after they end. `
+            + 'Requests from banned clients and every 4xx or 5xx response are always recorded; successful asset '
+            + 'and waiting-room status requests are not, as in the access log. A restart starts the history again.');
+    }
+
+    async function loadClient(ip) {
+        try {
+            historyCache.clients.set(ip, await api('GET', '/api/history/client?client=' + encodeURIComponent(ip)));
+        } catch (e) {
+            historyCache.clients.set(ip, { error: e.message });
+        }
+    }
+
+    async function loadBan(id) {
+        try {
+            historyCache.bans.set(id, (await api('GET', '/api/history/ban?id=' + encodeURIComponent(id))).ban);
+        } catch (e) {
+            historyCache.bans.set(id, { error: e.message });
+        }
+    }
+
+    async function refreshHistory() {
+        const params = new URLSearchParams();
+        const q = byId('history-filter').value.trim();
+        if (q) params.set('q', q);
+        if (byId('history-flagged').checked) params.set('flagged', '1');
+        try {
+            const [d] = await Promise.all([
+                api('GET', '/api/history?' + params.toString()),
+                ...[...historyOpen.clients].map(loadClient),
+                ...[...historyOpen.bans].map(loadBan),
+            ]);
+            historyData = d;
+            renderHistory();
+        } catch (e) {
+            toast(e.message, 'danger');
+        }
+    }
+
+    byId('history-refresh').addEventListener('click', refreshHistory);
+    byId('history-flagged').addEventListener('change', refreshHistory);
+    byId('history-filter').addEventListener('input', () => {
+        clearTimeout(historyFilterTimer);
+        historyFilterTimer = setTimeout(refreshHistory, 300);
+    });
+
+    byId('history-ban-rows').addEventListener('click', async (ev) => {
+        const btn = ev.target.closest('button[data-action="toggle"]');
+        if (!btn) return;
+        const id = btn.dataset.id;
+        if (historyOpen.bans.delete(id)) {
+            historyCache.bans.delete(id);
+            renderHistory();
+            return;
+        }
+        historyOpen.bans.add(id);
+        renderHistory();
+        await loadBan(id);
+        renderHistory();
+    });
+
+    byId('history-client-rows').addEventListener('click', async (ev) => {
+        const btn = ev.target.closest('button[data-action]');
+        if (!btn) return;
+        const { action, client } = btn.dataset;
+        if (action === 'ban') {
+            openBanModal('', '1h', false);
+            byId('ban-client').value = client;
+            return;
+        }
+        if (historyOpen.clients.delete(client)) {
+            historyCache.clients.delete(client);
+            renderHistory();
+            return;
+        }
+        historyOpen.clients.add(client);
+        renderHistory();
+        await loadClient(client);
+        renderHistory();
     });
 
     // ── Settings ───────────────────────────────────────────────────────────
@@ -630,6 +976,7 @@
             const target = ev.target.getAttribute('data-bs-target');
             if (target === '#tab-queue') refreshQueue();
             if (target === '#tab-bans') refreshBans();
+            if (target === '#tab-history') refreshHistory();
             if (target === '#tab-settings') loadSettings();
         });
     });
@@ -640,6 +987,7 @@
         const tab = activeTab();
         if (tab === 'tab-queue') refreshQueue();
         if (tab === 'tab-bans') refreshBans();
+        if (tab === 'tab-history' && byId('history-live').checked) refreshHistory();
     }, 3000);
 
     refreshOverview();
