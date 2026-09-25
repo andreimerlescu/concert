@@ -103,3 +103,29 @@ main {
 .setting-row.setting-changed {
     box-shadow: inset 3px 0 0 var(--bs-warning);
 }
+
+/* History: expandable rows, the expanded detail panel, and bars marking the
+   request that started a ban and the requests made while banned. */
+.history-toggle {
+    width: 2rem;
+}
+
+.cell-hist-path {
+    max-width: 26rem;
+}
+
+.table-portal tr.history-detail > td {
+    background-color: var(--bs-tertiary-bg);
+}
+
+.history-ban {
+    background-color: var(--bs-body-bg);
+}
+
+.table-portal tr.history-trigger > td:first-child {
+    box-shadow: inset 3px 0 0 var(--bs-danger);
+}
+
+.table-portal tr.history-blocked > td:first-child {
+    box-shadow: inset 3px 0 0 var(--bs-warning);
+}

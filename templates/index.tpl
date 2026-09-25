@@ -37,6 +37,11 @@
       </button>
     </li>
     <li class="nav-item" role="presentation">
+      <button class="nav-link" id="tab-history-btn" data-bs-toggle="tab" data-bs-target="#tab-history" type="button" role="tab" aria-controls="tab-history" aria-selected="false">
+        <i class="bi bi-clock-history"></i> History <span class="badge rounded-pill text-bg-secondary" id="history-count">0</span>
+      </button>
+    </li>
+    <li class="nav-item" role="presentation">
       <button class="nav-link" id="tab-settings-btn" data-bs-toggle="tab" data-bs-target="#tab-settings" type="button" role="tab" aria-controls="tab-settings" aria-selected="false">
         <i class="bi bi-sliders"></i> Settings
       </button>
@@ -201,6 +206,80 @@
           </table>
         </div>
       </div>
+    </div>
+
+    <!-- History -->
+    <div class="tab-pane fade" id="tab-history" role="tabpanel" aria-labelledby="tab-history-btn" tabindex="0">
+      <div class="d-flex flex-wrap align-items-center gap-3 mb-3">
+        <div class="input-group input-group-sm filter-input">
+          <span class="input-group-text"><i class="bi bi-search"></i></span>
+          <input type="search" class="form-control" id="history-filter" placeholder="Filter by address or path, e.g. /.env" aria-label="Filter the history">
+        </div>
+        <div class="form-check form-switch mb-0">
+          <input class="form-check-input" type="checkbox" role="switch" id="history-flagged">
+          <label class="form-check-label small" for="history-flagged">Only clients that are or were banned</label>
+        </div>
+        <div class="form-check form-switch mb-0">
+          <input class="form-check-input" type="checkbox" role="switch" id="history-live" checked>
+          <label class="form-check-label small" for="history-live">Live</label>
+        </div>
+        <button type="button" class="btn btn-sm btn-outline-secondary ms-auto" id="history-refresh"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
+      </div>
+
+
+      <div class="card stat-card mb-4">
+        <div class="card-body pb-2 d-flex flex-wrap align-items-baseline gap-2">
+          <h2 class="h6 mb-0"><i class="bi bi-person-lines-fill"></i> Clients</h2>
+          <span class="small text-body-secondary" id="history-summary"></span>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-hover table-portal mb-0">
+            <thead>
+              <tr>
+                <th scope="col" class="history-toggle"><span class="visually-hidden">Details</span></th>
+                <th scope="col">Client</th>
+                <th scope="col">State</th>
+                <th scope="col">Requests</th>
+                <th scope="col">Blocked</th>
+                <th scope="col">Errors</th>
+                <th scope="col">Last seen</th>
+                <th scope="col">Last request</th>
+                <th scope="col" class="text-end">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="history-client-rows"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <p class="small text-body-secondary mt-3 mb-4">
+        <i class="bi bi-info-circle"></i> <span id="history-limits">History is kept in memory.</span>
+      </p>
+
+      <div class="card stat-card mb-4">
+        <div class="card-body pb-2">
+          <h2 class="h6 mb-1"><i class="bi bi-shield-exclamation"></i> Ban log</h2>
+          <p class="small text-body-secondary mb-0">Every ban since concert started: when it began and ends, the request that started it, and everything the banned network requested while it was blocked. Expand a ban for every path and address.</p>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-hover table-portal mb-0">
+            <thead>
+              <tr>
+                <th scope="col" class="history-toggle"><span class="visually-hidden">Details</span></th>
+                <th scope="col">Banned</th>
+                <th scope="col">State</th>
+                <th scope="col">Began</th>
+                <th scope="col">Ends</th>
+                <th scope="col">Requests during ban</th>
+                <th scope="col">Paths hit while banned</th>
+                <th scope="col">Started by</th>
+              </tr>
+            </thead>
+            <tbody id="history-ban-rows"></tbody>
+          </table>
+        </div>
+      </div>
+
     </div>
 
     <!-- Settings -->

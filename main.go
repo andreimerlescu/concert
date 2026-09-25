@@ -1469,10 +1469,17 @@ func (r *abuseRegistry) bans(now time.Time) []banView {
 	}
 	out = append(out, r.rangeViews(n)...)
 	sort.Slice(out, func(i, j int) bool {
-		if out[i].Permanent != out[j].Permanent {
-			return out[i].Permanent
+		a, b := out[i], out[j]
+		if a.Permanent != b.Permanent {
+			return a.Permanent
 		}
-		return out[i].Until.After(out[j].Until)
+		if !a.Until.Equal(b.Until) {
+			return a.Until.After(b.Until)
+		}
+		if a.Range != b.Range {
+			return !a.Range
+		}
+		return a.Client < b.Client
 	})
 	return out
 }

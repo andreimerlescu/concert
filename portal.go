@@ -138,6 +138,7 @@ type portal struct {
 	notes      *noteStore
 	kicked     *kickList
 	fails      *loginLimiter
+	history    *history // requests and bans on the main listener; see history.go
 }
 
 // newPortal builds the portal and, when -portal-listen is set, binds its
@@ -183,6 +184,7 @@ func newPortal(a *app) (*portal, error) {
 		notes:      newNoteStore(portalMaxNotes),
 		kicked:     &kickList{m: map[string]time.Time{}},
 		fails:      &loginLimiter{m: map[netip.Addr]*loginState{}},
+		history:    newHistory(a.abuse, time.Now()),
 	}
 	p.engine = p.routes()
 
@@ -193,6 +195,9 @@ func newPortal(a *app) (*portal, error) {
 		}
 		p.ln = ln
 	}
+
+	// Every ban from here on opens a window in the history.
+	p.history.attach(a.abuse)
 	return p, nil
 }
 
@@ -248,8 +253,9 @@ func (p *portal) pc() portalConfig {
 	return p.a.current().cfg.portal
 }
 
-// janitor forgets notes for tickets room no longer holds, expired kicks and
-// old sign-in failures.
+// janitor forgets notes for tickets room no longer holds, expired kicks,
+// old sign-in failures and old history, and notices bans lifted outside
+// the portal.
 func (p *portal) janitor(ctx context.Context) {
 	t := time.NewTicker(10 * time.Second)
 	defer t.Stop()
@@ -264,6 +270,7 @@ func (p *portal) janitor(ctx context.Context) {
 			})
 			p.kicked.sweep(now)
 			p.fails.sweep(now)
+			p.history.sweep(now)
 		}
 	}
 }
@@ -296,6 +303,9 @@ func (p *portal) routes() *gin.Engine {
 	api.GET("/bans", p.apiBans)
 	api.POST("/bans", p.apiBanSave)
 	api.DELETE("/bans", p.apiUnban)
+	api.GET("/history", p.apiHistory)
+	api.GET("/history/client", p.apiHistoryClient)
+	api.GET("/history/ban", p.apiHistoryBan)
 	api.GET("/settings", p.apiSettings)
 	api.POST("/settings", p.apiSettingsSave)
 	api.DELETE("/settings", p.apiSettingsReset)
@@ -564,6 +574,7 @@ func (p *portal) apiOverview(c *gin.Context) {
 		"notes_tracked":                p.notes.count(),
 		"notes_dropped":                p.notes.dropped.Load(),
 		"kicked_active":                p.kicked.count(),
+		"history_clients":              p.history.count.Load(),
 		"rate":                         rate,
 		"surge":                        surge,
 		"skip_url":                     wr.SkipURL(),
@@ -702,6 +713,9 @@ func (p *portal) apiKick(c *gin.Context) {
 			return
 		}
 		banFor = left
+		if k, ok := abuseKey(ip); ok {
+			p.history.noteSource(keyPrefix(k), "removed from the line and banned in the portal by "+portalActor(c))
+		}
 		p.a.saveBansNow()
 	} else {
 		p.kicked.add(t.Token, now.Add(p.a.room.TokenTTL()+time.Minute))
@@ -781,6 +795,7 @@ func (p *portal) apiBanSave(c *gin.Context) {
 	if !body.Permanent {
 		lasting = "for " + d.String()
 	}
+	source := "banned in the portal by " + portalActor(c)
 
 	if target.single {
 		key, err := reg.banFor(target.prefix.Addr(), d, now)
@@ -792,6 +807,7 @@ func (p *portal) apiBanSave(c *gin.Context) {
 			jsonError(c, http.StatusBadRequest, err.Error())
 			return
 		}
+		p.history.noteSource(target.scope(), source)
 		// The ban's own drop runs moments later in a batch; removing now
 		// gives the operator an exact count. The batch catches anyone who
 		// joined in between.
@@ -812,6 +828,7 @@ func (p *portal) apiBanSave(c *gin.Context) {
 		jsonError(c, http.StatusConflict, err.Error())
 		return
 	}
+	p.history.noteSource(target.scope(), source)
 	dropped := p.a.dropWaiting(target.scope())
 	p.a.saveBansNow()
 	exempt := reg.exemptWithin(target.prefix)
@@ -842,6 +859,7 @@ func (p *portal) apiUnban(c *gin.Context) {
 		jsonError(c, http.StatusNotFound, "that client is not tracked")
 		return
 	}
+	p.history.lifted(target.scope(), time.Now(), "the portal ("+portalActor(c)+")")
 	p.a.saveBansNow()
 	log.Printf("portal: %s unbanned %s", portalActor(c), target)
 	c.JSON(http.StatusOK, gin.H{"unbanned": target.String()})
@@ -899,56 +917,66 @@ func (p *portal) apiSettingsReset(c *gin.Context) {
 	c.JSON(http.StatusOK, p.settingsView())
 }
 
-// ─── the main listener: kicks and visitor notes ──────────────────────────────
+// ─── the main listener: history, kicks and visitor notes ─────────────────────
 
-// wrap enforces kicks on the main listener and notes the path and browser
-// of each visitor who joins the line. Asset, bypass, stream and ops paths
-// are passed straight through: room never issues tickets there.
-//
-// Everything else about the line comes from room itself. The only thing
-// read from responses is a room_ticket value different from the one the
-// request carried, which is a visitor joining the line; room's refreshes of
-// an existing ticket send the same value and are ignored.
+// wrap records every request on the main listener in the history (see
+// history.go), enforces kicks, and notes the path and browser of each
+// visitor who joins the line. It sits outside the main handler, so it also
+// sees requests from banned clients, which the access log never does.
 func (p *portal) wrap(next http.Handler) http.Handler {
 	if p == nil {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		g := p.a.current()
-		reqPath := r.URL.Path
-		for _, rule := range g.untracked {
-			if rule.matches(reqPath) {
-				next.ServeHTTP(w, r)
-				return
-			}
-		}
+		hw := p.history.begin(w, r, g)
+		defer hw.finish()
+		p.serveMain(hw, r, g, next)
+	})
+}
 
-		now := time.Now()
-		var token string
-		if ck, err := r.Cookie("room_ticket"); err == nil {
-			token = ck.Value
-		}
-		isStatus := reqPath == "/queue/status"
-		if token != "" && p.kicked.has(token, now) {
-			// A banned visitor is answered by the ban check in the main
-			// handler, which shows the block notice rather than the removal notice.
-			if _, banned := g.abuse.banned(clientIP(r, g.cfg.trusted), now); !banned {
-				p.rejectKicked(w, r, isStatus, g.cfg)
-				return
-			}
-		}
-		if isStatus {
+// serveMain enforces kicks and notes visitors joining the line. Asset,
+// bypass, stream and ops paths are passed straight through: room never
+// issues tickets there.
+//
+// Everything else about the line comes from room itself. The only thing
+// read from responses is a room_ticket value different from the one the
+// request carried, which is a visitor joining the line; room's refreshes of
+// an existing ticket send the same value and are ignored.
+func (p *portal) serveMain(w http.ResponseWriter, r *http.Request, g *generation, next http.Handler) {
+	reqPath := r.URL.Path
+	for _, rule := range g.untracked {
+		if rule.matches(reqPath) {
 			next.ServeHTTP(w, r)
 			return
 		}
+	}
 
-		tw := &ticketWriter{ResponseWriter: w}
-		next.ServeHTTP(tw, r)
-		tw.inspect()
-		if tw.issued != "" && tw.issued != token {
-			p.notes.add(tw.issued, r.UserAgent(), reqPath)
+	now := time.Now()
+	var token string
+	if ck, err := r.Cookie("room_ticket"); err == nil {
+		token = ck.Value
+	}
+	isStatus := reqPath == "/queue/status"
+	if token != "" && p.kicked.has(token, now) {
+		// A banned visitor is answered by the ban check in the main
+		// handler, which shows the block notice rather than the removal notice.
+		if _, banned := g.abuse.banned(clientIP(r, g.cfg.trusted), now); !banned {
+			p.rejectKicked(w, r, isStatus, g.cfg)
+			return
 		}
-	})
+	}
+	if isStatus {
+		next.ServeHTTP(w, r)
+		return
+	}
+
+	tw := &ticketWriter{ResponseWriter: w}
+	next.ServeHTTP(tw, r)
+	tw.inspect()
+	if tw.issued != "" && tw.issued != token {
+		p.notes.add(tw.issued, r.UserAgent(), reqPath)
+	}
 }
 
 // rejectKicked answers a removed visitor. Status polls get ready=true so the
