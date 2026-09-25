@@ -184,7 +184,7 @@ func newPortal(a *app) (*portal, error) {
 		notes:      newNoteStore(portalMaxNotes),
 		kicked:     &kickList{m: map[string]time.Time{}},
 		fails:      &loginLimiter{m: map[netip.Addr]*loginState{}},
-		history:    newHistory(a.abuse, time.Now()),
+		history:    newHistory(a.abuse, a.prio.grants, time.Now()),
 	}
 	p.engine = p.routes()
 
@@ -538,7 +538,7 @@ func (p *portal) apiOverview(c *gin.Context) {
 	a, g := p.a, p.a.current()
 	wr, stats := a.room, a.stats
 	rate, surge := a.pricing()
-	c.JSON(http.StatusOK, gin.H{
+	h := gin.H{
 		"cap":                          wr.Cap(),
 		"occupancy":                    wr.Len(),
 		"queue_depth":                  wr.QueueDepth(),
@@ -578,7 +578,11 @@ func (p *portal) apiOverview(c *gin.Context) {
 		"rate":                         rate,
 		"surge":                        surge,
 		"skip_url":                     wr.SkipURL(),
-	})
+	}
+	for k, v := range g.priorityView() {
+		h[k] = v
+	}
+	c.JSON(http.StatusOK, h)
 }
 
 // ─── API: queue ──────────────────────────────────────────────────────────────
@@ -598,6 +602,7 @@ type occupantView struct {
 	Ready       bool      `json:"ready"`
 	HasPass     bool      `json:"has_pass"`
 	Promoted    bool      `json:"promoted"`
+	Rank        string    `json:"rank"`
 }
 
 func occupantID(token string) string {
@@ -624,6 +629,7 @@ func (p *portal) queueViews(now time.Time) []occupantView {
 			Ready:       t.Position <= 0,
 			HasPass:     t.HasPass,
 			Promoted:    t.Promoted,
+			Rank:        rankLabel(p.a.prio.line.rankOf(t.Token)),
 		})
 	}
 	return out

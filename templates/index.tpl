@@ -140,6 +140,47 @@
             </dl>
           </div></div>
         </div>
+
+        <!-- Priority: wraps onto its own line inside the same row. -->
+        <div class="col-lg-4">
+          <div class="card stat-card h-100"><div class="card-body">
+            <h2 class="h6 mb-3"><i class="bi bi-stars"></i> Priority lane</h2>
+            <dl class="row stat-list mb-0">
+              <dt class="col-8">Lane slots in use</dt><dd class="col-4 text-end" data-stat="priority_lane_in_flight">–</dd>
+              <dt class="col-8">Lane slots</dt><dd class="col-4 text-end" data-stat="priority_lane_cap">–</dd>
+              <dt class="col-8">Waiting for a lane slot</dt><dd class="col-4 text-end" data-stat="priority_lane_waiting">–</dd>
+              <dt class="col-8">Served through the lane</dt><dd class="col-4 text-end" data-stat="priority_lane_served_total">–</dd>
+              <dt class="col-8">Lane full, joined the line</dt><dd class="col-4 text-end" data-stat="priority_lane_full_total">–</dd>
+              <dt class="col-8">Moved up the line by rank</dt><dd class="col-4 text-end" data-stat="priority_placed_total">–</dd>
+            </dl>
+          </div></div>
+        </div>
+        <div class="col-lg-4">
+          <div class="card stat-card h-100"><div class="card-body">
+            <h2 class="h6 mb-3"><i class="bi bi-patch-check"></i> Grants and forms</h2>
+            <dl class="row stat-list mb-0">
+              <dt class="col-8">Grants issued by the app</dt><dd class="col-4 text-end" data-stat="priority_grants_total">–</dd>
+              <dt class="col-8">Grants cleared (guest)</dt><dd class="col-4 text-end" data-stat="priority_grants_cleared_total">–</dd>
+              <dt class="col-8">Headers ignored (unknown)</dt><dd class="col-4 text-end" data-stat="priority_grants_rejected_total">–</dd>
+              <dt class="col-8">Forms that skipped the line</dt><dd class="col-4 text-end" data-stat="priority_forms_total">–</dd>
+              <dt class="col-8">Forms refused (lane full)</dt><dd class="col-4 text-end" data-stat="priority_forms_refused_total">–</dd>
+            </dl>
+          </div></div>
+        </div>
+        <div class="col-lg-4">
+          <div class="card stat-card h-100"><div class="card-body">
+            <h2 class="h6 mb-3"><i class="bi bi-bar-chart-steps"></i> Page requests by rank</h2>
+            <dl class="row stat-list mb-0">
+              <dt class="col-8">Staff</dt><dd class="col-4 text-end" data-stat="priority_requests_staff">–</dd>
+              <dt class="col-8">Checkout</dt><dd class="col-4 text-end" data-stat="priority_requests_checkout">–</dd>
+              <dt class="col-8">Subscriber</dt><dd class="col-4 text-end" data-stat="priority_requests_subscriber">–</dd>
+              <dt class="col-8">Customer</dt><dd class="col-4 text-end" data-stat="priority_requests_customer">–</dd>
+              <dt class="col-8">Prospect</dt><dd class="col-4 text-end" data-stat="priority_requests_prospect">–</dd>
+              <dt class="col-8">Member</dt><dd class="col-4 text-end" data-stat="priority_requests_member">–</dd>
+              <dt class="col-8">Guest</dt><dd class="col-4 text-end" data-stat="priority_requests_guest">–</dd>
+            </dl>
+          </div></div>
+        </div>
       </div>
     </div>
 

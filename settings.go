@@ -65,16 +65,17 @@ const (
 
 // Portal sections, in display order.
 const (
-	groupRoom    = "Waiting room"
-	groupSkip    = "Skip the line"
-	groupOrigin  = "Origin and listener"
-	groupCookies = "Cookies"
-	groupPaths   = "Paths"
-	groupAssets  = "Asset tier"
-	groupStreams = "Streams"
-	groupAbuse   = "Abuse registry"
-	groupTLS     = "Let's Encrypt"
-	groupPortal  = "Admin portal"
+	groupRoom     = "Waiting room"
+	groupSkip     = "Skip the line"
+	groupPriority = "Priority"
+	groupOrigin   = "Origin and listener"
+	groupCookies  = "Cookies"
+	groupPaths    = "Paths"
+	groupAssets   = "Asset tier"
+	groupStreams  = "Streams"
+	groupAbuse    = "Abuse registry"
+	groupTLS      = "Let's Encrypt"
+	groupPortal   = "Admin portal"
 )
 
 // settingDef describes one setting: its flag, environment variable, default,
@@ -135,6 +136,20 @@ var settingDefs = []settingDef{
 	{key: "pass_duration", flag: "pass", env: "CONCERT_PASS_DURATION", group: groupSkip, label: "VIP pass lifetime",
 		def: time.Duration(0), usage: "VIP pass lifetime (0 disables passes)",
 		ptr: func(c *config) any { return &c.passDuration }, check: durationZeroOrBetween(time.Minute, 24*time.Hour)},
+
+	// ---- Priority; see priority.go ----
+	{key: "priority_cap", flag: "priority-cap", env: "CONCERT_PRIORITY_CAP", group: groupPriority, label: "Priority lane slots",
+		def: 0, usage: "page requests the priority lane allows at once, on top of -cap (0 = a quarter of -cap, at least 1)",
+		ptr: func(c *config) any { return &c.priorityCap }, check: intAtLeast(0)},
+	{key: "priority_lane_rank", flag: "priority-lane-rank", env: "CONCERT_PRIORITY_LANE_RANK", group: groupPriority, label: "Lowest rank in the lane",
+		def: 3, usage: "lowest Concert-Priority rank that skips the line through the priority lane: 1 member, 2 prospect, 3 customer, 4 subscriber, 5 checkout, 6 staff, 7 nobody",
+		ptr: func(c *config) any { return &c.priorityLaneRank }, check: intBetween(1, 7)},
+	{key: "priority_wait", flag: "priority-wait", env: "CONCERT_PRIORITY_WAIT", group: groupPriority, label: "Priority lane wait",
+		def: 5 * time.Second, usage: "longest a priority request waits for a lane slot before joining the line, 0s-1m",
+		ptr: func(c *config) any { return &c.priorityWait }, check: durationBetween(0, time.Minute)},
+	{key: "priority_forms", flag: "priority-forms", env: "CONCERT_PRIORITY_FORMS", group: groupPriority, label: "Forms skip the line",
+		def: true, usage: "form submissions from admitted visitors use the priority lane instead of the waiting room, and get 503 rather than queuing when it is full",
+		ptr: func(c *config) any { return &c.priorityForms }},
 
 	// ---- Origin and listener ----
 	{key: "listen", flag: "listen", env: "CONCERT_LISTEN", group: groupOrigin, label: "Listen address", restart: true,

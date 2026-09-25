@@ -117,6 +117,12 @@
         bar.parentElement.setAttribute('aria-valuenow', String(pct));
     }
 
+    function rankBadge(rank) {
+        const b = node('span', 'badge text-bg-primary', rank);
+        b.title = 'Priority rank granted by the application (Concert-Priority)';
+        return b;
+    }
+
     function emptyRow(tbody, cols, text) {
         const tr = node('tr');
         const td = node('td', 'text-center text-body-secondary py-4', text);
@@ -193,6 +199,7 @@
             else state.append(node('span', 'badge text-bg-primary', 'waiting'));
             if (o.promoted) { state.append(' '); state.append(node('span', 'badge text-bg-info', 'moved up')); }
             if (o.has_pass) { state.append(' '); state.append(node('span', 'badge text-bg-warning', 'VIP')); }
+            if (o.rank) { state.append(' '); state.append(rankBadge(o.rank)); }
             tr.append(state);
 
             tr.append(node('td', 'text-nowrap', fmtAgo(o.joined)));
@@ -500,8 +507,13 @@
         const table = node('table', 'table table-sm table-portal mb-0');
         const thead = node('thead');
         const hr = node('tr');
-        ['Time', 'Request', 'Status', 'Response', 'Ban', 'Browser'].forEach((h) => hr.append(node('th', null, h)));
+        ['Time', 'Request', 'Status', 'Response', 'Notes', 'Browser'].forEach((h) => hr.append(node('th', null, h)));
         thead.append(hr);
+        const ban = node('td', 'text-nowrap');
+        if (e.triggered_ban) ban.append(node('span', 'badge text-bg-danger', 'started ban'));
+        else if (e.blocked) ban.append(node('span', 'badge text-bg-warning', 'during ban'));
+        if (e.rank) { if (ban.childNodes.length) ban.append(' '); ban.append(rankBadge(e.rank)); }
+        tr.append(ban);
         table.append(thead);
         const tbody = node('tbody');
         if (!d.entries.length) emptyRow(tbody, 6, 'No requests kept.');
@@ -595,6 +607,7 @@
             } else {
                 state.append(node('span', 'badge text-bg-light border', 'ok'));
             }
+            if (cl.rank) { state.append(' '); state.append(rankBadge(cl.rank)); }
             tr.append(state);
 
             tr.append(node('td', null, fmtNum(cl.requests)));

@@ -101,11 +101,12 @@ const (
 
 // Cookies owned by concert and room. None of them are forwarded upstream.
 //
-//	room_ticket   — HttpOnly queue session
-//	room_pass     — HttpOnly VIP pass
-//	room_probe    — non-HttpOnly cookie-support probe
-//	concert_admit — HttpOnly signed admission pass for the asset and stream tiers
-var proxyCookies = []string{"room_ticket", "room_pass", "room_probe", admitCookie}
+//	room_ticket      — HttpOnly queue session
+//	room_pass        — HttpOnly VIP pass
+//	room_probe       — non-HttpOnly cookie-support probe
+//	concert_admit    — HttpOnly signed admission pass for the asset and stream tiers
+//	concert_priority — HttpOnly signed rank granted by the origin; see priority.go
+var proxyCookies = []string{"room_ticket", "room_pass", "room_probe", admitCookie, priorityCookie}
 
 type config struct {
 	listen         string
@@ -145,6 +146,12 @@ type config struct {
 	// waiting room but need an admission pass and a slot under streamCap.
 	streamPaths string
 	streamCap   int
+
+	// Ranked visitors and the priority lane; see priority.go.
+	priorityCap      int
+	priorityWait     time.Duration
+	priorityLaneRank int
+	priorityForms    bool
 
 	// Let's Encrypt; see tls.go. TLS on -listen is enabled when tlsDomains
 	// names at least one host.
@@ -211,15 +218,16 @@ type counters struct {
 
 // app is concert's long-lived state plus the generation currently serving
 // requests; see reload.go. The waiting room, the abuse registry, the
-// admission pass signer and the counters live as long as the process.
-// Everything built from settings lives in the generation and is replaced
-// when a setting changes.
+// admission pass signer, the priority grants and the counters live as long
+// as the process. Everything built from settings lives in the generation and
+// is replaced when a setting changes.
 type app struct {
 	cfg       config // as concert started; the running configuration is current().cfg
 	room      *room.WaitingRoom
 	stats     *counters
 	admit     *admitter
 	abuse     *abuseRegistry // always present; current().abuse is nil while -abuse=false
+	prio      *priorityState // rank grants, the ranked line and counters; see priority.go
 	handler   http.Handler   // serves every request with the current generation
 	settings  *settingsManager
 	drops     *dropper      // bans waiting to be removed from the line; see queue.go
@@ -340,6 +348,9 @@ func (c *config) normalize() error {
 	}
 	if c.streamCap < 1 || c.streamCap > math.MaxInt32 {
 		return fmt.Errorf("invalid -stream-cap %d: must be between 1 and %d", c.streamCap, math.MaxInt32)
+	}
+	if err := c.normalizePriority(); err != nil {
+		return err
 	}
 
 	if c.tlsHosts, err = parseTLSDomains(c.tlsDomains); err != nil {
@@ -517,9 +528,9 @@ func validateRoutes(c *config) error {
 
 // ─── assembly ────────────────────────────────────────────────────────────────
 
-// newApp builds the waiting room, abuse registry, admission signer and the
-// first generation without binding a port. With -data-dir set it also
-// restores bans.json and the saved queue, and starts the ban writer.
+// newApp builds the waiting room, abuse registry, admission signer, priority
+// grants and the first generation without binding a port. With -data-dir set
+// it also restores bans.json and the saved queue, and starts the ban writer.
 // Callers must Close the returned app.
 //
 // Order matters for the queue: room's settings (including the ticket TTL
@@ -541,6 +552,9 @@ func newApp(cfg config) (*app, error) {
 		stop:  make(chan struct{}),
 	}
 	a.settings = newSettingsManager(cfg)
+	// Before the first generation: its proxy turns the origin's
+	// Concert-Priority header into grants.
+	a.prio = newPriorityState(cfg.admitSecret, a.admit)
 
 	wr := &room.WaitingRoom{}
 	if err := wr.Init(int32(cfg.capacity)); err != nil {
@@ -595,6 +609,7 @@ func newApp(cfg config) (*app, error) {
 	a.abuse.setOnBan(a.queueDrop)
 
 	go a.abuse.janitor(a.stop)
+	go a.prio.janitor(a.room, a.stop)
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
@@ -734,6 +749,10 @@ func run(ctx context.Context, cfg config) error {
 	log.Printf("concert %s -> %s (cap=%d, max-queue=%d, token-ttl=%s, first-poll-grace=%s, asset-cap=%d%s, asset-user-cap=%d h1 / %d h2)",
 		ln.Addr(), c.target, c.capacity, c.maxQueue, a.room.TokenTTL(), a.room.FirstPollGrace(),
 		g.assets.global.Cap(), derived, c.assetUserCapH1, c.assetUserCapH2)
+	if lr := priorityRank(c.priorityLaneRank); lr < rankCount {
+		log.Printf("priority: %s and above use a lane of %d slot(s) while the room is busy; forms from admitted visitors %v",
+			lr, g.lane.Cap(), c.priorityForms)
+	}
 	if rules := parsePaths(c.streamPaths); len(rules) > 0 {
 		log.Printf("streams: %d path(s) outside the waiting room, admission pass required, at most %d at once",
 			len(rules), c.streamCap)
@@ -761,7 +780,7 @@ func run(ctx context.Context, cfg config) error {
 		}
 	}
 	if c.admitSecretGenerated {
-		log.Printf("CONCERT_ADMIT_SECRET not set: using a random secret; admission passes reset on restart and are not shared across instances")
+		log.Printf("CONCERT_ADMIT_SECRET not set: using a random secret; admission passes and priority grants reset on restart and are not shared across instances")
 	}
 
 	mainEP.serveOn(ln, c.listen)
@@ -770,8 +789,8 @@ func run(ctx context.Context, cfg config) error {
 
 // buildRouter wires routes in the order that determines what is guarded:
 // client identification and ban enforcement first, then ops, bypass, asset
-// and stream routes (outside the room), then the API interceptor, then
-// room's middleware, then the gated proxy catch-all.
+// and stream routes (outside the room), then the priority gate and the API
+// interceptor, then room's middleware, then the gated proxy catch-all.
 // Route conflicts make gin panic; they are returned as errors instead.
 func buildRouter(g *generation) (engine *gin.Engine, err error) {
 	defer func() {
@@ -812,6 +831,9 @@ func buildRouter(g *generation) (engine *gin.Engine, err error) {
 	registerPaths(r, parsePaths(cfg.streamPaths), g.streams.handle, g.forward)
 
 	// ---- Run ahead of room's middleware on gated requests only. ----
+	// The priority gate comes first, so its lane requests and refused forms
+	// are answered before the API interceptor wraps the writer.
+	r.Use(g.priorityGate)
 	if cfg.apiJSON {
 		r.Use(apiQueueResponses(cfg.retryAfter))
 	}
@@ -849,11 +871,17 @@ func accessLogSkipper(cfg config) func(*gin.Context) bool {
 	}
 }
 
-// gated handles requests room has admitted: issue or refresh the admission
-// pass, then proxy.
+// gated handles requests room has admitted, and priority-lane requests:
+// issue or refresh the admission pass, then proxy. The pass the visitor
+// ends up holding travels with the request, so a Concert-Priority grant
+// from the origin is bound to it (see priority.go).
 func (g *generation) gated(c *gin.Context) {
-	if g.a.admit.refresh(c.Writer, c.Request, time.Now()) == passForged {
+	id, status := g.a.admit.refresh(c.Writer, c.Request, time.Now())
+	if status == passForged {
 		g.strike(c, strikeForgedPass)
+	}
+	if id != (passID{}) {
+		c.Request = c.Request.WithContext(withPassID(c.Request.Context(), id))
 	}
 	g.forward(c)
 }
@@ -1442,7 +1470,9 @@ func (r *abuseRegistry) unban(ip netip.Addr) bool {
 }
 
 // bans lists currently banned clients and ranges: permanent bans first,
-// then longest remaining first.
+// then longest remaining first. Ties (every permanent ban, and bans ending
+// at the same moment) are broken by single clients before ranges, then by
+// client, so the order is the same on every call.
 func (r *abuseRegistry) bans(now time.Time) []banView {
 	out := []banView{}
 	if r == nil {
@@ -1767,9 +1797,10 @@ func (a *admitter) set(w http.ResponseWriter, id passID, now time.Time) {
 
 // refresh runs on every admitted page request. A valid pass is re-signed only
 // past half its lifetime, so most responses carry no Set-Cookie and stay
-// cacheable. Anything else is replaced with a new pass. The incoming status
-// is returned so the caller can strike forgeries.
-func (a *admitter) refresh(w http.ResponseWriter, r *http.Request, now time.Time) passStatus {
+// cacheable. Anything else is replaced with a new pass. It returns the ID of
+// the pass the visitor holds after this response (zero if a new one could
+// not be made) and the incoming status, so the caller can strike forgeries.
+func (a *admitter) refresh(w http.ResponseWriter, r *http.Request, now time.Time) (passID, passStatus) {
 	status := passMissing
 	if ck, err := r.Cookie(admitCookie); err == nil {
 		var id passID
@@ -1779,13 +1810,15 @@ func (a *admitter) refresh(w http.ResponseWriter, r *http.Request, now time.Time
 			if exp.Sub(now) <= a.opts.Load().ttl/2 {
 				a.set(w, id, now)
 			}
-			return status
+			return id, status
 		}
 	}
-	if id, err := newPassID(); err == nil {
-		a.set(w, id, now)
+	id, err := newPassID()
+	if err != nil {
+		return passID{}, status
 	}
-	return status
+	a.set(w, id, now)
+	return id, status
 }
 
 // check runs on every private asset and stream request. It also slides the
@@ -2142,7 +2175,11 @@ func mustJSON(v any) []byte {
 
 // ─── reverse proxy ───────────────────────────────────────────────────────────
 
-func newProxy(target *url.URL, preserveHost bool, headerTimeout time.Duration, trusted []netip.Prefix) *httputil.ReverseProxy {
+// newProxy builds the reverse proxy to the origin. modify runs on every
+// origin response; concert uses it to turn Concert-Priority into a grant
+// (see priority.go).
+func newProxy(target *url.URL, preserveHost bool, headerTimeout time.Duration, trusted []netip.Prefix,
+	modify func(*http.Response) error) *httputil.ReverseProxy {
 	transport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
@@ -2162,6 +2199,9 @@ func newProxy(target *url.URL, preserveHost bool, headerTimeout time.Duration, t
 		Transport: transport,
 		// -1 flushes immediately, which keeps SSE and chunked responses live.
 		FlushInterval: -1,
+		// Turns the origin's Concert-Priority header into a signed grant and
+		// keeps the header from reaching browsers.
+		ModifyResponse: modify,
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(target)
 

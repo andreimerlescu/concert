@@ -72,6 +72,7 @@ type historyRequest struct {
 	path   string
 	query  string
 	ua     string
+	rank   priorityRank
 }
 
 // historyEntry is one recorded request.
@@ -85,6 +86,7 @@ type historyEntry struct {
 	blocked   bool          // arrived while the client was banned
 	triggered bool          // this request started a ban
 	window    uint64        // ban window id, 0 for none
+	rank      priorityRank  // Concert-Priority rank the request carried
 }
 
 // historyClient is one client address and its recent requests.
@@ -224,7 +226,8 @@ func (w *banWindow) untilIs(until int64) bool {
 
 // history is the portal's record of requests and bans.
 type history struct {
-	reg     *abuseRegistry // always the app's registry, even while -abuse=false
+	reg     *abuseRegistry  // always the app's registry, even while -abuse=false
+	grants  *priorityGrants // reads each request's rank; see priority.go
 	shards  [historyShards]historyShard
 	count   atomic.Int64
 	evicted atomic.Int64
@@ -250,8 +253,8 @@ type quietRules struct {
 
 // newHistory builds an empty history and lists every ban already in force,
 // such as those restored from bans.json, with an unknown start.
-func newHistory(reg *abuseRegistry, now time.Time) *history {
-	h := &history{reg: reg}
+func newHistory(reg *abuseRegistry, grants *priorityGrants, now time.Time) *history {
+	h := &history{reg: reg, grants: grants}
 	for i := range h.shards {
 		h.shards[i].m = make(map[netip.Addr]*historyClient)
 	}
@@ -314,7 +317,7 @@ func (h *history) begin(w http.ResponseWriter, r *http.Request, g *generation) *
 	start := time.Now()
 	ip := clientIP(r, g.cfg.trusted)
 	_, blocked := g.abuse.banned(ip, start)
-	req := historyRequest{method: r.Method, path: r.URL.Path, query: r.URL.RawQuery, ua: r.UserAgent()}
+	req := historyRequest{method: r.Method, path: r.URL.Path, query: r.URL.RawQuery, ua: r.UserAgent(), rank: h.grants.rankOf(r, start)}
 	return &historyWriter{
 		ResponseWriter: w,
 		record:         func(status int) { h.record(g, ip, req, status, start, blocked) },
@@ -347,6 +350,7 @@ func (h *history) record(g *generation, ip netip.Addr, req historyRequest, statu
 		status:  status,
 		latency: now.Sub(start),
 		blocked: blocked,
+		rank:    req.rank,
 	}
 	if blocked || bannedNow {
 		e.window, e.triggered = h.hitWindow(ip, e, start, !blocked)
@@ -731,6 +735,7 @@ type historyClientView struct {
 	BannedNow     bool      `json:"banned_now"`
 	BanPermanent  bool      `json:"ban_permanent"`
 	BanRemaining  int       `json:"ban_remaining_seconds"`
+	Rank          string    `json:"rank"`
 
 	addr netip.Addr
 }
@@ -743,6 +748,7 @@ func (c *historyClient) summary(ip netip.Addr) historyClientView {
 	}
 	if e := c.latest(); e != nil {
 		v.LastMethod, v.LastPath, v.LastStatus = e.method, e.path, e.status
+		v.Rank = rankLabel(e.rank)
 	}
 	return v
 }
@@ -772,6 +778,7 @@ type historyEntryView struct {
 	Blocked   bool      `json:"blocked"`
 	Triggered bool      `json:"triggered_ban"`
 	BanID     uint64    `json:"ban_id,omitempty"`
+	Rank      string    `json:"rank"`
 }
 
 type namedCount struct {
@@ -943,6 +950,7 @@ func (h *history) clientDetail(ip netip.Addr) (historyClientView, []historyEntry
 		entries = append(entries, historyEntryView{
 			At: e.at.UTC(), Method: e.method, Path: e.path, Status: e.status,
 			LatencyMS: float64(e.latency.Microseconds()) / 1000,
+			Rank:      rankLabel(e.rank),
 			UserAgent: c.uaString(e.ua), Blocked: e.blocked, Triggered: e.triggered, BanID: e.window,
 		})
 	}

@@ -20,17 +20,18 @@ import (
 //
 // Everything concert serves is built from one configuration into a
 // generation: the gin engine with its routes and middleware, the reverse
-// proxy, the asset and stream pools and the ban rules. Each request loads
-// the current generation once, so a change never alters the rules halfway
-// through a request. Changing a setting builds a complete new generation,
-// binds any new listen address, saves settings.json, and then swaps
-// everything in at once. If any step before the save fails, nothing that is
-// running changes.
+// proxy, the asset, stream and priority pools and the ban rules. Each
+// request loads the current generation once, so a change never alters the
+// rules halfway through a request. Changing a setting builds a complete new
+// generation, binds any new listen address, saves settings.json, and then
+// swaps everything in at once. If any step before the save fails, nothing
+// that is running changes.
 //
 // State that must outlive a change is not rebuilt: the waiting room and its
 // queue, the abuse registry with its bans and strikes, the admission pass
-// signer, and the counters. They are reconfigured in place; room documents
-// every setter as safe to call while traffic flows.
+// signer, the priority grants and ranked line, and the counters. They are
+// reconfigured in place; room documents every setter as safe to call while
+// traffic flows.
 //
 // Pools whose size changes are replaced rather than resized, because sema
 // drains every slot when shrinking. Requests already holding a slot finish
@@ -46,6 +47,7 @@ type generation struct {
 	untracked []pathRule // paths the portal's queue view ignores
 	assets    *assetGuard
 	streams   *streamGuard
+	lane      *rankedSem // priority lane; see priority.go
 	proxy     *httputil.ReverseProxy
 	forward   gin.HandlerFunc
 	engine    *gin.Engine
@@ -60,7 +62,8 @@ func (a *app) current() *generation {
 // buildGeneration builds a generation from next, which must already be
 // normalized, without changing anything that is running. Pieces whose
 // settings did not change are carried over from prev so that in-flight
-// requests, idle upstream connections and per-visitor asset limits are kept.
+// requests, idle upstream connections, per-visitor asset limits and lane
+// waiters are kept.
 func (a *app) buildGeneration(next config, prev *generation) (*generation, error) {
 	html, err := readWaitingRoomHTML(next)
 	if err != nil {
@@ -80,7 +83,7 @@ func (a *app) buildGeneration(next config, prev *generation) (*generation, error
 	if prev != nil && sameProxy(prev.cfg, next) {
 		g.proxy = prev.proxy
 	} else {
-		g.proxy = newProxy(next.target, next.preserveHost, next.headerTimeout, next.trusted)
+		g.proxy = newProxy(next.target, next.preserveHost, next.headerTimeout, next.trusted, a.prio.grants.modifyResponse)
 	}
 	g.forward = forwardTo(g.proxy)
 
@@ -118,6 +121,14 @@ func (a *app) buildGeneration(next config, prev *generation) (*generation, error
 		sem:    streamSem,
 		stats:  a.stats,
 		strike: g.strike,
+	}
+
+	// The lane keeps its waiters when its size is unchanged; otherwise
+	// requests holding old slots finish on the old lane.
+	if prev != nil && prev.lane.Cap() == next.effectivePriorityCap() {
+		g.lane = prev.lane
+	} else {
+		g.lane = newRankedSem(next.effectivePriorityCap())
 	}
 
 	engine, err := buildRouter(g)
