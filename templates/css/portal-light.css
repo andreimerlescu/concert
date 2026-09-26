@@ -104,6 +104,18 @@ main {
     box-shadow: inset 3px 0 0 var(--bs-warning);
 }
 
+/* List settings: one input per entry, with a remove button on each and an
+   add box below. The buttons keep a fixed width so every entry lines up,
+   and an empty entry list takes no space. */
+.setting-list .btn {
+    flex: 0 0 auto;
+    width: 2.25rem;
+}
+
+.setting-list-items:empty {
+    display: none !important;
+}
+
 /* History: expandable rows, the expanded detail panel, and bars marking the
    request that started a ban and the requests made while banned. */
 .history-toggle {

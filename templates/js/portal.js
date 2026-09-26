@@ -750,7 +750,170 @@
     };
     let settingsData = null;
 
+    // List settings. A setting the server marks with a list kind is still one
+    // comma-separated string on the server; here it is edited as one input per
+    // entry, with a remove button on each and an add box below. Entries are
+    // checked as they are typed and joined with "," when saved.
+    const LIST_RULES = {
+        path: {
+            placeholder: 'Add a path, e.g. /.env or /static/*',
+            noun: ['path', 'paths'],
+            check(v) {
+                if (!v.startsWith('/')) return `${v} must start with /.`;
+                if (/[\s,]/.test(v)) return 'One path per box: no spaces or commas.';
+                if (v === '/*') return '"/*" would capture every path.';
+                return '';
+            },
+        },
+    };
+
+    function splitList(s) {
+        return String(s === null || s === undefined ? '' : s)
+            .split(',').map((x) => x.trim()).filter(Boolean);
+    }
+
+    function listButton(action, cls, icon, label) {
+        const b = node('button', 'btn ' + cls);
+        b.type = 'button';
+        b.title = label;
+        b.setAttribute('aria-label', label);
+        b.dataset.listAction = action;
+        b.append(node('i', 'bi ' + icon));
+        return b;
+    }
+
+    function listTextInput() {
+        const input = node('input', 'form-control font-monospace');
+        input.type = 'text';
+        input.autocomplete = 'off';
+        input.spellcheck = false;
+        return input;
+    }
+
+    // listItem is one existing entry: remove button, then its input.
+    function listItem(value) {
+        const row = node('div', 'input-group input-group-sm has-validation setting-list-item');
+        const input = listTextInput();
+        input.value = value;
+        input.dataset.listItem = '';
+        input.setAttribute('aria-label', 'Entry');
+        row.append(listButton('remove', 'btn-outline-danger', 'bi-dash-lg', 'Remove this entry'), input,
+            node('div', 'invalid-feedback'));
+        return row;
+    }
+
+    function listInput(s) {
+        const rule = LIST_RULES[s.list];
+        const box = node('div', 'setting-list d-grid gap-1');
+        box.dataset.key = s.key;
+        box.dataset.kind = 'list';
+        box.dataset.list = s.list;
+        box.dataset.label = s.label;
+
+        const items = node('div', 'setting-list-items d-grid gap-1');
+        splitList(s.value).forEach((v) => items.append(listItem(v)));
+        box.append(items);
+
+        const addRow = node('div', 'input-group input-group-sm has-validation setting-list-new');
+        const pending = listTextInput();
+        pending.id = 'set-' + s.key;
+        pending.placeholder = rule.placeholder;
+        pending.dataset.listNew = '';
+        pending.setAttribute('aria-label', 'New entry for ' + s.label);
+        addRow.append(pending, listButton('add', 'btn-outline-primary', 'bi-plus-lg', 'Add entry'),
+            node('div', 'invalid-feedback'));
+        box.append(addRow);
+        box.append(node('div', 'form-text setting-list-count'));
+
+        box.dataset.original = inputValue(box);
+        if (s.restart) {
+            box.dataset.locked = '1';
+            box.querySelectorAll('input, button').forEach((el) => { el.disabled = true; });
+            box.title = `Set ${s.env} in concert.env and restart concert to change this.`;
+        }
+        validateList(box);
+        return box;
+    }
+
+    // listParts is every entry in a list editor, in order: the existing
+    // entries, then whatever is still typed in the add box (split on commas,
+    // so a pasted list counts as several entries).
+    function listParts(box) {
+        const parts = [];
+        box.querySelectorAll('[data-list-item]').forEach((input) => {
+            const v = input.value.trim();
+            if (v) parts.push({ input, value: v });
+        });
+        const pending = box.querySelector('[data-list-new]');
+        if (pending) splitList(pending.value).forEach((v) => parts.push({ input: pending, value: v }));
+        return parts;
+    }
+
+    // validateList marks each invalid or duplicated entry and returns the
+    // first problem, or '' when the list is valid.
+    function validateList(box) {
+        const rule = LIST_RULES[box.dataset.list];
+        const errors = new Map();
+        const seen = new Set();
+        for (const p of listParts(box)) {
+            let msg = rule.check(p.value);
+            if (!msg && seen.has(p.value)) msg = `${p.value} is already listed.`;
+            seen.add(p.value);
+            if (msg && !errors.has(p.input)) errors.set(p.input, msg);
+        }
+        box.querySelectorAll('[data-list-item], [data-list-new]').forEach((input) => {
+            const msg = errors.get(input) || '';
+            input.classList.toggle('is-invalid', Boolean(msg));
+            input.setAttribute('aria-invalid', msg ? 'true' : 'false');
+            const fb = input.parentElement.querySelector('.invalid-feedback');
+            if (fb) fb.textContent = msg;
+        });
+        const n = box.querySelectorAll('[data-list-item]').length;
+        const [one, many] = rule.noun;
+        setListCount(box, n ? `${n} ${n === 1 ? one : many}` : `No ${many} yet: add one below.`);
+        return errors.size ? [...errors.values()][0] : '';
+    }
+
+    function setListCount(box, text) {
+        const el = box.querySelector('.setting-list-count');
+        if (el) el.textContent = text;
+    }
+
+    // addListEntries moves what is typed in the add box into the list, as
+    // one entry per comma-separated value, if every value is valid.
+    function addListEntries(box) {
+        const pending = box.querySelector('[data-list-new]');
+        const values = splitList(pending.value);
+        if (!values.length) {
+            pending.value = '';
+            pending.focus();
+            return;
+        }
+        validateList(box);
+        if (pending.classList.contains('is-invalid')) {
+            pending.focus();
+            return;
+        }
+        const items = box.querySelector('.setting-list-items');
+        values.forEach((v) => items.append(listItem(v)));
+        pending.value = '';
+        validateList(box);
+        updateDirty();
+        pending.focus();
+    }
+
+    function removeListRow(row, focusPrevious) {
+        const box = row.closest('.setting-list');
+        const sibling = focusPrevious ? row.previousElementSibling : row.nextElementSibling;
+        const target = sibling ? sibling.querySelector('input') : box.querySelector('[data-list-new]');
+        row.remove();
+        validateList(box);
+        updateDirty();
+        if (target) target.focus();
+    }
+
     function settingInput(s) {
+        if (s.list && LIST_RULES[s.list]) return listInput(s);
         const id = 'set-' + s.key;
         let wrap;
         let input;
@@ -784,12 +947,18 @@
     }
 
     function inputValue(input) {
+        if (input.dataset.kind === 'list') return listParts(input).map((p) => p.value).join(',');
         return input.dataset.kind === 'bool' ? String(input.checked) : input.value.trim();
     }
 
     function typedValue(input) {
-        const raw = inputValue(input);
         const label = input.dataset.label;
+        if (input.dataset.kind === 'list') {
+            const problem = validateList(input);
+            if (problem) throw new Error(`${label}: ${problem}`);
+            return inputValue(input);
+        }
+        const raw = inputValue(input);
         switch (input.dataset.kind) {
             case 'bool':
                 return input.checked;
@@ -872,7 +1041,7 @@
 
     function changedInputs() {
         return [...document.querySelectorAll('#settings-groups [data-original]')]
-            .filter((i) => !i.disabled && inputValue(i) !== i.dataset.original);
+            .filter((i) => !i.disabled && i.dataset.locked !== '1' && inputValue(i) !== i.dataset.original);
     }
 
     function updateDirty() {
@@ -939,10 +1108,70 @@
         window.scrollTo({ top: 0, behavior: 'smooth' });
     }
 
-    byId('settings-groups').addEventListener('input', updateDirty);
+    byId('settings-groups').addEventListener('input', (ev) => {
+        const box = ev.target.closest && ev.target.closest('.setting-list');
+        if (box) validateList(box);
+        updateDirty();
+    });
     byId('settings-groups').addEventListener('change', updateDirty);
     byId('settings-filter').addEventListener('input', applySettingsFilter);
     byId('settings-discard').addEventListener('click', () => { if (settingsData) renderSettings(settingsData); });
+
+    // List editors: the add (+) and remove (−) buttons.
+    byId('settings-groups').addEventListener('click', (ev) => {
+        const btn = ev.target.closest('button[data-list-action]');
+        if (!btn || btn.disabled) return;
+        if (btn.dataset.listAction === 'add') addListEntries(btn.closest('.setting-list'));
+        else removeListRow(btn.closest('.setting-list-item'), false);
+    });
+
+    // List editors, from the keyboard. In the add box, Enter adds and Escape
+    // clears. In an entry, Enter moves to the next one (never submitting the
+    // form) and Backspace in an empty entry removes it.
+    byId('settings-groups').addEventListener('keydown', (ev) => {
+        const input = ev.target;
+        if (!input.matches || !input.closest('.setting-list')) return;
+        const box = input.closest('.setting-list');
+        if (input.matches('[data-list-new]')) {
+            if (ev.key === 'Enter') {
+                ev.preventDefault();
+                addListEntries(box);
+            } else if (ev.key === 'Escape' && input.value) {
+                ev.preventDefault();
+                input.value = '';
+                validateList(box);
+                updateDirty();
+            }
+            return;
+        }
+        if (!input.matches('[data-list-item]')) return;
+        const row = input.closest('.setting-list-item');
+        if (ev.key === 'Enter') {
+            ev.preventDefault();
+            const next = row.nextElementSibling;
+            (next ? next.querySelector('input') : box.querySelector('[data-list-new]')).focus();
+        } else if (ev.key === 'Backspace' && input.value === '') {
+            ev.preventDefault();
+            removeListRow(row, true);
+        }
+    });
+
+    // Leaving an entry tidies it: surrounding spaces go, and an emptied
+    // entry is removed.
+    byId('settings-groups').addEventListener('focusout', (ev) => {
+        const input = ev.target;
+        if (!input.matches || !input.matches('[data-list-item]')) return;
+        const row = input.closest('.setting-list-item');
+        const box = input.closest('.setting-list');
+        if (!row || !box) return; // already removed
+        const trimmed = input.value.trim();
+        if (trimmed !== input.value) input.value = trimmed;
+        if (!trimmed) {
+            row.remove();
+            validateList(box);
+            updateDirty();
+        }
+    });
 
     byId('settings-groups').addEventListener('click', async (ev) => {
         const btn = ev.target.closest('button[data-action="reset"]');
@@ -974,6 +1203,8 @@
             for (const i of changed) body[i.dataset.key] = typedValue(i);
         } catch (err) {
             toast(err.message, 'danger');
+            const bad = document.querySelector('#settings-groups .is-invalid');
+            if (bad) bad.focus();
             return;
         }
         const portalChange = 'portal_listen' in body;
