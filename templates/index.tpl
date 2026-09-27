@@ -356,8 +356,8 @@
                 <th scope="col">State</th>
                 <th scope="col">Began</th>
                 <th scope="col">Ends</th>
-                <th scope="col">Requests during ban</th>
-                <th scope="col">Paths hit while banned</th>
+                <th scope="col"><attr title="Requests During Ban">RDB</attr></th>
+                <th scope="col"><attr title="paths Hit While Banned">HWB</attr></th>
                 <th scope="col">Started by</th>
               </tr>
             </thead>

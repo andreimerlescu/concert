@@ -56,11 +56,16 @@ footer {
 .ipcell .text-body-secondary {
     --bs-secondary-color: #0e1116;
 }
-.history-toggle button.text-body {
-    --bs-body-color-rgb: #0e1116;
-}
-.history-detail .ipcell .text-body-secondary {
+.history-detail .ipcell .text-body-secondary,
+#banlog-rows tr:not(.table-danger):not(.table-success):not(.table-warning):not(.table-info) .ipcell .ip-asn.text-body-secondary {
     --bs-secondary-color: #ecf6ff;
+}
+.history-toggle button.text-body,
+#banlog-rows tr.table-danger .ipcell .ip-asn.text-body-secondary ,
+#banlog-rows tr.table-success .ipcell .ip-asn.text-body-secondary ,
+#banlog-rows tr.table-info .ipcell .ip-asn.text-body-secondary ,
+#banlog-rows tr.table-warning .ipcell .ip-asn.text-body-secondary {
+    --bs-body-color-rgb: #0e1116;
 }
 [data-bs-theme="dark"]{--bs-body-bg:#110d21;--bs-body-color:#f5effa;--bs-secondary-color:#c0b1d0;--bs-tertiary-bg:#21182f;--bs-border-color:#41314f;--bs-primary:#ac5ed0;--bs-primary-rgb:172,94,208;--bs-info:#76dbed;--bs-info-rgb:118,219,237;--bs-link-color:#76dbed;--bs-link-hover-color:#bceef8;--concert-pink:#ff71c7;--concert-cyan:#76dbed}
 [data-bs-theme="dark"] body{background:radial-gradient(ellipse at 5% 0,#66009922,transparent 38%),radial-gradient(ellipse at 95% 10%,#11669920,transparent 45%),#110d21}
