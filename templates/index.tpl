@@ -18,10 +18,6 @@
 </div>
 {{else}}
 <div id="portal-app">
-  <section class="concert-hero">
-    <div><p class="concert-eyebrow">CONCERT / TRAFFIC OPERATIONS</p><h1>Keep the rhythm.<br><span>Control the room.</span></h1><p>Your queue, your rules. One clear view of every lane.</p></div>
-    <div class="hero-orbit" aria-hidden="true"><span></span><i></i><b></b></div>
-  </section>
   <div class="alert alert-info d-none" id="portal-moved" role="alert"></div>
 
   <ul class="nav nav-tabs mb-4" role="tablist">
