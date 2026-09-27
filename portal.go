@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/hmac"
@@ -12,11 +11,9 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
-	"io"
 	"io/fs"
 	"log"
 	"mime"
@@ -26,11 +23,8 @@ import (
 	"path"
 	"strconv"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 
-	"github.com/andreimerlescu/room"
 	"github.com/gin-gonic/gin"
 )
 
@@ -44,7 +38,8 @@ var portalFS embed.FS
 // Files inside templates/. Templates are named after their file by
 // template.ParseFS, so templateIndex is also the name passed to
 // ExecuteTemplate. Vendored assets are referenced by these constants in
-// Go and passed to the templates, so the two can never disagree.
+// Go and passed to the templates, so the two can never disagree. The table
+// fragments live in templateFragments; see fragments.go.
 const (
 	templateHeader = "header.tpl"
 	templateFooter = "footer.tpl"
@@ -144,9 +139,11 @@ type portal struct {
 // newPortal builds the portal and, when -portal-listen is set, binds its
 // listener. It returns nil when CONCERT_PORTAL_PASS is unset: without a pass
 // there is no portal. With a pass but no address the portal exists but
-// does not listen.
+// does not listen. The history is created here, restored from its log, and
+// closed with the app.
 func newPortal(a *app) (*portal, error) {
-	pc := a.current().cfg.portal
+	cfg := a.current().cfg
+	pc := cfg.portal
 	if pc.pass == "" {
 		if pc.listen != "" {
 			log.Printf("portal disabled: set CONCERT_PORTAL_PASS to enable it on %s", pc.listen)
@@ -159,7 +156,7 @@ func newPortal(a *app) (*portal, error) {
 		return nil, fmt.Errorf("portal: %w", err)
 	}
 	for _, req := range []string{
-		templateHeader, templateFooter, templateIndex,
+		templateHeader, templateFooter, templateIndex, templateFragments,
 		assetBootstrapCSS, assetIconsCSS, assetBootstrapJS,
 		assetPortalLight, assetPortalDark, assetPortalJS,
 	} {
@@ -167,25 +164,28 @@ func newPortal(a *app) (*portal, error) {
 			return nil, fmt.Errorf("portal: templates/%s is missing", req)
 		}
 	}
-	tmpl, err := template.ParseFS(static, templateHeader, templateFooter, templateIndex)
-	if err != nil {
-		return nil, fmt.Errorf("portal templates: %w", err)
-	}
 
 	keyMAC := hmac.New(sha256.New, []byte(pc.pass))
 	keyMAC.Write([]byte("concert/portal/session-key"))
 
 	p := &portal{
 		a:          a,
-		tmpl:       tmpl,
 		static:     static,
 		sessionKey: keyMAC.Sum(nil),
 		passDigest: sha256.Sum256([]byte(pc.pass)),
 		notes:      newNoteStore(portalMaxNotes),
 		kicked:     &kickList{m: map[string]time.Time{}},
 		fails:      &loginLimiter{m: map[netip.Addr]*loginState{}},
-		history:    newHistory(a.abuse, a.prio.grants, time.Now()),
 	}
+	tmpl, err := template.New(templateIndex).Funcs(p.templateFuncs()).
+		ParseFS(static, templateHeader, templateFooter, templateIndex, templateFragments)
+	if err != nil {
+		return nil, fmt.Errorf("portal templates: %w", err)
+	}
+	p.tmpl = tmpl
+
+	p.history = newHistory(a.abuse, a.prio.grants, a.ipinfo, historyLogPath(cfg), time.Now())
+	a.attachHistory(p.history)
 	p.engine = p.routes()
 
 	if pc.enabled() {
@@ -310,6 +310,14 @@ func (p *portal) routes() *gin.Engine {
 	api.POST("/settings", p.apiSettingsSave)
 	api.DELETE("/settings", p.apiSettingsReset)
 
+	// Server-rendered tables; see fragments.go.
+	api.GET("/frag/queue", p.fragQueue)
+	api.GET("/frag/bans", p.fragBans)
+	api.GET("/frag/visitors", p.fragVisitors)
+	api.GET("/frag/visitor", p.fragVisitor)
+	api.GET("/frag/banlog", p.fragBanLog)
+	api.GET("/frag/ban", p.fragBan)
+
 	r.NoRoute(func(c *gin.Context) { c.String(http.StatusNotFound, "not found") })
 	return r
 }
@@ -379,7 +387,21 @@ type portalPage struct {
 	PortalJS     string
 	Version      string
 	Upstream     string
+	HistoryNote  string
+	IPInfo       string
 	Authed       bool
+}
+
+// historyNote explains the history's limits under the Visitors tab.
+func (p *portal) historyNote() string {
+	persist := "A restart starts the history again (no history log: -history-log off, or -data-dir empty)."
+	if p.history.log != nil {
+		persist = "It is also written to " + p.history.log.path + " and restored when concert restarts."
+	}
+	return fmt.Sprintf("Kept in memory: the last %d requests from each of up to %s addresses, until %dh after an "+
+		"address's last request; bans are kept %dh after they end. Requests from banned clients and every 4xx or 5xx "+
+		"response are always recorded; successful asset and waiting-room status requests are not, as in the access log. %s",
+		historyPerClient, fmtCount(historyMaxClients), int(historyRetention/time.Hour), int(historyRetention/time.Hour), persist)
 }
 
 func (p *portal) render(c *gin.Context, status int, page portalPage) {
@@ -391,6 +413,8 @@ func (p *portal) render(c *gin.Context, status int, page portalPage) {
 	page.PortalJS = assetPortalJS
 	page.Version = BinaryVersion()
 	page.Upstream = p.a.current().cfg.upstream
+	page.HistoryNote = p.historyNote()
+	page.IPInfo = p.a.ipinfo.describe()
 	var buf bytes.Buffer
 	if err := p.tmpl.ExecuteTemplate(&buf, templateIndex, page); err != nil {
 		log.Printf("portal: render: %v", err)
@@ -530,736 +554,4 @@ func jsonError(c *gin.Context, status int, msg string) {
 func portalActor(c *gin.Context) string {
 	ip, _ := remoteAddr(c.Request)
 	return ip.String()
-}
-
-// ─── API: overview ───────────────────────────────────────────────────────────
-
-func (p *portal) apiOverview(c *gin.Context) {
-	a, g := p.a, p.a.current()
-	wr, stats := a.room, a.stats
-	rate, surge := a.pricing()
-	h := gin.H{
-		"cap":                          wr.Cap(),
-		"occupancy":                    wr.Len(),
-		"queue_depth":                  wr.QueueDepth(),
-		"live_queue_depth":             wr.LiveQueueDepth(),
-		"max_queue_depth":              wr.MaxQueueDepth(),
-		"utilization":                  wr.UtilizationSmoothed(),
-		"first_poll_grace":             wr.FirstPollGrace().String(),
-		"queued_total":                 stats.queued.Load(),
-		"evicted_total":                stats.evicted.Load(),
-		"timeouts_total":               stats.timeouts.Load(),
-		"promoted_total":               stats.promoted.Load(),
-		"removed_total":                stats.removed.Load(),
-		"asset_cap":                    g.assets.global.Cap(),
-		"asset_in_flight":              g.assets.global.Len(),
-		"asset_users":                  g.assets.users.count.Load(),
-		"asset_served_total":           stats.assetServed.Load(),
-		"asset_denied_total":           stats.assetDenied.Load(),
-		"asset_user_throttled_total":   stats.assetUserThrottled.Load(),
-		"asset_global_throttled_total": stats.assetGlobalThrottled.Load(),
-		"stream_cap":                   g.streams.sem.Cap(),
-		"stream_active":                g.streams.sem.Len(),
-		"stream_served_total":          stats.streamServed.Load(),
-		"stream_denied_total":          stats.streamDenied.Load(),
-		"stream_throttled_total":       stats.streamThrottled.Load(),
-		"abuse_enabled":                g.abuse != nil,
-		"abuse_tracked":                g.abuse.tracked(),
-		"abuse_range_bans":             g.abuse.rangeCount(),
-		"abuse_strikes_total":          stats.abuseStrikes.Load(),
-		"abuse_bans_total":             stats.abuseBans.Load(),
-		"abuse_rejected_total":         stats.abuseRejected.Load(),
-		"abuse_dropped_total":          stats.abuseDropped.Load(),
-		"active_bans":                  len(g.abuse.bans(time.Now())),
-		"notes_tracked":                p.notes.count(),
-		"notes_dropped":                p.notes.dropped.Load(),
-		"kicked_active":                p.kicked.count(),
-		"history_clients":              p.history.count.Load(),
-		"rate":                         rate,
-		"surge":                        surge,
-		"skip_url":                     wr.SkipURL(),
-	}
-	for k, v := range g.priorityView() {
-		h[k] = v
-	}
-	c.JSON(http.StatusOK, h)
-}
-
-// ─── API: queue ──────────────────────────────────────────────────────────────
-
-// occupantView is one waiting visitor as the portal shows it. Raw tickets
-// never leave concert; the UI addresses visitors by an opaque ID derived
-// from the ticket.
-type occupantView struct {
-	ID          string    `json:"id"`
-	Client      string    `json:"client"`
-	UserAgent   string    `json:"user_agent"`
-	Path        string    `json:"path"`
-	Joined      time.Time `json:"joined"`
-	LastSeen    time.Time `json:"last_seen"`
-	IdleSeconds int       `json:"idle_seconds"`
-	Position    int64     `json:"position"`
-	Ready       bool      `json:"ready"`
-	HasPass     bool      `json:"has_pass"`
-	Promoted    bool      `json:"promoted"`
-	Rank        string    `json:"rank"`
-}
-
-func occupantID(token string) string {
-	sum := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(sum[:8])
-}
-
-// queueViews lists the front of room's line, in line order, with the path
-// and browser noted when each visitor joined.
-func (p *portal) queueViews(now time.Time) []occupantView {
-	line := p.a.room.Queue(portalQueueLimit)
-	out := make([]occupantView, 0, len(line))
-	for _, t := range line {
-		note, _ := p.notes.get(t.Token)
-		out = append(out, occupantView{
-			ID:          occupantID(t.Token),
-			Client:      t.ClientKey,
-			UserAgent:   note.ua,
-			Path:        note.path,
-			Joined:      t.IssuedAt.UTC(),
-			LastSeen:    t.LastSeen.UTC(),
-			IdleSeconds: int(now.Sub(t.LastSeen) / time.Second),
-			Position:    t.Position,
-			Ready:       t.Position <= 0,
-			HasPass:     t.HasPass,
-			Promoted:    t.Promoted,
-			Rank:        rankLabel(p.a.prio.line.rankOf(t.Token)),
-		})
-	}
-	return out
-}
-
-// lookup finds a listed visitor by the ID the UI shows. Only visitors the
-// queue view lists can be acted on.
-func (p *portal) lookup(id string) (room.TicketInfo, bool) {
-	for _, t := range p.a.room.Queue(portalQueueLimit) {
-		if occupantID(t.Token) == id {
-			return t, true
-		}
-	}
-	return room.TicketInfo{}, false
-}
-
-func (p *portal) apiQueue(c *gin.Context) {
-	list := p.queueViews(time.Now())
-	c.JSON(http.StatusOK, gin.H{
-		"occupants":        list,
-		"listed":           len(list),
-		"limit":            portalQueueLimit,
-		"kicked":           p.kicked.count(),
-		"live_queue_depth": p.a.room.LiveQueueDepth(),
-	})
-}
-
-type occupantAction struct {
-	ID  string `json:"id"`
-	Ban bool   `json:"ban"`
-}
-
-// apiPromote moves a visitor to the front of the line. It is an operator
-// promotion: no price, and no VIP pass, because only the visitor's own
-// response could carry the pass cookie.
-func (p *portal) apiPromote(c *gin.Context) {
-	var body occupantAction
-	if err := c.ShouldBindJSON(&body); err != nil || body.ID == "" {
-		jsonError(c, http.StatusBadRequest, "id is required")
-		return
-	}
-	t, ok := p.lookup(body.ID)
-	if !ok {
-		jsonError(c, http.StatusNotFound, "that visitor is no longer in line")
-		return
-	}
-	if err := p.a.room.AdminPromote(t.Token, 1); err != nil {
-		jsonError(c, http.StatusConflict, "room refused the promotion: "+err.Error())
-		return
-	}
-	log.Printf("portal: %s moved %s (%s) to the front", portalActor(c), body.ID, t.ClientKey)
-	c.JSON(http.StatusOK, gin.H{"promoted": body.ID})
-}
-
-// apiKick removes a visitor from the line and, with ban, bans their address.
-// A removed visitor's next poll reloads their page into a removal notice,
-// and they can rejoin at the back. A banned visitor's reload shows the block
-// notice, and the ban drops everyone else waiting from the same address.
-func (p *portal) apiKick(c *gin.Context) {
-	var body occupantAction
-	if err := c.ShouldBindJSON(&body); err != nil || body.ID == "" {
-		jsonError(c, http.StatusBadRequest, "id is required")
-		return
-	}
-	t, ok := p.lookup(body.ID)
-	if !ok {
-		jsonError(c, http.StatusNotFound, "that visitor is no longer in line")
-		return
-	}
-
-	now := time.Now()
-	var banFor time.Duration
-	if body.Ban {
-		reg := p.a.current().abuse
-		if reg == nil {
-			jsonError(c, http.StatusConflict, errAbuseDisabled.Error())
-			return
-		}
-		ip, err := netip.ParseAddr(t.ClientKey)
-		if err != nil {
-			jsonError(c, http.StatusConflict, "concert has no address for that visitor")
-			return
-		}
-		left, banned := reg.banNow(ip, now)
-		if !banned {
-			jsonError(c, http.StatusConflict, errClientExempt.Error())
-			return
-		}
-		banFor = left
-		if k, ok := abuseKey(ip); ok {
-			p.history.noteSource(keyPrefix(k), "removed from the line and banned in the portal by "+portalActor(c))
-		}
-		p.a.saveBansNow()
-	} else {
-		p.kicked.add(t.Token, now.Add(p.a.room.TokenTTL()+time.Minute))
-	}
-
-	if err := p.a.room.RemoveToken(t.Token); err != nil {
-		var notFound room.ErrTokenNotFound
-		if !errors.As(err, &notFound) {
-			log.Printf("portal: removing %s: %v", body.ID, err)
-		}
-	}
-	p.notes.remove(t.Token)
-	log.Printf("portal: %s removed %s (%s) from the line, ban=%v", portalActor(c), body.ID, t.ClientKey, body.Ban)
-
-	secs := int(banFor / time.Second)
-	if banFor == banForeverLeft {
-		secs = 0
-	}
-	c.JSON(http.StatusOK, gin.H{
-		"kicked":      body.ID,
-		"banned":      body.Ban,
-		"ban_seconds": secs,
-	})
-}
-
-// ─── API: bans ───────────────────────────────────────────────────────────────
-
-func (p *portal) apiBans(c *gin.Context) {
-	reg := p.a.current().abuse
-	c.JSON(http.StatusOK, gin.H{
-		"enabled":   reg != nil,
-		"tracked":   reg.tracked(),
-		"ranges":    reg.rangeCount(),
-		"persisted": p.a.bansPath != "",
-		"bans":      reg.bans(time.Now()),
-	})
-}
-
-// apiBanSave creates a ban or replaces an existing one. The client may be a
-// single address (IPv6 is banned by its /64) or a CIDR range such as
-// 203.0.0.0/16. A permanent ban lasts until it is lifted. Waiting visitors
-// the ban covers are removed from the line at once; "dropped" counts them.
-func (p *portal) apiBanSave(c *gin.Context) {
-	var body struct {
-		Client    string `json:"client"`
-		Duration  string `json:"duration"`
-		Permanent bool   `json:"permanent"`
-	}
-	if err := c.ShouldBindJSON(&body); err != nil {
-		jsonError(c, http.StatusBadRequest, "client and duration are required")
-		return
-	}
-	reg := p.a.current().abuse
-	if reg == nil {
-		jsonError(c, http.StatusConflict, errAbuseDisabled.Error())
-		return
-	}
-	target, err := parseBanTarget(body.Client)
-	if err != nil {
-		jsonError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	var d time.Duration // 0 = permanent
-	if !body.Permanent {
-		d, err = time.ParseDuration(strings.TrimSpace(body.Duration))
-		if err != nil || d < time.Minute || d > 365*24*time.Hour {
-			jsonError(c, http.StatusBadRequest, "duration must be between 1m and 8760h, for example 30m or 24h, or the ban must be permanent")
-			return
-		}
-	}
-	now := time.Now()
-	var until any
-	if !body.Permanent {
-		until = now.Add(d).UTC()
-	}
-	lasting := "permanently"
-	if !body.Permanent {
-		lasting = "for " + d.String()
-	}
-	source := "banned in the portal by " + portalActor(c)
-
-	if target.single {
-		key, err := reg.banFor(target.prefix.Addr(), d, now)
-		switch {
-		case errors.Is(err, errAbuseDisabled), errors.Is(err, errClientExempt), errors.Is(err, errRegistryFull):
-			jsonError(c, http.StatusConflict, err.Error())
-			return
-		case err != nil:
-			jsonError(c, http.StatusBadRequest, err.Error())
-			return
-		}
-		p.history.noteSource(target.scope(), source)
-		// The ban's own drop runs moments later in a batch; removing now
-		// gives the operator an exact count. The batch catches anyone who
-		// joined in between.
-		dropped := p.a.dropWaiting(target.scope())
-		p.a.saveBansNow()
-		log.Printf("portal: %s banned %s %s, removed %d waiting", portalActor(c), displayKey(key), lasting, dropped)
-		c.JSON(http.StatusOK, gin.H{
-			"client":    displayKey(key),
-			"until":     until,
-			"range":     false,
-			"permanent": body.Permanent,
-			"dropped":   dropped,
-		})
-		return
-	}
-
-	if err := reg.banRange(target.prefix, d, now); err != nil {
-		jsonError(c, http.StatusConflict, err.Error())
-		return
-	}
-	p.history.noteSource(target.scope(), source)
-	dropped := p.a.dropWaiting(target.scope())
-	p.a.saveBansNow()
-	exempt := reg.exemptWithin(target.prefix)
-	log.Printf("portal: %s banned range %s %s, removed %d waiting (exempt within: %v)",
-		portalActor(c), target.prefix, lasting, dropped, exempt)
-	c.JSON(http.StatusOK, gin.H{
-		"client":        target.prefix.String(),
-		"until":         until,
-		"range":         true,
-		"permanent":     body.Permanent,
-		"dropped":       dropped,
-		"exempt_within": exempt,
-	})
-}
-
-func (p *portal) apiUnban(c *gin.Context) {
-	reg := p.a.current().abuse
-	if reg == nil {
-		jsonError(c, http.StatusConflict, errAbuseDisabled.Error())
-		return
-	}
-	target, err := parseBanTarget(c.Query("client"))
-	if err != nil {
-		jsonError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	if !reg.unbanTarget(target) {
-		jsonError(c, http.StatusNotFound, "that client is not tracked")
-		return
-	}
-	p.history.lifted(target.scope(), time.Now(), "the portal ("+portalActor(c)+")")
-	p.a.saveBansNow()
-	log.Printf("portal: %s unbanned %s", portalActor(c), target)
-	c.JSON(http.StatusOK, gin.H{"unbanned": target.String()})
-}
-
-// ─── API: settings ───────────────────────────────────────────────────────────
-
-func (p *portal) settingsView() gin.H {
-	views, file := p.a.settingsViews()
-	return gin.H{
-		"settings":  views,
-		"persisted": file != "",
-		"file":      file,
-		"fixed":     p.a.fixedSettings(),
-	}
-}
-
-func (p *portal) apiSettings(c *gin.Context) {
-	c.JSON(http.StatusOK, p.settingsView())
-}
-
-// apiSettingsSave takes a JSON object of setting keys to new values, for
-// example {"cap": 40, "abuse_cooldown": "10m"}, and applies them at once.
-// Every value is validated before any is saved or applied; see
-// app.changeSettings.
-func (p *portal) apiSettingsSave(c *gin.Context) {
-	var set map[string]json.RawMessage
-	if err := json.NewDecoder(io.LimitReader(c.Request.Body, settingsBodyLimit)).Decode(&set); err != nil || len(set) == 0 {
-		jsonError(c, http.StatusBadRequest, "send a JSON object of the settings to change")
-		return
-	}
-	ip, _ := remoteAddr(c.Request)
-	if err := p.a.changeSettings(set, nil, ip); err != nil {
-		jsonError(c, settingsStatus(err), err.Error())
-		return
-	}
-	log.Printf("portal: %s changed settings: %s", portalActor(c), strings.Join(sortedKeys(set), ", "))
-	c.JSON(http.StatusOK, p.settingsView())
-}
-
-// apiSettingsReset removes ?key=… (repeatable) from settings.json, so those
-// settings follow flags, environment or defaults again, and applies them.
-func (p *portal) apiSettingsReset(c *gin.Context) {
-	keys := c.QueryArray("key")
-	if len(keys) == 0 {
-		jsonError(c, http.StatusBadRequest, "key is required")
-		return
-	}
-	ip, _ := remoteAddr(c.Request)
-	if err := p.a.changeSettings(nil, keys, ip); err != nil {
-		jsonError(c, settingsStatus(err), err.Error())
-		return
-	}
-	log.Printf("portal: %s reset settings: %s", portalActor(c), strings.Join(keys, ", "))
-	c.JSON(http.StatusOK, p.settingsView())
-}
-
-// ─── the main listener: history, kicks and visitor notes ─────────────────────
-
-// wrap records every request on the main listener in the history (see
-// history.go), enforces kicks, and notes the path and browser of each
-// visitor who joins the line. It sits outside the main handler, so it also
-// sees requests from banned clients, which the access log never does.
-func (p *portal) wrap(next http.Handler) http.Handler {
-	if p == nil {
-		return next
-	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		g := p.a.current()
-		hw := p.history.begin(w, r, g)
-		defer hw.finish()
-		p.serveMain(hw, r, g, next)
-	})
-}
-
-// serveMain enforces kicks and notes visitors joining the line. Asset,
-// bypass, stream and ops paths are passed straight through: room never
-// issues tickets there.
-//
-// Everything else about the line comes from room itself. The only thing
-// read from responses is a room_ticket value different from the one the
-// request carried, which is a visitor joining the line; room's refreshes of
-// an existing ticket send the same value and are ignored.
-func (p *portal) serveMain(w http.ResponseWriter, r *http.Request, g *generation, next http.Handler) {
-	reqPath := r.URL.Path
-	for _, rule := range g.untracked {
-		if rule.matches(reqPath) {
-			next.ServeHTTP(w, r)
-			return
-		}
-	}
-
-	now := time.Now()
-	var token string
-	if ck, err := r.Cookie("room_ticket"); err == nil {
-		token = ck.Value
-	}
-	isStatus := reqPath == "/queue/status"
-	if token != "" && p.kicked.has(token, now) {
-		// A banned visitor is answered by the ban check in the main
-		// handler, which shows the block notice rather than the removal notice.
-		if _, banned := g.abuse.banned(clientIP(r, g.cfg.trusted), now); !banned {
-			p.rejectKicked(w, r, isStatus, g.cfg)
-			return
-		}
-	}
-	if isStatus {
-		next.ServeHTTP(w, r)
-		return
-	}
-
-	tw := &ticketWriter{ResponseWriter: w}
-	next.ServeHTTP(tw, r)
-	tw.inspect()
-	if tw.issued != "" && tw.issued != token {
-		p.notes.add(tw.issued, r.UserAgent(), reqPath)
-	}
-}
-
-// rejectKicked answers a removed visitor. Status polls get ready=true so the
-// waiting room page reloads; the reload gets the removal notice and the
-// ticket cookie is cleared, so returning means rejoining at the back.
-func (p *portal) rejectKicked(w http.ResponseWriter, r *http.Request, isStatus bool, cfg config) {
-	h := w.Header()
-	h.Set("Cache-Control", "no-store")
-	if isStatus {
-		h.Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"ready":true}`))
-		return
-	}
-	http.SetCookie(w, &http.Cookie{
-		Name: "room_ticket", Value: "", Path: cfg.cookiePath, Domain: cfg.cookieDomain,
-		MaxAge: -1, Secure: cfg.secureCookie, HttpOnly: true, SameSite: http.SameSiteLaxMode,
-	})
-	if wantsHTML(r) {
-		h.Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusForbidden)
-		_, _ = w.Write([]byte(kickedPage))
-		return
-	}
-	h.Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(http.StatusForbidden)
-	_, _ = w.Write([]byte(`{"error":"removed from the queue","removed":true}`))
-}
-
-const kickedPage = `<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>Removed from the line</title></head>
-<body style="font-family:system-ui,sans-serif;max-width:32rem;margin:15vh auto;padding:0 1rem;text-align:center">
-<h1>You were removed from the line</h1>
-<p>An administrator removed your place in the queue. You can rejoin at the back.</p>
-<p><a href="/">Rejoin the line</a></p></body></html>`
-
-// ticketWriter notes the room_ticket value a response sets. It forwards
-// Flush and Hijack because gin type-asserts the writer it wraps, and
-// streaming and upgrades must survive. Client disconnects are observed
-// through the request context, so the deprecated http.CloseNotifier is
-// intentionally not implemented.
-type ticketWriter struct {
-	http.ResponseWriter
-	inspected bool
-	issued    string
-}
-
-func (w *ticketWriter) inspect() {
-	if w.inspected {
-		return
-	}
-	w.inspected = true
-	for _, v := range w.Header().Values("Set-Cookie") {
-		if !strings.HasPrefix(v, "room_ticket=") {
-			continue
-		}
-		val := strings.TrimPrefix(v, "room_ticket=")
-		if i := strings.IndexByte(val, ';'); i >= 0 {
-			val = val[:i]
-		}
-		if val != "" {
-			w.issued = val
-		}
-	}
-}
-
-func (w *ticketWriter) WriteHeader(code int) {
-	w.inspect()
-	w.ResponseWriter.WriteHeader(code)
-}
-
-func (w *ticketWriter) Write(b []byte) (int, error) {
-	w.inspect()
-	return w.ResponseWriter.Write(b)
-}
-
-func (w *ticketWriter) Flush() {
-	w.inspect()
-	if f, ok := w.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
-}
-
-func (w *ticketWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	w.inspect()
-	if h, ok := w.ResponseWriter.(http.Hijacker); ok {
-		return h.Hijack()
-	}
-	return nil, nil, http.ErrNotSupported
-}
-
-func (w *ticketWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
-
-// ─── visitor notes ───────────────────────────────────────────────────────────
-
-// visitorNote is what room does not know about a waiting visitor: the path
-// they asked for and their browser. Display only.
-type visitorNote struct {
-	ua   string
-	path string
-}
-
-// noteStore keeps notes by ticket, at most max of them. The janitor forgets
-// notes for tickets room no longer holds.
-type noteStore struct {
-	mu      sync.Mutex
-	m       map[string]visitorNote
-	max     int
-	dropped atomic.Int64
-}
-
-func newNoteStore(max int) *noteStore {
-	return &noteStore{m: map[string]visitorNote{}, max: max}
-}
-
-func clip(s string, n int) string {
-	if len(s) > n {
-		return s[:n]
-	}
-	return s
-}
-
-func (s *noteStore) add(token, ua, reqPath string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.m[token]; ok {
-		return
-	}
-	if len(s.m) >= s.max {
-		s.dropped.Add(1)
-		return
-	}
-	s.m[token] = visitorNote{ua: clip(ua, 256), path: clip(reqPath, 256)}
-}
-
-func (s *noteStore) get(token string) (visitorNote, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	n, ok := s.m[token]
-	return n, ok
-}
-
-func (s *noteStore) remove(token string) {
-	s.mu.Lock()
-	delete(s.m, token)
-	s.mu.Unlock()
-}
-
-func (s *noteStore) count() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.m)
-}
-
-// prune forgets every note whose ticket keep rejects. keep is called
-// without the store's lock held.
-func (s *noteStore) prune(keep func(token string) bool) int {
-	s.mu.Lock()
-	tokens := make([]string, 0, len(s.m))
-	for t := range s.m {
-		tokens = append(tokens, t)
-	}
-	s.mu.Unlock()
-
-	var gone []string
-	for _, t := range tokens {
-		if !keep(t) {
-			gone = append(gone, t)
-		}
-	}
-	if len(gone) == 0 {
-		return 0
-	}
-	s.mu.Lock()
-	for _, t := range gone {
-		delete(s.m, t)
-	}
-	s.mu.Unlock()
-	return len(gone)
-}
-
-// ─── kick list ───────────────────────────────────────────────────────────────
-
-type kickList struct {
-	mu sync.Mutex
-	m  map[string]time.Time
-}
-
-func (k *kickList) add(token string, until time.Time) {
-	k.mu.Lock()
-	k.m[token] = until
-	k.mu.Unlock()
-}
-
-func (k *kickList) has(token string, now time.Time) bool {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	until, ok := k.m[token]
-	if ok && !now.Before(until) {
-		delete(k.m, token)
-		return false
-	}
-	return ok
-}
-
-func (k *kickList) count() int {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	return len(k.m)
-}
-
-func (k *kickList) sweep(now time.Time) {
-	k.mu.Lock()
-	for t, until := range k.m {
-		if !now.Before(until) {
-			delete(k.m, t)
-		}
-	}
-	k.mu.Unlock()
-}
-
-// ─── sign-in limiter ─────────────────────────────────────────────────────────
-
-type loginState struct {
-	fails       int
-	first       time.Time
-	lockedUntil time.Time
-}
-
-type loginLimiter struct {
-	mu sync.Mutex
-	m  map[netip.Addr]*loginState
-}
-
-func (l *loginLimiter) locked(ip netip.Addr, now time.Time) (time.Duration, bool) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if s := l.m[ip]; s != nil && now.Before(s.lockedUntil) {
-		return s.lockedUntil.Sub(now), true
-	}
-	return 0, false
-}
-
-func (l *loginLimiter) fail(ip netip.Addr, now time.Time) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	s := l.m[ip]
-	if s == nil || now.Sub(s.first) > loginWindow {
-		s = &loginState{first: now}
-		l.m[ip] = s
-	}
-	s.fails++
-	if s.fails >= loginMaxFailures {
-		s.lockedUntil = now.Add(loginLockout)
-		s.fails = 0
-		s.first = now
-	}
-}
-
-func (l *loginLimiter) reset(ip netip.Addr) {
-	l.mu.Lock()
-	delete(l.m, ip)
-	l.mu.Unlock()
-}
-
-func (l *loginLimiter) sweep(now time.Time) {
-	l.mu.Lock()
-	for ip, s := range l.m {
-		if now.After(s.lockedUntil) && now.Sub(s.first) > loginWindow {
-			delete(l.m, ip)
-		}
-	}
-	l.mu.Unlock()
-}
-
-func (l *loginLimiter) count() int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return len(l.m)
 }

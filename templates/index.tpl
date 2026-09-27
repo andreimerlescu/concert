@@ -37,8 +37,13 @@
       </button>
     </li>
     <li class="nav-item" role="presentation">
-      <button class="nav-link" id="tab-history-btn" data-bs-toggle="tab" data-bs-target="#tab-history" type="button" role="tab" aria-controls="tab-history" aria-selected="false">
-        <i class="bi bi-clock-history"></i> History <span class="badge rounded-pill text-bg-secondary" id="history-count">0</span>
+      <button class="nav-link" id="tab-visitors-btn" data-bs-toggle="tab" data-bs-target="#tab-visitors" type="button" role="tab" aria-controls="tab-visitors" aria-selected="false">
+        <i class="bi bi-person-lines-fill"></i> Visitors <span class="badge rounded-pill text-bg-secondary" id="visitors-count">0</span>
+      </button>
+    </li>
+    <li class="nav-item" role="presentation">
+      <button class="nav-link" id="tab-banlog-btn" data-bs-toggle="tab" data-bs-target="#tab-banlog" type="button" role="tab" aria-controls="tab-banlog" aria-selected="false">
+        <i class="bi bi-shield-exclamation"></i> Ban log
       </button>
     </li>
     <li class="nav-item" role="presentation">
@@ -46,8 +51,9 @@
         <i class="bi bi-sliders"></i> Settings
       </button>
     </li>
-    <li class="ms-auto align-self-center small text-body-secondary">
-      <i class="bi bi-arrow-repeat"></i> <span id="updated-at">loading…</span>
+    <li class="ms-auto align-self-center small text-body-secondary d-flex flex-wrap gap-3">
+      <span title="Where IP details come from"><i class="bi bi-globe2"></i> <span class="text-truncate d-inline-block ipinfo-state align-bottom">{{.IPInfo}}</span></span>
+      <span><i class="bi bi-arrow-repeat"></i> <span id="updated-at">loading…</span></span>
     </li>
   </ul>
 
@@ -186,17 +192,20 @@
 
     <!-- Queue -->
     <div class="tab-pane fade" id="tab-queue" role="tabpanel" aria-labelledby="tab-queue-btn" tabindex="0">
-      <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+      <div class="d-flex flex-wrap align-items-center gap-3 mb-3">
         <div class="input-group input-group-sm filter-input">
           <span class="input-group-text"><i class="bi bi-search"></i></span>
           <input type="search" class="form-control" id="queue-filter" placeholder="Filter by address, path or browser" aria-label="Filter the queue">
         </div>
-        <span class="small text-body-secondary" id="queue-summary"></span>
+        <div class="form-check form-switch mb-0">
+          <input class="form-check-input" type="checkbox" role="switch" id="queue-live" checked>
+          <label class="form-check-label small" for="queue-live">Live</label>
+        </div>
         <button type="button" class="btn btn-sm btn-outline-secondary ms-auto" id="queue-refresh"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
       </div>
       <div class="card stat-card">
         <div class="table-responsive">
-          <table class="table table-hover table-portal mb-0">
+          <table class="table table-hover table-portal live-table mb-0">
             <thead>
               <tr>
                 <th scope="col">Position</th>
@@ -212,10 +221,16 @@
             <tbody id="queue-rows"></tbody>
           </table>
         </div>
+        <div class="card-footer live-footer d-flex flex-wrap align-items-center gap-2">
+          <span class="badge live-state"></span>
+          <span class="small text-body-secondary" id="queue-summary"></span>
+          <div class="ms-auto" id="queue-pager"></div>
+        </div>
       </div>
       <p class="small text-body-secondary mt-3 mb-0">
-        <i class="bi bi-info-circle"></i> Positions come straight from the waiting room; the table lists the front of the line.
+        <i class="bi bi-info-circle"></i> Positions come straight from the waiting room; the table pages through the front of the line.
         Removing or banning a visitor takes them out of the line at once; banning also drops everyone else waiting from the same address or range.
+        Live updates pause while the pointer is over the table.
       </p>
     </div>
 
@@ -227,13 +242,17 @@
       <div class="alert alert-warning d-none" id="bans-not-persisted" role="alert">
         <i class="bi bi-exclamation-triangle"></i> <code>-data-dir</code> is empty, so bans — including permanent ones — are lost when concert restarts.
       </div>
-      <div class="d-flex align-items-center gap-2 mb-3">
+      <div class="d-flex flex-wrap align-items-center gap-3 mb-3">
         <button type="button" class="btn btn-sm btn-danger" id="ban-new"><i class="bi bi-plus-circle"></i> Ban a client or range</button>
+        <div class="form-check form-switch mb-0">
+          <input class="form-check-input" type="checkbox" role="switch" id="bans-live" checked>
+          <label class="form-check-label small" for="bans-live">Live</label>
+        </div>
         <button type="button" class="btn btn-sm btn-outline-secondary ms-auto" id="bans-refresh"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
       </div>
       <div class="card stat-card">
         <div class="table-responsive">
-          <table class="table table-hover table-portal mb-0">
+          <table class="table table-hover table-portal live-table mb-0">
             <thead>
               <tr>
                 <th scope="col">Client</th>
@@ -246,34 +265,34 @@
             <tbody id="ban-rows"></tbody>
           </table>
         </div>
+        <div class="card-footer live-footer d-flex flex-wrap align-items-center gap-2">
+          <span class="badge live-state"></span>
+          <span class="small text-body-secondary" id="bans-summary"></span>
+          <div class="ms-auto" id="bans-pager"></div>
+        </div>
       </div>
     </div>
 
-    <!-- History -->
-    <div class="tab-pane fade" id="tab-history" role="tabpanel" aria-labelledby="tab-history-btn" tabindex="0">
+    <!-- Visitors -->
+    <div class="tab-pane fade" id="tab-visitors" role="tabpanel" aria-labelledby="tab-visitors-btn" tabindex="0">
       <div class="d-flex flex-wrap align-items-center gap-3 mb-3">
         <div class="input-group input-group-sm filter-input">
           <span class="input-group-text"><i class="bi bi-search"></i></span>
-          <input type="search" class="form-control" id="history-filter" placeholder="Filter by address or path, e.g. /.env" aria-label="Filter the history">
+          <input type="search" class="form-control" id="visitors-filter" placeholder="Filter by address or path, e.g. /.env" aria-label="Filter visitors">
         </div>
         <div class="form-check form-switch mb-0">
-          <input class="form-check-input" type="checkbox" role="switch" id="history-flagged">
-          <label class="form-check-label small" for="history-flagged">Only clients that are or were banned</label>
+          <input class="form-check-input" type="checkbox" role="switch" id="visitors-flagged">
+          <label class="form-check-label small" for="visitors-flagged">Only clients that are or were banned</label>
         </div>
         <div class="form-check form-switch mb-0">
-          <input class="form-check-input" type="checkbox" role="switch" id="history-live" checked>
-          <label class="form-check-label small" for="history-live">Live</label>
+          <input class="form-check-input" type="checkbox" role="switch" id="visitors-live" checked>
+          <label class="form-check-label small" for="visitors-live">Live</label>
         </div>
-        <button type="button" class="btn btn-sm btn-outline-secondary ms-auto" id="history-refresh"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
+        <button type="button" class="btn btn-sm btn-outline-secondary ms-auto" id="visitors-refresh"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
       </div>
-
-      <div class="card stat-card mb-4">
-        <div class="card-body pb-2 d-flex flex-wrap align-items-baseline gap-2">
-          <h2 class="h6 mb-0"><i class="bi bi-person-lines-fill"></i> Clients</h2>
-          <span class="small text-body-secondary" id="history-summary"></span>
-        </div>
+      <div class="card stat-card">
         <div class="table-responsive">
-          <table class="table table-hover table-portal mb-0">
+          <table class="table table-hover table-portal live-table mb-0">
             <thead>
               <tr>
                 <th scope="col" class="history-toggle"><span class="visually-hidden">Details</span></th>
@@ -287,22 +306,39 @@
                 <th scope="col" class="text-end">Actions</th>
               </tr>
             </thead>
-            <tbody id="history-client-rows"></tbody>
+            <tbody id="visitors-rows"></tbody>
           </table>
         </div>
+        <div class="card-footer live-footer d-flex flex-wrap align-items-center gap-2">
+          <span class="badge live-state"></span>
+          <span class="small text-body-secondary" id="visitors-summary"></span>
+          <div class="ms-auto" id="visitors-pager"></div>
+        </div>
       </div>
+      <p class="small text-body-secondary mt-3 mb-0"><i class="bi bi-info-circle"></i> {{.HistoryNote}}
+        Rows are tinted red for a permanent ban, amber for a temporary one, green when the last response was 2xx and blue otherwise.
+        Hover the 4, 6 and 8 badges for an address in each form; click one to copy it.</p>
+    </div>
 
-      <p class="small text-body-secondary mt-3 mb-4">
-        <i class="bi bi-info-circle"></i> <span id="history-limits">History is kept in memory.</span>
-      </p>
-
-      <div class="card stat-card mb-4">
+    <!-- Ban log -->
+    <div class="tab-pane fade" id="tab-banlog" role="tabpanel" aria-labelledby="tab-banlog-btn" tabindex="0">
+      <div class="d-flex flex-wrap align-items-center gap-3 mb-3">
+        <div class="input-group input-group-sm filter-input">
+          <span class="input-group-text"><i class="bi bi-search"></i></span>
+          <input type="search" class="form-control" id="banlog-filter" placeholder="Filter by address or path" aria-label="Filter the ban log">
+        </div>
+        <div class="form-check form-switch mb-0">
+          <input class="form-check-input" type="checkbox" role="switch" id="banlog-live" checked>
+          <label class="form-check-label small" for="banlog-live">Live</label>
+        </div>
+        <button type="button" class="btn btn-sm btn-outline-secondary ms-auto" id="banlog-refresh"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
+      </div>
+      <div class="card stat-card">
         <div class="card-body pb-2">
-          <h2 class="h6 mb-1"><i class="bi bi-shield-exclamation"></i> Ban log</h2>
-          <p class="small text-body-secondary mb-0">Every ban since concert started: when it began and ends, the request that started it, and everything the banned network requested while it was blocked. Expand a ban for every path and address.</p>
+          <p class="small text-body-secondary mb-0">Every ban in the history: when it began and ends, the request that started it, and everything the banned network requested while it was blocked. Expand a ban for every path and address.</p>
         </div>
         <div class="table-responsive">
-          <table class="table table-hover table-portal mb-0">
+          <table class="table table-hover table-portal live-table mb-0">
             <thead>
               <tr>
                 <th scope="col" class="history-toggle"><span class="visually-hidden">Details</span></th>
@@ -315,8 +351,13 @@
                 <th scope="col">Started by</th>
               </tr>
             </thead>
-            <tbody id="history-ban-rows"></tbody>
+            <tbody id="banlog-rows"></tbody>
           </table>
+        </div>
+        <div class="card-footer live-footer d-flex flex-wrap align-items-center gap-2">
+          <span class="badge live-state"></span>
+          <span class="small text-body-secondary" id="banlog-summary"></span>
+          <div class="ms-auto" id="banlog-pager"></div>
         </div>
       </div>
     </div>

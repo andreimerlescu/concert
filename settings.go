@@ -31,19 +31,20 @@ import (
 // Resetting a setting in the portal removes it from the file again.
 //
 // Every change applies immediately, without restarting concert: see
-// reload.go. The listen addresses are the exception: they are set by flag
-// or environment and take a restart. Secrets (CONCERT_ADMIN_TOKEN,
-// CONCERT_ADMIT_SECRET, CONCERT_PORTAL_PASS) and -data-dir itself are never
-// stored in the file.
+// reload.go. The listen addresses and the history log are the exception:
+// they are set by flag or environment and take a restart. Secrets
+// (CONCERT_ADMIN_TOKEN, CONCERT_ADMIT_SECRET, CONCERT_PORTAL_PASS), -data-dir
+// itself and the IP database (NADDR_DATA, NADDR_ADDR) are never stored in
+// the file.
 
 const (
 	settingsFileName    = "settings.json"
 	settingsFileVersion = 1
 )
 
-// defaultDataDir is where settings.json, bans.json and the saved queue live
-// unless -data-dir or CONCERT_DATA_DIR says otherwise. Tests point it
-// somewhere empty.
+// defaultDataDir is where settings.json, bans.json, the saved queue and the
+// history log live unless -data-dir or CONCERT_DATA_DIR says otherwise.
+// Tests point it somewhere empty.
 var defaultDataDir = "/var/lib/concert/data"
 
 // Where a setting's current value came from.
@@ -61,6 +62,14 @@ const (
 	kindFloat    = "float"
 	kindBool     = "bool"
 	kindDuration = "duration"
+)
+
+// List kinds. A setting with a list kind is still a single comma-separated
+// string everywhere concert stores or reads it (flags, environment,
+// settings.json, the API); the portal shows it as one input per entry and
+// checks each entry before joining them with ",".
+const (
+	listPaths = "path" // entries start with "/"; suffix /* for a prefix
 )
 
 // Portal sections, in display order.
@@ -91,6 +100,7 @@ type settingDef struct {
 	ptr     func(*config) any // pointer to the config field
 	check   func(any) error   // extra validation for values from the file or portal
 	restart bool              // set only by flag or environment; takes effect on restart
+	list    string            // list kind (listPaths): the portal edits it one entry per input
 	kind    string            // derived from ptr in init
 }
 
@@ -185,16 +195,16 @@ var settingDefs = []settingDef{
 	// ---- Paths ----
 	{key: "bypass", flag: "bypass", env: "CONCERT_BYPASS", group: groupPaths, label: "Bypass paths",
 		def: "/favicon.ico", usage: "comma-separated paths that skip every guard; suffix /* for a prefix",
-		ptr: func(c *config) any { return &c.bypass }},
+		ptr: func(c *config) any { return &c.bypass }, check: checkPathList, list: listPaths},
 	{key: "assets", flag: "assets", env: "CONCERT_ASSETS", group: groupPaths, label: "Asset paths",
 		def: "", usage: "comma-separated asset paths that require an admission pass; suffix /* for a prefix",
-		ptr: func(c *config) any { return &c.assets }},
+		ptr: func(c *config) any { return &c.assets }, check: checkPathList, list: listPaths},
 	{key: "asset_public", flag: "asset-public", env: "CONCERT_ASSET_PUBLIC", group: groupPaths, label: "Public asset paths",
 		def: "", usage: "comma-separated asset paths served without a pass, still under the global asset cap",
-		ptr: func(c *config) any { return &c.assetPublic }},
+		ptr: func(c *config) any { return &c.assetPublic }, check: checkPathList, list: listPaths},
 	{key: "ban_paths", flag: "ban-paths", env: "CONCERT_BAN_PATHS", group: groupPaths, label: "Ban paths",
 		def: "", usage: "comma-separated paths that ban the client on first hit; suffix /* for a prefix",
-		ptr: func(c *config) any { return &c.banPaths }},
+		ptr: func(c *config) any { return &c.banPaths }, check: checkPathList, list: listPaths},
 
 	// ---- Asset tier ----
 	{key: "asset_cap", flag: "asset-cap", env: "CONCERT_ASSET_CAP", group: groupAssets, label: "Global asset cap",
@@ -222,7 +232,7 @@ var settingDefs = []settingDef{
 	// ---- Streams; see stream.go ----
 	{key: "stream_paths", flag: "stream-paths", env: "CONCERT_STREAM_PATHS", group: groupStreams, label: "Stream paths",
 		def: "", usage: "comma-separated WebSocket and server-sent event paths: outside the waiting room, admission pass required; suffix /* for a prefix",
-		ptr: func(c *config) any { return &c.streamPaths }},
+		ptr: func(c *config) any { return &c.streamPaths }, check: checkPathList, list: listPaths},
 	{key: "stream_cap", flag: "stream-cap", env: "CONCERT_STREAM_CAP", group: groupStreams, label: "Concurrent streams",
 		def: 1000, usage: "most stream connections open at once; more get 503",
 		ptr: func(c *config) any { return &c.streamCap }, check: intAtLeast(1)},
@@ -277,6 +287,9 @@ var settingDefs = []settingDef{
 	{key: "portal_secure_cookie", flag: "portal-secure-cookie", env: "CONCERT_PORTAL_SECURE_COOKIE", group: groupPortal, label: "Secure portal cookie",
 		def: false, usage: "mark the portal session cookie Secure (portal served over HTTPS)",
 		ptr: func(c *config) any { return &c.portal.secureCookie }},
+	{key: "history_log", flag: "history-log", env: "CONCERT_HISTORY_LOG", group: groupPortal, label: "History log file", restart: true,
+		def: "", usage: "JSON-lines file the portal's request history is written to and restored from; empty means history.jsonl in -data-dir, off keeps it in memory only (flag or CONCERT_HISTORY_LOG only; takes a restart)",
+		ptr: func(c *config) any { return &c.historyLog }},
 }
 
 // settingByKey indexes settingDefs by key.
@@ -288,6 +301,9 @@ func init() {
 		d.kind = kindOf(d.ptr(&config{}))
 		if d.kind == "" {
 			panic("settings: unsupported field type for " + d.key)
+		}
+		if d.list != "" && d.kind != kindString {
+			panic("settings: list kind on a non-string setting " + d.key)
 		}
 		if _, dup := settingByKey[d.key]; dup {
 			panic("settings: duplicate key " + d.key)
@@ -479,6 +495,32 @@ func checkSkipURL(v any) error {
 	valid := s == "" || strings.HasPrefix(s, "/") || strings.HasPrefix(s, "https://") || strings.HasPrefix(s, "http://")
 	if !valid || len(s) > 2048 || strings.ContainsAny(s, " \t\r\n\"<>") {
 		return errors.New("must be empty, a path starting with /, or an http(s) URL")
+	}
+	return nil
+}
+
+// checkPathList validates a comma-separated path list from the file or the
+// portal: every entry must start with "/", contain no whitespace, and appear
+// only once. Empty entries (a stray or trailing comma) are ignored, as
+// parsePaths ignores them. Conflicts between lists and reserved paths are
+// caught later by validateRoutes.
+func checkPathList(v any) error {
+	seen := map[string]bool{}
+	for _, entry := range strings.Split(v.(string), ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if !strings.HasPrefix(entry, "/") {
+			return fmt.Errorf("entry %q must start with /", entry)
+		}
+		if strings.ContainsAny(entry, " \t\r\n") {
+			return fmt.Errorf("entry %q must not contain spaces", entry)
+		}
+		if seen[entry] {
+			return fmt.Errorf("lists %q more than once", entry)
+		}
+		seen[entry] = true
 	}
 	return nil
 }
@@ -782,13 +824,16 @@ func (a *app) changeSettings(set map[string]json.RawMessage, reset []string, act
 	return nil
 }
 
-// settingView is one setting as the portal shows it.
+// settingView is one setting as the portal shows it. List is the list kind
+// (listPaths) for comma-separated settings the portal edits one entry per
+// input; the value is still the comma-joined string.
 type settingView struct {
 	Key     string `json:"key"`
 	Group   string `json:"group"`
 	Label   string `json:"label"`
 	Help    string `json:"help"`
 	Kind    string `json:"kind"`
+	List    string `json:"list,omitempty"`
 	Flag    string `json:"flag"`
 	Env     string `json:"env"`
 	Value   any    `json:"value"`
@@ -807,7 +852,7 @@ func (a *app) settingsViews() ([]settingView, string) {
 	for i := range settingDefs {
 		d := &settingDefs[i]
 		out = append(out, settingView{
-			Key: d.key, Group: d.group, Label: d.label, Help: d.usage, Kind: d.kind,
+			Key: d.key, Group: d.group, Label: d.label, Help: d.usage, Kind: d.kind, List: d.list,
 			Flag: d.flag, Env: d.env, Value: encodeSetting(d.get(&cfg)), Source: m.source(d.key),
 			Restart: d.restart,
 		})
@@ -815,9 +860,9 @@ func (a *app) settingsViews() ([]settingView, string) {
 	return out, m.path
 }
 
-// fixedSettings describes what the portal cannot change — secrets and the
-// data directory, which are environment- or command-line-only — plus where
-// concert is listening right now.
+// fixedSettings describes what the portal cannot change — secrets, the data
+// directory and the IP database, which are environment- or command-line-only —
+// plus where concert is listening right now and where its history goes.
 func (a *app) fixedSettings() map[string]string {
 	a.settings.mu.Lock()
 	mainEP, portalEP := a.mainEP, a.portalEP
@@ -841,6 +886,8 @@ func (a *app) fixedSettings() map[string]string {
 		"Admission secret": secret,
 		"Admin token":      token,
 		"Portal pass":      "set (CONCERT_PORTAL_PASS)",
+		"IP details":       a.ipinfo.describe(),
+		"History log":      a.history.describeLog(),
 		"Main listener":    mainEP.describe(),
 		"Portal listener":  portalEP.describe(),
 		"Version":          BinaryVersion(),

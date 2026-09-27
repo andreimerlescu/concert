@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # installer.sh — install a prebuilt concert binary as a confined systemd
-# service that runs under SELinux enforcing mode.
+# service that runs under SELinux enforcing mode, with the IPtoASN database
+# the admin portal uses for IP details.
 #
 # The binary is taken from /home/rocky/concert-linux-amd64, where the
 # deployment pipeline uploads it. Upload a new build there and re-run this
@@ -13,7 +14,7 @@
 #   sudo CONCERT_BINARY=/tmp/concert bash installer.sh       # install a binary from somewhere else
 #   sudo CONCERT_SHA256=<sum> bash installer.sh              # refuse a binary with a different checksum
 #   sudo FORCE_RESTART=1 bash installer.sh                   # restart even if nothing changed
-#   sudo bash installer.sh uninstall                         # remove service, policy, port labels
+#   sudo bash installer.sh uninstall                         # remove service, policy, port labels, timer
 #   sudo PURGE=1 bash installer.sh uninstall                 # also remove /etc/concert, /var/lib/concert, the user
 #
 # Settings (first install only; afterwards edit /etc/concert/concert.env, or
@@ -27,6 +28,23 @@
 #        CONCERT_TLS_STAGING=true \
 #        OPEN_FIREWALL=1 \
 #        bash installer.sh
+#
+# IP details in the admin portal (naddr's ess package). concert reads
+# NADDR_DATA, an IPtoASN file, or NADDR_ADDR, a running naddr service; with
+# neither, the portal shows bare addresses. By default the installer
+# downloads the database to /var/lib/concert/naddr/ip2asn-combined.tsv.gz,
+# labels it for concert under SELinux, and installs a daily timer
+# (concert-naddr-data.timer) that refreshes it atomically. concert reloads a
+# replaced file on its own (NADDR_DATA_POLL); no restart is needed.
+#
+#   NADDR_DATA=/srv/naddr/ip2asn.tsv.gz   keep the database here instead (labeled for concert)
+#   NADDR_ADDR=127.0.0.1:8080             use a naddr service (its port is labeled for concert)
+#   NADDR_DOWNLOAD=0                      don't download or schedule refreshes
+#   NADDR_REFRESH=1                       download the database again now
+#
+# Existing installs get NADDR_DATA, NADDR_DATA_POLL and NADDR_ADDR added to
+# concert.env when missing; NADDR_DATA or NADDR_ADDR given to this run
+# replace the values there.
 #
 # Ports concert may move to while running. Every setting, including the
 # listen and portal addresses, can be changed live in the admin portal. A new
@@ -51,19 +69,21 @@
 # What it does:
 #   1. verifies the binary and installs a root-owned copy
 #   2. compiles and loads an SELinux module that confines concert in concert_t
-#   3. labels the listen, portal, upstream and extra ports
+#   3. labels the listen, portal, upstream, naddr and extra ports
 #   4. creates /var/lib/concert for the Let's Encrypt certificate cache and
-#      /var/lib/concert/data for settings.json and bans.json
-#   5. writes /etc/concert/concert.env (secrets generated once, kept on upgrade)
-#   6. installs a hardened systemd unit and (re)starts concert only when
+#      /var/lib/concert/data for settings.json, bans.json, the saved queue
+#      and the history log (history.jsonl)
+#   5. downloads the IPtoASN database, labels it concert_var_lib_t, and
+#      installs the daily refresh timer
+#   6. writes /etc/concert/concert.env (secrets generated once, kept on upgrade)
+#   7. installs a hardened systemd unit and (re)starts concert only when
 #      something that needs a restart changed, then verifies the process is
 #      running in concert_t with no AVC denials
 #
-# A restart empties the waiting queue, which lives in memory; bans and
-# settings changed in the portal are kept in /var/lib/concert/data. So the
-# installer restarts concert only for a new binary, a changed unit, a changed
-# concert.env, a stopped service, or FORCE_RESTART=1. Settings changed in the
-# portal never need a restart.
+# A restart keeps the waiting queue (saved on shutdown), bans, settings
+# changed in the portal and the request history, all in /var/lib/concert/data.
+# The installer still restarts concert only for a new binary, a changed unit,
+# a changed concert.env, a stopped service, or FORCE_RESTART=1.
 #
 # concert reads every setting from CONCERT_* environment variables, so the
 # unit passes no flags: /etc/concert/concert.env is the configuration, except
@@ -93,6 +113,12 @@ MODULE=concert
 SEBOOL=concert_bind_any_port
 DEVEL_MAKEFILE=/usr/share/selinux/devel/Makefile
 
+NADDR_URL=https://iptoasn.com/data/ip2asn-combined.tsv.gz
+NADDR_DEFAULT_FILE="$STATE_DIR/naddr/ip2asn-combined.tsv.gz"
+NADDR_UPDATER=/usr/local/libexec/concert-naddr-update
+NADDR_SERVICE=/etc/systemd/system/concert-naddr-data.service
+NADDR_TIMER=/etc/systemd/system/concert-naddr-data.timer
+
 # ── Settings ─────────────────────────────────────────────────────────
 
 LISTEN="${CONCERT_LISTEN:-0.0.0.0:8080}"
@@ -110,6 +136,13 @@ INSTALL_DEPS="${INSTALL_DEPS:-1}"
 FORCE_RESTART="${FORCE_RESTART:-0}"
 PURGE="${PURGE:-0}"
 
+NADDR_DATA_WANT="${NADDR_DATA-}"
+NADDR_DATA_GIVEN="${NADDR_DATA+1}"
+NADDR_ADDR_WANT="${NADDR_ADDR-}"
+NADDR_ADDR_GIVEN="${NADDR_ADDR+1}"
+NADDR_DOWNLOAD="${NADDR_DOWNLOAD:-1}"
+NADDR_REFRESH="${NADDR_REFRESH:-0}"
+
 # Remembered in $INSTALLER_ENV. "given" records whether this run set them,
 # so a plain re-run keeps what an earlier run chose.
 EXTRA_PORTS="${CONCERT_EXTRA_PORTS-}"
@@ -117,6 +150,10 @@ EXTRA_PORTS_GIVEN="${CONCERT_EXTRA_PORTS+1}"
 LOW_PORTS="${ALLOW_LOW_PORTS-}"
 LOW_PORTS_GIVEN="${ALLOW_LOW_PORTS+1}"
 ANY_PORT="${SELINUX_ANY_PORT-}"
+
+# Read from concert.env once it exists.
+NADDR_PATH=""
+NADDR_REMOTE=""
 
 # ── Output helpers ───────────────────────────────────────────────────
 
@@ -164,11 +201,29 @@ port_of_url() {
     fi
 }
 
+# NADDR_ADDR may be host:port or a URL.
+naddr_url() { [[ "$1" == *://* ]] && echo "$1" || echo "http://$1"; }
+
 valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 65535 )); }
 
 # Read KEY=value from the env file without sourcing it. EnvironmentFile has
 # no trailing-comment syntax, so the value is everything after the "=".
 env_get() { sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1; }
+
+# env_set KEY VALUE — replace KEY's line in the env file, or append it.
+env_set() {
+    local key=$1 val=$2 tmp
+    if grep -q "^$key=" "$ENV_FILE"; then
+        [[ "$(env_get "$key")" == "$val" ]] && return 0
+        tmp=$(mktemp "$ETC/.concert.env.XXXXXX")
+        awk -v k="$key" -v v="$val" 'index($0, k "=") == 1 { print k "=" v; next } { print }' "$ENV_FILE" > "$tmp"
+        cat "$tmp" > "$ENV_FILE"
+        rm -f -- "$tmp"
+    else
+        printf '%s=%s\n' "$key" "$val" >> "$ENV_FILE"
+    fi
+    ok "Set $key in $ENV_FILE"
+}
 
 state_add() {
     touch "$STATE" && chmod 600 "$STATE"
@@ -299,8 +354,9 @@ init_daemon_domain(concert_t, concert_exec_t)
 type concert_etc_t;
 files_config_file(concert_etc_t)
 
-# Let's Encrypt account key and certificates, settings.json and bans.json
-# under /var/lib/concert.
+# Let's Encrypt account key and certificates, settings.json, bans.json, the
+# saved queue, the history log and the IPtoASN database under
+# /var/lib/concert (and any NADDR_DATA directory the installer labels).
 type concert_var_lib_t;
 files_type(concert_var_lib_t)
 
@@ -308,7 +364,7 @@ files_type(concert_var_lib_t)
 type concert_port_t;
 corenet_port(concert_port_t)
 
-# Ports concert may connect to as its upstream origin.
+# Ports concert may connect to: its upstream origin and a naddr service.
 type concert_upstream_port_t;
 corenet_port(concert_upstream_port_t)
 
@@ -340,7 +396,7 @@ allow concert_t self:netlink_route_socket r_netlink_socket_perms;
 list_dirs_pattern(concert_t, concert_etc_t, concert_etc_t)
 read_files_pattern(concert_t, concert_etc_t, concert_etc_t)
 
-# Certificate cache, settings.json and bans.json under /var/lib/concert
+# State under /var/lib/concert
 files_search_var_lib(concert_t)
 manage_dirs_pattern(concert_t, concert_var_lib_t, concert_var_lib_t)
 manage_files_pattern(concert_t, concert_var_lib_t, concert_var_lib_t)
@@ -354,7 +410,7 @@ tunable_policy(`concert_bind_any_port',`
 	corenet_tcp_bind_all_unreserved_ports(concert_t)
 ')
 
-# Upstream origin, and the Let's Encrypt API on 443 (http_port_t)
+# Upstream origin, a naddr service, and the Let's Encrypt API on 443 (http_port_t)
 allow concert_t { concert_upstream_port_t http_port_t http_cache_port_t }:tcp_socket name_connect;
 
 # Name resolution, /etc/hosts, CA roots for Let's Encrypt and https upstreams,
@@ -513,11 +569,11 @@ ensure_user() {
 }
 
 # /var/lib/concert holds the ACME account key and certificates, and
-# /var/lib/concert/data holds settings.json and bans.json. The unit's
-# StateDirectory= also creates /var/lib/concert and bind-mounts it writable
-# past ProtectSystem=strict; doing it here as well lets restorecon label both
-# before the first start. Existing settings and bans are never touched. Must
-# run after load_policy, when the type exists.
+# /var/lib/concert/data holds settings.json, bans.json, the saved queue and
+# the history log. The unit's StateDirectory= also creates /var/lib/concert
+# and bind-mounts it writable past ProtectSystem=strict; doing it here as
+# well lets restorecon label both before the first start. Existing data is
+# never touched. Must run after load_policy, when the type exists.
 ensure_state_dir() {
     install -d -m 0700 -o "$SVC_USER" -g "$SVC_USER" "$STATE_DIR"
     install -d -m 0700 -o "$SVC_USER" -g "$SVC_USER" "$DATA_DIR"
@@ -528,7 +584,7 @@ ensure_state_dir() {
         ok "State directory $STATE_DIR"
     fi
     local f
-    for f in settings.json bans.json; do
+    for f in settings.json bans.json queue.snapshot history.jsonl; do
         [[ -f "$DATA_DIR/$f" ]] && ok "Keeping existing $DATA_DIR/$f"
     done
     return 0
@@ -558,12 +614,48 @@ check_env_file() {
     fi
 }
 
+# The NADDR_DATA a new install or a migrated env file gets.
+naddr_default_data() {
+    if [[ -n "$NADDR_DATA_WANT" ]]; then
+        echo "$NADDR_DATA_WANT"
+    elif [[ "$NADDR_DOWNLOAD" == "1" ]]; then
+        echo "$NADDR_DEFAULT_FILE"
+    fi
+}
+
+naddr_env_block() {
+    cat <<EOF
+
+# IP details in the admin portal (naddr's ess package). NADDR_DATA names an
+# IPtoASN file (plain or .gz); NADDR_ADDR a running naddr service, used when
+# NADDR_DATA is empty or cannot be loaded. Leave both empty to turn IP
+# details off. concert reloads a replaced NADDR_DATA file every NADDR_DATA_POLL.
+NADDR_DATA=$(naddr_default_data)
+NADDR_DATA_POLL=5m
+NADDR_ADDR=$NADDR_ADDR_WANT
+EOF
+}
+
+# Existing env files from before IP details get the NADDR_* block; values
+# given to this run replace what is there.
+ensure_naddr_env() {
+    if ! grep -qE '^NADDR_(DATA|ADDR)=' "$ENV_FILE"; then
+        naddr_env_block >> "$ENV_FILE"
+        ok "Added NADDR_DATA, NADDR_DATA_POLL and NADDR_ADDR to $ENV_FILE"
+        return 0
+    fi
+    [[ -n "$NADDR_DATA_GIVEN" ]] && env_set NADDR_DATA "$NADDR_DATA_WANT"
+    [[ -n "$NADDR_ADDR_GIVEN" ]] && env_set NADDR_ADDR "$NADDR_ADDR_WANT"
+    return 0
+}
+
 write_env_file() {
     install -d -m 0750 -o root -g "$SVC_USER" "$ETC"
 
     if [[ -f "$ENV_FILE" ]]; then
         migrate_env_file
         check_env_file
+        ensure_naddr_env
         ok "Keeping existing $ENV_FILE"
     else
         FIRST_INSTALL=1
@@ -594,7 +686,8 @@ CONCERT_ACCESS_LOG=true
 CONCERT_API_JSON=true
 CONCERT_SECURE_COOKIE=$secure_cookie
 
-# Portal settings and bans (settings.json, bans.json).
+# Portal settings, bans, the saved queue and the history log
+# (settings.json, bans.json, queue.snapshot, history.jsonl).
 CONCERT_DATA_DIR=$DATA_DIR
 
 # Let's Encrypt. A non-empty CONCERT_TLS_DOMAINS serves CONCERT_LISTEN over TLS.
@@ -606,6 +699,7 @@ CONCERT_TLS_STAGING=$TLS_STAGING
 CONCERT_ADMIT_SECRET=$secret
 CONCERT_PORTAL_PASS=$PORTAL_PASS
 EOF
+          naddr_env_block >> "$ENV_FILE"
         )
         chown root:root "$ENV_FILE"
         chmod 0600 "$ENV_FILE"
@@ -617,6 +711,8 @@ EOF
     LISTEN=$(env_get CONCERT_LISTEN);               LISTEN="${LISTEN:-:8080}"
     UPSTREAM=$(env_get CONCERT_UPSTREAM);           UPSTREAM="${UPSTREAM:-http://127.0.0.1:3000}"
     PORTAL_LISTEN=$(env_get CONCERT_PORTAL_LISTEN); PORTAL_LISTEN="${PORTAL_LISTEN:-127.0.0.1:8081}"
+    NADDR_PATH=$(env_get NADDR_DATA)
+    NADDR_REMOTE=$(env_get NADDR_ADDR)
 
     # Ports changed in the portal live in settings.json and win over the env
     # file, so the port labels must follow them.
@@ -650,6 +746,146 @@ record_env() {
     ( umask 077; sha256sum "$ENV_FILE" | awk '{print $1}' > "$ENV_SUM" )
 }
 
+# ── IPtoASN database (NADDR_DATA) ────────────────────────────────────
+
+# The refresh script: download to a temporary file beside the target,
+# verify it, give it to root:concert 0640 and move it into place atomically,
+# so concert never reads a partial file. restorecon keeps its label.
+write_naddr_updater() {
+    local new="$WORK/concert-naddr-update"
+    {
+        echo '#!/usr/bin/env bash'
+        echo '# concert-naddr-update — refresh the IPtoASN database concert reads (NADDR_DATA).'
+        echo '# Written by installer.sh; run daily by concert-naddr-data.timer.'
+        echo 'set -euo pipefail'
+        printf 'target=%q\nurl=%q\ngroup=%q\n' "$NADDR_PATH" "$NADDR_URL" "$SVC_USER"
+        cat <<'EOF'
+dir=$(dirname "$target")
+tmp=$(mktemp "$dir/.ip2asn.XXXXXX")
+trap 'rm -f -- "$tmp"' EXIT
+curl -fsSL --retry 3 --max-time 600 -o "$tmp" "$url"
+gzip -t "$tmp"
+chown root:"$group" "$tmp"
+chmod 0640 "$tmp"
+mv -f -- "$tmp" "$target"
+trap - EXIT
+if command -v restorecon >/dev/null 2>&1; then
+    restorecon -F "$target" || true
+fi
+echo "concert-naddr-update: refreshed $target"
+EOF
+    } > "$new"
+    install -d -m 0755 -o root -g root "$(dirname "$NADDR_UPDATER")"
+    install -m 0755 -o root -g root "$new" "$NADDR_UPDATER"
+    selinux_active && restorecon -F "$NADDR_UPDATER"
+    return 0
+}
+
+install_naddr_timer() {
+    local svc="$WORK/concert-naddr-data.service" tmr="$WORK/concert-naddr-data.timer" changed=0
+    cat > "$svc" <<EOF
+[Unit]
+Description=Refresh the IPtoASN database concert uses for IP details (NADDR_DATA)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$NADDR_UPDATER
+EOF
+    cat > "$tmr" <<'EOF'
+[Unit]
+Description=Daily refresh of the IPtoASN database for concert
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=2h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+    if ! cmp -s "$svc" "$NADDR_SERVICE"; then install -m 0644 -o root -g root "$svc" "$NADDR_SERVICE"; changed=1; fi
+    if ! cmp -s "$tmr" "$NADDR_TIMER"; then install -m 0644 -o root -g root "$tmr" "$NADDR_TIMER"; changed=1; fi
+    if (( changed )); then
+        selinux_active && restorecon -F "$NADDR_SERVICE" "$NADDR_TIMER"
+        systemctl daemon-reload
+    fi
+    systemctl enable --now --quiet concert-naddr-data.timer
+    ok "concert-naddr-data.timer refreshes $NADDR_PATH daily"
+}
+
+# Puts the IPtoASN database where NADDR_DATA says, labels it so concert_t
+# can read it, and schedules its refresh. A failed download never stops the
+# install: concert starts without IP details and loads the file as soon as
+# it appears (it retries every minute).
+install_naddr_data() {
+    if [[ -z "$NADDR_PATH" ]]; then
+        if [[ -n "$NADDR_REMOTE" ]]; then
+            ok "IP details from the naddr service at $NADDR_REMOTE"
+        else
+            warn "NADDR_DATA and NADDR_ADDR are empty in $ENV_FILE: the portal shows bare addresses"
+        fi
+        return 0
+    fi
+    [[ "$NADDR_PATH" == /* ]] || die "NADDR_DATA must be an absolute path: $NADDR_PATH"
+    case "$NADDR_PATH" in
+        /home/*|/root/*|/tmp/*|/var/tmp/*|/run/user/*)
+            die "NADDR_DATA=$NADDR_PATH is hidden from concert by ProtectHome=/PrivateTmp=; keep it under $STATE_DIR or /srv" ;;
+    esac
+
+    local dir
+    dir=$(dirname "$NADDR_PATH")
+
+    # Directories outside /var/lib/concert get their own file-context rule,
+    # so restorecon (and the refresh script) give them concert_var_lib_t.
+    if selinux_active && [[ "$dir" != "$STATE_DIR" && "$dir" != "$STATE_DIR"/* ]]; then
+        local spec="$dir(/.*)?"
+        if semanage fcontext -l | awk '{print $1}' | grep -qxF "$spec"; then
+            semanage fcontext -m -t concert_var_lib_t "$spec"
+        else
+            semanage fcontext -a -t concert_var_lib_t "$spec"
+        fi
+        state_add "fcontext $spec"
+        ok "File context $spec is concert_var_lib_t"
+    fi
+
+    install -d -m 0750 -o root -g "$SVC_USER" "$dir"
+    selinux_active && restorecon -RF "$dir"
+
+    if [[ "$NADDR_DOWNLOAD" == "1" ]]; then
+        write_naddr_updater
+        if [[ ! -s "$NADDR_PATH" || "$NADDR_REFRESH" == "1" ]]; then
+            log "Downloading the IPtoASN database to $NADDR_PATH"
+            if "$NADDR_UPDATER" >/dev/null; then
+                ok "Downloaded $NADDR_PATH ($(du -h "$NADDR_PATH" | awk '{print $1}'))"
+            else
+                warn "downloading $NADDR_URL failed; concert starts without IP details and loads $NADDR_PATH once it exists"
+                echo "  Retry now: $NADDR_UPDATER   (the daily timer retries on its own)" >&2
+            fi
+        else
+            ok "Keeping existing $NADDR_PATH (NADDR_REFRESH=1 downloads it again)"
+        fi
+        install_naddr_timer
+    elif [[ ! -s "$NADDR_PATH" ]]; then
+        warn "NADDR_DOWNLOAD=0 and $NADDR_PATH does not exist: supply it, and concert loads it within a minute"
+    fi
+
+    if [[ -f "$NADDR_PATH" ]]; then
+        chown root:"$SVC_USER" "$NADDR_PATH"
+        chmod 0640 "$NADDR_PATH"
+        if selinux_active; then
+            restorecon -F "$NADDR_PATH"
+            [[ "$(stat -c %C "$NADDR_PATH")" == *concert_var_lib_t* ]] \
+                || die "$NADDR_PATH is $(stat -c %C "$NADDR_PATH"), expected concert_var_lib_t"
+            ok "$NADDR_PATH ($(stat -c %C "$NADDR_PATH"))"
+        fi
+        runuser -u "$SVC_USER" -- test -r "$NADDR_PATH" \
+            || die "user $SVC_USER cannot read $NADDR_PATH (check the modes of $dir and its parents)"
+    fi
+    return 0
+}
+
 # ── systemd unit ─────────────────────────────────────────────────────
 
 write_unit() {
@@ -675,8 +911,9 @@ Restart=on-failure
 RestartSec=2
 LimitNOFILE=65536
 
-# Certificate cache, settings.json and bans.json. ProtectSystem=strict makes
-# the filesystem read-only; StateDirectory= is the writable carve-out.
+# Certificate cache, settings.json, bans.json, the saved queue, the history
+# log and the IPtoASN database. ProtectSystem=strict makes the filesystem
+# read-only; StateDirectory= is the writable carve-out.
 StateDirectory=concert
 StateDirectoryMode=0700
 
@@ -739,7 +976,7 @@ open_firewall() {
 RESTARTED=0
 
 # Starts concert, or restarts it when something that only takes effect at
-# startup changed. Otherwise it keeps running and the queue stays intact.
+# startup changed. Otherwise it keeps running.
 apply_service() {
     systemctl enable --quiet concert
 
@@ -752,11 +989,11 @@ apply_service() {
         [[ "$FORCE_RESTART" == "1" ]] && need_restart "FORCE_RESTART=1"
 
         if (( ${#RESTART_REASONS[@]} == 0 )); then
-            ok "Nothing changed that needs a restart; concert keeps running with its queue intact"
+            ok "Nothing changed that needs a restart; concert keeps running"
             return
         fi
         local IFS=', '
-        warn "Restarting concert (${RESTART_REASONS[*]}): the waiting queue resets; bans and portal settings are kept"
+        warn "Restarting concert (${RESTART_REASONS[*]}): the queue, bans, portal settings and history are saved and restored"
         systemctl restart concert
         RESTARTED=1
     fi
@@ -780,10 +1017,13 @@ report_avcs() {
         echo "  Inspect:  ausearch -m AVC -ts recent | audit2why" >&2
         echo "  A denied name_bind means a listen port concert may not use: label it with" >&2
         echo "  semanage port -a -t concert_port_t -p tcp <port>, or SELINUX_ANY_PORT=1" >&2
+        echo "  A denied read of NADDR_DATA means its directory lacks concert_var_lib_t: re-run the installer" >&2
         return 1
     fi
     ok "No audited SELinux denials for concert (semodule -DB reveals dontaudit rules; semodule -B restores)"
 }
+
+IPINFO_LINE=""
 
 verify() {
     (( RESTARTED )) && sleep 2
@@ -803,6 +1043,12 @@ verify() {
         else
             warn "Process $pid is running as $ctx, not concert_t"
         fi
+    fi
+
+    IPINFO_LINE=$(journalctl -u concert -n 500 --no-pager -o cat 2>/dev/null | grep 'ipinfo:' | tail -n 1 || true)
+    if [[ -n "$IPINFO_LINE" ]]; then
+        IPINFO_LINE="${IPINFO_LINE#*ipinfo: }"
+        ok "IP details: $IPINFO_LINE"
     fi
 
     local port code url domain host
@@ -849,6 +1095,8 @@ do_install() {
         warn "SELinux is disabled; installing without a policy module"
     fi
 
+    [[ "$NADDR_DOWNLOAD" == "0" || "$NADDR_DOWNLOAD" == "1" ]] || die "NADDR_DOWNLOAD must be 0 or 1"
+
     resolve_binary
     ensure_user
     write_env_file
@@ -857,6 +1105,11 @@ do_install() {
     for p in "$(port_of_addr "$LISTEN")" "$(port_of_url "$UPSTREAM")" "$(port_of_addr "$PORTAL_LISTEN")"; do
         valid_port "$p" || die "invalid port '$p' in $ENV_FILE or $DATA_DIR/settings.json"
     done
+    local naddr_port=""
+    if [[ -n "$NADDR_REMOTE" ]]; then
+        naddr_port=$(port_of_url "$(naddr_url "$NADDR_REMOTE")")
+        valid_port "$naddr_port" || die "invalid port '$naddr_port' in NADDR_ADDR=$NADDR_REMOTE"
+    fi
 
     if selinux_active; then
         load_policy
@@ -865,11 +1118,15 @@ do_install() {
             label_port "$p" concert_port_t http_port_t http_cache_port_t
         done
         label_port "$(port_of_url "$UPSTREAM")" concert_upstream_port_t http_port_t http_cache_port_t
+        if [[ -n "$naddr_port" ]]; then
+            label_port "$naddr_port" concert_upstream_port_t http_port_t http_cache_port_t
+        fi
     elif [[ -n "$ANY_PORT" ]]; then
         warn "SELINUX_ANY_PORT has no effect while SELinux is disabled"
     fi
 
     ensure_state_dir
+    install_naddr_data
     install_binary
     preflight_exec
     write_unit
@@ -881,6 +1138,14 @@ do_install() {
     local anyport="n/a (SELinux disabled)"
     selinux_active && anyport=$(getsebool "$SEBOOL" 2>/dev/null | awk '{print $NF}')
 
+    local ipdata="off (NADDR_DATA and NADDR_ADDR are empty)"
+    if [[ -n "$NADDR_PATH" ]]; then
+        ipdata="$NADDR_PATH"
+        [[ "$NADDR_DOWNLOAD" == "1" ]] && ipdata+="  (refreshed daily by concert-naddr-data.timer)"
+    elif [[ -n "$NADDR_REMOTE" ]]; then
+        ipdata="naddr service at $NADDR_REMOTE"
+    fi
+
     echo
     echo "${BOLD}concert is installed.${RESET}"
     echo "  binary:   $BIN  (from $BINARY_SRC)"
@@ -888,8 +1153,10 @@ do_install() {
     echo "  portal:   $PORTAL_LISTEN"
     echo "  ports:    $(listen_ports | paste -sd, -) may be listened on${EXTRA_PORTS:+ (extra: $EXTRA_PORTS)}"
     echo "  any port: $SEBOOL is $anyport"
+    echo "  ip data:  $ipdata"
+    [[ -n "$IPINFO_LINE" ]] && echo "            concert says: $IPINFO_LINE"
     echo "  config:   $ENV_FILE  (portal changes: $DATA_DIR/settings.json)"
-    echo "  data:     $DATA_DIR  (settings.json, bans.json)"
+    echo "  data:     $DATA_DIR  (settings.json, bans.json, queue.snapshot, history.jsonl)"
     echo "  state:    $STATE_DIR"
     echo "  logs:     journalctl -u concert -f"
     if (( ! RESTARTED )); then
@@ -907,7 +1174,8 @@ do_install() {
 do_uninstall() {
     log "Stopping concert"
     systemctl disable --now concert 2>/dev/null || true
-    rm -f -- "$UNIT"
+    systemctl disable --now concert-naddr-data.timer 2>/dev/null || true
+    rm -f -- "$UNIT" "$NADDR_SERVICE" "$NADDR_TIMER" "$NADDR_UPDATER"
     systemctl daemon-reload
 
     if [[ -f "$STATE" ]]; then
@@ -916,6 +1184,9 @@ do_uninstall() {
                 port)
                     selinux_active && semanage port -d -p tcp "$port" 2>/dev/null \
                         && ok "Removed label on tcp/$port" ;;
+                fcontext)
+                    selinux_active && semanage fcontext -d "$port" 2>/dev/null \
+                        && ok "Removed file context rule $port" ;;
                 fw)
                     systemctl is-active --quiet firewalld \
                         && firewall-cmd --quiet --permanent --remove-port="$port/tcp" \
@@ -934,14 +1205,14 @@ do_uninstall() {
     fi
 
     rm -f -- "$BIN"
-    ok "Removed $BIN"
+    ok "Removed $BIN and the IPtoASN refresh timer"
 
     if [[ "$PURGE" == "1" ]]; then
         rm -rf -- "$ETC" "$STATE_DIR"
         getent passwd "$SVC_USER" >/dev/null && userdel "$SVC_USER"
-        ok "Purged $ETC, $STATE_DIR (including settings and bans) and user $SVC_USER"
+        ok "Purged $ETC, $STATE_DIR (settings, bans, history and the IPtoASN database) and user $SVC_USER"
     else
-        echo "  Kept $ETC, $STATE_DIR (settings and bans) and user $SVC_USER (PURGE=1 removes them)"
+        echo "  Kept $ETC, $STATE_DIR (settings, bans, history, the IPtoASN database) and user $SVC_USER (PURGE=1 removes them)"
     fi
 }
 

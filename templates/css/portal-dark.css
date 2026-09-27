@@ -28,6 +28,7 @@ body {
 }
 
 .form-control,
+.form-select,
 .input-group-text {
     background-color: #0f141a;
     border-color: #2a313c;
@@ -43,4 +44,21 @@ body {
 
 footer {
     background-color: #0e1116;
+}
+
+.move-chip-leave {
+    background-color: #4b5563;
+}
+
+.history-ban {
+    background-color: #12161c;
+}
+.ipcell .text-body-secondary {
+    --bs-secondary-color: #0e1116;
+}
+.history-toggle button.text-body {
+    --bs-body-color-rgb: #0e1116;
+}
+.history-detail .ipcell .text-body-secondary {
+    --bs-secondary-color: #ecf6ff;
 }
