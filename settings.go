@@ -130,9 +130,12 @@ var settingDefs = []settingDef{
 		def: true, usage: "answer queued non-HTML clients with JSON 429 instead of the HTML page",
 		ptr: func(c *config) any { return &c.apiJSON }},
 	{key: "html", flag: "html", env: "CONCERT_HTML_FILE", group: groupRoom, label: "Custom waiting room HTML",
-		def: "", usage: "custom waiting room HTML file, empty for room's page (must handle cookies_required and room_probe)",
+		def: "", usage: "custom waiting room HTML file, empty for Concert's built-in page (must handle cookies_required and room_probe)",
 		ptr: func(c *config) any { return &c.htmlFile }},
 
+	// ---- Fast lane ----
+	{key: "fastlane_config", flag: "fastlane-config", env: "CONCERT_FASTLANE_CONFIG", group: groupSkip, label: "x402 / NFT configuration file", restart: true,
+		def: "", usage: "fast lane JSON (x402 offers and NFT rules; see docs/FASTLANE.md), empty turns wallet access off (flag or CONCERT_FASTLANE_CONFIG only; takes a restart)", ptr: func(c *config) any { return &c.fastlaneFile }},
 	// ---- Skip the line ----
 	{key: "rate", flag: "rate", env: "CONCERT_RATE", group: groupSkip, label: "Price per position",
 		def: 0.0, usage: "base cost per queue position (0 with -surge 0 turns paid skip-the-line off)",
