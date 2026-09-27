@@ -27,6 +27,30 @@
         if(pending&&(pending.header!==header||nonceOf(pending.session)!==nonceOf(session)))throw Error('A previous payment must be reconciled first. Retry its identical signed payload or contact the merchant.');
         pending={header,session};sessionStorage.setItem('concert.pending-payment',JSON.stringify(pending));$('payment-payload').value=header;$('retry-payment').hidden=false;
         say('Verifying your payment and waiting for settlement…');const d=await post('/payment',{}, {'PAYMENT-SIGNATURE':header});forgetPending();if(!d.eligible)throw Error('This payment’s access period has expired.');await status();}
+    // Solana wallets through the Wallet Standard (Phantom, Solflare, Backpack
+    // and others): the app half of its registration handshake, plus a decoder
+    // that checks the prepared transfer before and after the wallet signs it.
+    // No Solana SDK is loaded.
+    const standard=[];{const api={register:(...w)=>{standard.push(...w);return()=>{};}};window.addEventListener('wallet-standard:register-wallet',e=>{try{e.detail(api);}catch{}});try{window.dispatchEvent(new CustomEvent('wallet-standard:app-ready',{detail:api}));}catch{}}
+    const solanaChains={'5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp':'solana:mainnet',EtWTRABZaYq6iMfeYKouRu166VU2xqa1:'solana:devnet','4uhcVJyU9pJkvQyS88uRDiswHXSCkY3z':'solana:testnet'};
+    function solanaWallet(network,feature){const chain=solanaChains[network.split(':')[1]];const w=standard.find(x=>x.chains?.includes(chain)&&x.features?.['standard:connect']&&x.features[feature]);return w?{w,chain}:null;}
+    async function connectAccount({w,chain}){const {accounts}=await w.features['standard:connect'].connect();const account=accounts.find(x=>!x.chains||x.chains.includes(chain));if(!account)throw Error('The wallet shared no account for this network.');return account;}
+    const B58='123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+    const b58=bytes=>{let n=0n;for(const b of bytes)n=n*256n+BigInt(b);let s='';while(n>0n){s=B58[Number(n%58n)]+s;n/=58n;}for(const b of bytes){if(b)break;s='1'+s;}return s;};
+    const b64=bytes=>{let s='';for(const b of bytes)s+=String.fromCharCode(b);return btoa(s);},unb64=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
+    // A legacy transaction with one signature slot whose message holds exactly
+    // [payer, payee, System Program] and one System Program transfer.
+    function transferOf(tx){
+        let i=0;const bad=()=>{throw Error('Unexpected transaction instructions.');};
+        const u8=()=>i<tx.length?tx[i++]:bad(),take=n=>i+n<=tx.length?tx.subarray(i,i+=n):bad();
+        const len=()=>{let n=0;for(let s=0;s<21;s+=7){const b=u8();n|=(b&127)<<s;if(!(b&128))return n;}return bad();};
+        const sigs=len();take(64*sigs);const message=tx.subarray(i);
+        const header=[u8(),u8(),u8()].join(),keys=[];if(sigs!==1||header!=='1,0,1')bad();
+        for(let k=len();k>0;k--)keys.push(take(32));take(32);
+        if(keys.length!==3||keys[2].some(b=>b)||len()!==1||u8()!==2||len()!==2||u8()!==0||u8()!==1||len()!==12)bad();
+        const data=take(12),view=new DataView(data.buffer,data.byteOffset,12);if(view.getUint32(0,true)!==2||i!==tx.length)bad();
+        return {from:b58(keys[0]),to:b58(keys[1]),lamports:view.getBigUint64(4,true).toString(),message};
+    }
     const adapter=network=>window.concertWallets?.[network]||window.concertWallets?.[network.split(':')[0]];
     async function createChallenge(){const c=config.collections[Number($('collection').value)];if(!c)throw Error('No collection is enabled.');const d=await post('/nft/challenge',{rule:c.id,address:$('wallet-address').value.trim(),token_id:$('token-id').value.trim()});nonce=d.nonce;$('challenge-message').value=d.message;return {d,c};}
     $('offer').addEventListener('change',price);$('consent').addEventListener('change',availability);
@@ -34,25 +58,20 @@
     $('submit-payment').addEventListener('click',()=>run(()=>settle($('payment-payload').value.trim())));
     $('retry-payment').addEventListener('click',()=>run(()=>settle(pending.header)));
     $('pay').addEventListener('click',()=>run(async()=>{const o=config.offers[Number($('offer').value)];let a=adapter(o.requirements.network);
-        if(!a&&o.requirements.network.startsWith('solana:')){
-            const provider=window.phantom?.solana||window.solflare||window.solana;
-            if(provider?.connect&&provider?.signTransaction)a={createPaymentPayload:async({paymentRequired,requirements})=>{
-                    await provider.connect();const address=provider.publicKey.toString();
-                    const prepared=await post('/solana/prepare',{network:requirements.network,address});
-                    const tx=solanaWeb3.Transaction.from(Uint8Array.from(atob(prepared.transaction),c=>c.charCodeAt(0)));
-                    if(tx.instructions.length!==1)throw Error('Unexpected transaction instructions.');
-                    const transfer=solanaWeb3.SystemInstruction.decodeTransfer(tx.instructions[0]);
-                    if(transfer.fromPubkey.toString()!==address||transfer.toPubkey.toString()!==requirements.payTo||String(transfer.lamports)!==requirements.amount)throw Error('Prepared transaction does not match the displayed price.');
-                    const signed=await provider.signTransaction(tx);
-                    return {x402Version:2,resource:paymentRequired.resource,accepted:requirements,payload:{transaction:btoa(String.fromCharCode(...signed.serialize()))}};
-                }};
-        }
+        if(!a&&o.requirements.network.startsWith('solana:')){const s=solanaWallet(o.requirements.network,'solana:signTransaction');if(s)a={createPaymentPayload:async({paymentRequired,requirements})=>{
+                const account=await connectAccount(s);
+                const prepared=unb64((await post('/solana/prepare',{network:requirements.network,address:account.address})).transaction),t=transferOf(prepared);
+                if(t.from!==account.address||t.to!==requirements.payTo||t.lamports!==requirements.amount)throw Error('Prepared transaction does not match the displayed price.');
+                const [out]=await s.w.features['solana:signTransaction'].signTransaction({account,transaction:prepared,chain:s.chain});
+                const signed=new Uint8Array(out.signedTransaction);if(b64(transferOf(signed).message)!==b64(t.message))throw Error('The wallet changed the prepared transaction.');
+                return {x402Version:2,resource:paymentRequired.resource,accepted:requirements,payload:{transaction:b64(signed)}};
+            }};}
         if(!a?.createPaymentPayload)throw Error('No compatible browser wallet adapter is installed for this network. Use the Concert agent SDK or a signed x402 payment below.');const {r,data}=await send('/payment',{});if(r.ok){await status();return;}if(r.status!==402)throw Error(data.error);const p=await a.createPaymentPayload({paymentRequired:data,requirements:o.requirements,session});await settle(btoa(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(p)))));}));
     $('challenge').addEventListener('click',()=>run(async()=>{await createChallenge();say('Sign the displayed message with your wallet, then submit its signature.');}));
     $('submit-proof').addEventListener('click',()=>run(async()=>{await post('/nft/verify',{nonce,signature:$('signature').value.trim(),public_key:$('public-key').value.trim()});await status();}));
     $('prove').addEventListener('click',()=>run(async()=>{
         const c=config.collections[Number($('collection').value)];if(!c)throw Error('No collection is enabled.');let a=adapter(c.network);
-        if(!a&&c.network.startsWith('solana:')){const p=window.phantom?.solana||window.solflare||window.solana;if(p?.connect&&p?.signMessage)a={connect:async()=>{await p.connect();return p.publicKey.toString();},signMessage:async(message)=>{const x=await p.signMessage(new TextEncoder().encode(message),'utf8');return {signature:btoa(String.fromCharCode(...(x.signature||x)))};}};}
+        if(!a&&c.network.startsWith('solana:')){const s=solanaWallet(c.network,'solana:signMessage');let account;if(s)a={connect:async()=>(account=await connectAccount(s)).address,signMessage:async message=>{const [x]=await s.w.features['solana:signMessage'].signMessage({account,message:new TextEncoder().encode(message)});return {signature:b64(new Uint8Array(x.signature))};}};}
         if(!a?.signMessage)throw Error('Connect a compatible wallet adapter, or use the signed-message form below.');if(a.connect)$('wallet-address').value=await a.connect();const {d}=await createChallenge();const proof=await a.signMessage(d.message,c.network);await post('/nft/verify',{nonce:d.nonce,signature:proof.signature,public_key:proof.public_key||''});await status();
     }));
     // Keep the existing FIFO ticket alive while reviewing wallet options. Never
