@@ -4,13 +4,13 @@
   <div class="col-sm-9 col-md-6 col-lg-4">
     <div class="card stat-card mt-5">
       <div class="card-body p-4">
-        <h1 class="h4 mb-1"><i class="bi bi-shield-lock"></i> Portal sign in</h1>
+        <h1 class="h4 mb-1"><i aria-hidden="true" class="bi bi-shield-lock"></i> Portal sign in</h1>
         <p class="text-body-secondary small mb-4">Enter the portal pass to manage this concert.</p>
-        {{if .Error}}<div class="alert alert-danger py-2" role="alert"><i class="bi bi-exclamation-triangle"></i> {{.Error}}</div>{{end}}
+        {{if .Error}}<div class="alert alert-danger py-2" role="alert"><i aria-hidden="true" class="bi bi-exclamation-triangle"></i> {{.Error}}</div>{{end}}
         <form method="post" action="/login" autocomplete="off">
           <label for="pass" class="form-label">Portal pass</label>
           <input type="password" class="form-control mb-3" id="pass" name="pass" required autofocus>
-          <button type="submit" class="btn btn-primary w-100"><i class="bi bi-box-arrow-in-right"></i> Sign in</button>
+          <button type="submit" class="btn btn-primary w-100"><i aria-hidden="true" class="bi bi-box-arrow-in-right"></i> Sign in</button>
         </form>
       </div>
     </div>
@@ -18,46 +18,60 @@
 </div>
 {{else}}
 <div id="portal-app">
+  <section class="concert-hero">
+    <div><p class="concert-eyebrow">CONCERT / TRAFFIC OPERATIONS</p><h1>Keep the rhythm.<br><span>Control the room.</span></h1><p>Your queue, your rules. One clear view of every lane.</p></div>
+    <div class="hero-orbit" aria-hidden="true"><span></span><i></i><b></b></div>
+  </section>
   <div class="alert alert-info d-none" id="portal-moved" role="alert"></div>
 
   <ul class="nav nav-tabs mb-4" role="tablist">
     <li class="nav-item" role="presentation">
       <button class="nav-link active" id="tab-overview-btn" data-bs-toggle="tab" data-bs-target="#tab-overview" type="button" role="tab" aria-controls="tab-overview" aria-selected="true">
-        <i class="bi bi-speedometer2"></i> Overview
+        <i aria-hidden="true" class="bi bi-speedometer2"></i> Overview
       </button>
     </li>
     <li class="nav-item" role="presentation">
       <button class="nav-link" id="tab-queue-btn" data-bs-toggle="tab" data-bs-target="#tab-queue" type="button" role="tab" aria-controls="tab-queue" aria-selected="false">
-        <i class="bi bi-people"></i> Queue <span class="badge rounded-pill text-bg-secondary" id="queue-count">0</span>
+        <i aria-hidden="true" class="bi bi-people"></i> Queue <span class="badge rounded-pill text-bg-secondary" id="queue-count">0</span>
       </button>
     </li>
     <li class="nav-item" role="presentation">
       <button class="nav-link" id="tab-bans-btn" data-bs-toggle="tab" data-bs-target="#tab-bans" type="button" role="tab" aria-controls="tab-bans" aria-selected="false">
-        <i class="bi bi-slash-circle"></i> Bans <span class="badge rounded-pill text-bg-secondary" id="ban-count">0</span>
+        <i aria-hidden="true" class="bi bi-slash-circle"></i> Bans <span class="badge rounded-pill text-bg-secondary" id="ban-count">0</span>
       </button>
     </li>
     <li class="nav-item" role="presentation">
       <button class="nav-link" id="tab-visitors-btn" data-bs-toggle="tab" data-bs-target="#tab-visitors" type="button" role="tab" aria-controls="tab-visitors" aria-selected="false">
-        <i class="bi bi-person-lines-fill"></i> Visitors <span class="badge rounded-pill text-bg-secondary" id="visitors-count">0</span>
+        <i aria-hidden="true" class="bi bi-person-lines-fill"></i> Visitors <span class="badge rounded-pill text-bg-secondary" id="visitors-count">0</span>
       </button>
     </li>
     <li class="nav-item" role="presentation">
       <button class="nav-link" id="tab-banlog-btn" data-bs-toggle="tab" data-bs-target="#tab-banlog" type="button" role="tab" aria-controls="tab-banlog" aria-selected="false">
-        <i class="bi bi-shield-exclamation"></i> Ban log
+        <i aria-hidden="true" class="bi bi-shield-exclamation"></i> Ban log
       </button>
     </li>
     <li class="nav-item" role="presentation">
+      <button class="nav-link" id="tab-fastlane-btn" data-bs-toggle="tab" data-bs-target="#tab-fastlane" type="button" role="tab" aria-controls="tab-fastlane" aria-selected="false"><i aria-hidden="true" class="bi bi-lightning-charge"></i> Fast lane</button>
+    </li>
+    <li class="nav-item" role="presentation">
       <button class="nav-link" id="tab-settings-btn" data-bs-toggle="tab" data-bs-target="#tab-settings" type="button" role="tab" aria-controls="tab-settings" aria-selected="false">
-        <i class="bi bi-sliders"></i> Settings
+        <i aria-hidden="true" class="bi bi-sliders"></i> Settings
       </button>
     </li>
     <li class="ms-auto align-self-center small text-body-secondary d-flex flex-wrap gap-3">
-      <span title="Where IP details come from"><i class="bi bi-globe2"></i> <span class="text-truncate d-inline-block ipinfo-state align-bottom">{{.IPInfo}}</span></span>
-      <span><i class="bi bi-arrow-repeat"></i> <span id="updated-at">loading…</span></span>
+      <span title="Where IP details come from"><i aria-hidden="true" class="bi bi-globe2"></i> <span class="text-truncate d-inline-block ipinfo-state align-bottom">{{.IPInfo}}</span></span>
+      <span><i aria-hidden="true" class="bi bi-arrow-repeat"></i> <span id="updated-at">loading…</span></span>
     </li>
   </ul>
 
   <div class="tab-content">
+    <div class="tab-pane fade" id="tab-fastlane" role="tabpanel" aria-labelledby="tab-fastlane-btn" tabindex="0">
+      <div class="d-flex justify-content-between align-items-center mb-3"><div><p class="concert-eyebrow">X402 + COLLECTION ACCESS</p><h2 class="h3">A clearer path through.</h2></div><button class="btn btn-outline-info" id="fastlane-refresh"><i aria-hidden="true" class="bi bi-arrow-repeat"></i> Refresh</button></div>
+      <div id="fastlane-state" class="alert alert-info" role="status">Loading fast-lane configuration…</div>
+      <div class="row g-3 mb-4" id="fastlane-stats"></div>
+      <div class="row g-4"><section class="col-lg-6"><h3 class="h5">Accepted payments</h3><div id="fastlane-offers"></div></section><section class="col-lg-6"><h3 class="h5">NFT collection rules</h3><div id="fastlane-collections"></div></section></div>
+      <div class="card mt-4"><div class="card-body"><h3 class="h6">Configure access</h3><p class="small text-body-secondary mb-0">Set CONCERT_FASTLANE_CONFIG in the environment, then edit its payment offers and collection rules and restart Concert and the chain gateway together. Existing receipts retain their expiry. The setup guide describes each chain’s collection identifier and supported wallet proof formats.</p></div></div>
+    </div>
 
     <!-- Overview -->
     <div class="tab-pane fade show active" id="tab-overview" role="tabpanel" aria-labelledby="tab-overview-btn" tabindex="0">
@@ -66,7 +80,7 @@
           <div class="card stat-card h-100"><div class="card-body">
             <div class="d-flex justify-content-between align-items-start">
               <div><div class="text-body-secondary small">Page slots in use</div><div class="stat-value" id="stat-occupancy">–</div></div>
-              <i class="bi bi-door-open stat-icon text-primary"></i>
+              <i aria-hidden="true" class="bi bi-door-open stat-icon text-primary"></i>
             </div>
             <div class="progress mt-3" role="progressbar" aria-label="Page slot utilization" aria-valuemin="0" aria-valuemax="100">
               <div class="progress-bar" id="bar-occupancy"></div>
@@ -77,7 +91,7 @@
           <div class="card stat-card h-100"><div class="card-body">
             <div class="d-flex justify-content-between align-items-start">
               <div><div class="text-body-secondary small">Waiting in line</div><div class="stat-value" id="stat-queue">–</div></div>
-              <i class="bi bi-hourglass-split stat-icon text-warning"></i>
+              <i aria-hidden="true" class="bi bi-hourglass-split stat-icon text-warning"></i>
             </div>
             <div class="small text-body-secondary mt-3">Ticket depth <span class="fw-semibold" id="stat-queue-depth">–</span> · max <span class="fw-semibold" data-stat="max_queue_depth">–</span></div>
           </div></div>
@@ -86,7 +100,7 @@
           <div class="card stat-card h-100"><div class="card-body">
             <div class="d-flex justify-content-between align-items-start">
               <div><div class="text-body-secondary small">Asset slots in use</div><div class="stat-value" id="stat-assets">–</div></div>
-              <i class="bi bi-images stat-icon text-info"></i>
+              <i aria-hidden="true" class="bi bi-images stat-icon text-info"></i>
             </div>
             <div class="progress mt-3" role="progressbar" aria-label="Asset slot utilization" aria-valuemin="0" aria-valuemax="100">
               <div class="progress-bar" id="bar-assets"></div>
@@ -97,7 +111,7 @@
           <div class="card stat-card h-100"><div class="card-body">
             <div class="d-flex justify-content-between align-items-start">
               <div><div class="text-body-secondary small">Active bans</div><div class="stat-value" id="stat-bans">–</div></div>
-              <i class="bi bi-shield-exclamation stat-icon text-danger"></i>
+              <i aria-hidden="true" class="bi bi-shield-exclamation stat-icon text-danger"></i>
             </div>
             <div class="small text-body-secondary mt-3">Skip price <span class="fw-semibold" id="stat-price">–</span></div>
           </div></div>
@@ -107,7 +121,7 @@
       <div class="row g-3">
         <div class="col-lg-4">
           <div class="card stat-card h-100"><div class="card-body">
-            <h2 class="h6 mb-3"><i class="bi bi-people"></i> Waiting room</h2>
+            <h2 class="h6 mb-3"><i aria-hidden="true" class="bi bi-people"></i> Waiting room</h2>
             <dl class="row stat-list mb-0">
               <dt class="col-8">Visitors queued (total)</dt><dd class="col-4 text-end" data-stat="queued_total">–</dd>
               <dt class="col-8">Moved to the front</dt><dd class="col-4 text-end" data-stat="promoted_total">–</dd>
@@ -120,7 +134,7 @@
         </div>
         <div class="col-lg-4">
           <div class="card stat-card h-100"><div class="card-body">
-            <h2 class="h6 mb-3"><i class="bi bi-images"></i> Assets and streams</h2>
+            <h2 class="h6 mb-3"><i aria-hidden="true" class="bi bi-images"></i> Assets and streams</h2>
             <dl class="row stat-list mb-0">
               <dt class="col-8">Assets served</dt><dd class="col-4 text-end" data-stat="asset_served_total">–</dd>
               <dt class="col-8">Assets denied (no pass)</dt><dd class="col-4 text-end" data-stat="asset_denied_total">–</dd>
@@ -135,7 +149,7 @@
         </div>
         <div class="col-lg-4">
           <div class="card stat-card h-100"><div class="card-body">
-            <h2 class="h6 mb-3"><i class="bi bi-shield-exclamation"></i> Abuse registry</h2>
+            <h2 class="h6 mb-3"><i aria-hidden="true" class="bi bi-shield-exclamation"></i> Abuse registry</h2>
             <dl class="row stat-list mb-0">
               <dt class="col-8">Strikes recorded</dt><dd class="col-4 text-end" data-stat="abuse_strikes_total">–</dd>
               <dt class="col-8">Bans issued</dt><dd class="col-4 text-end" data-stat="abuse_bans_total">–</dd>
@@ -150,7 +164,7 @@
         <!-- Priority: wraps onto its own line inside the same row. -->
         <div class="col-lg-4">
           <div class="card stat-card h-100"><div class="card-body">
-            <h2 class="h6 mb-3"><i class="bi bi-stars"></i> Priority lane</h2>
+            <h2 class="h6 mb-3"><i aria-hidden="true" class="bi bi-stars"></i> Priority lane</h2>
             <dl class="row stat-list mb-0">
               <dt class="col-8">Lane slots in use</dt><dd class="col-4 text-end" data-stat="priority_lane_in_flight">–</dd>
               <dt class="col-8">Lane slots</dt><dd class="col-4 text-end" data-stat="priority_lane_cap">–</dd>
@@ -163,7 +177,7 @@
         </div>
         <div class="col-lg-4">
           <div class="card stat-card h-100"><div class="card-body">
-            <h2 class="h6 mb-3"><i class="bi bi-patch-check"></i> Grants and forms</h2>
+            <h2 class="h6 mb-3"><i aria-hidden="true" class="bi bi-patch-check"></i> Grants and forms</h2>
             <dl class="row stat-list mb-0">
               <dt class="col-8">Grants issued by the app</dt><dd class="col-4 text-end" data-stat="priority_grants_total">–</dd>
               <dt class="col-8">Grants cleared (guest)</dt><dd class="col-4 text-end" data-stat="priority_grants_cleared_total">–</dd>
@@ -175,7 +189,7 @@
         </div>
         <div class="col-lg-4">
           <div class="card stat-card h-100"><div class="card-body">
-            <h2 class="h6 mb-3"><i class="bi bi-bar-chart-steps"></i> Page requests by rank</h2>
+            <h2 class="h6 mb-3"><i aria-hidden="true" class="bi bi-bar-chart-steps"></i> Page requests by rank</h2>
             <dl class="row stat-list mb-0">
               <dt class="col-8">Staff</dt><dd class="col-4 text-end" data-stat="priority_requests_staff">–</dd>
               <dt class="col-8">Checkout</dt><dd class="col-4 text-end" data-stat="priority_requests_checkout">–</dd>
@@ -194,14 +208,14 @@
     <div class="tab-pane fade" id="tab-queue" role="tabpanel" aria-labelledby="tab-queue-btn" tabindex="0">
       <div class="d-flex flex-wrap align-items-center gap-3 mb-3">
         <div class="input-group input-group-sm filter-input">
-          <span class="input-group-text"><i class="bi bi-search"></i></span>
+          <span class="input-group-text"><i aria-hidden="true" class="bi bi-search"></i></span>
           <input type="search" class="form-control" id="queue-filter" placeholder="Filter by address, path or browser" aria-label="Filter the queue">
         </div>
         <div class="form-check form-switch mb-0">
           <input class="form-check-input" type="checkbox" role="switch" id="queue-live" checked>
           <label class="form-check-label small" for="queue-live">Live</label>
         </div>
-        <button type="button" class="btn btn-sm btn-outline-secondary ms-auto" id="queue-refresh"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
+        <button type="button" class="btn btn-sm btn-outline-secondary ms-auto" id="queue-refresh"><i aria-hidden="true" class="bi bi-arrow-clockwise"></i> Refresh</button>
       </div>
       <div class="card stat-card">
         <div class="table-responsive">
@@ -228,7 +242,7 @@
         </div>
       </div>
       <p class="small text-body-secondary mt-3 mb-0">
-        <i class="bi bi-info-circle"></i> Positions come straight from the waiting room; the table pages through the front of the line.
+        <i aria-hidden="true" class="bi bi-info-circle"></i> Positions come straight from the waiting room; the table pages through the front of the line.
         Removing or banning a visitor takes them out of the line at once; banning also drops everyone else waiting from the same address or range.
         Live updates pause while the pointer is over the table.
       </p>
@@ -237,18 +251,18 @@
     <!-- Bans -->
     <div class="tab-pane fade" id="tab-bans" role="tabpanel" aria-labelledby="tab-bans-btn" tabindex="0">
       <div class="alert alert-secondary d-none" id="bans-disabled" role="alert">
-        <i class="bi bi-info-circle"></i> The abuse registry is off (<code>abuse</code> in Settings). Existing bans are kept and apply again when it is turned back on.
+        <i aria-hidden="true" class="bi bi-info-circle"></i> The abuse registry is off (<code>abuse</code> in Settings). Existing bans are kept and apply again when it is turned back on.
       </div>
       <div class="alert alert-warning d-none" id="bans-not-persisted" role="alert">
-        <i class="bi bi-exclamation-triangle"></i> <code>-data-dir</code> is empty, so bans — including permanent ones — are lost when concert restarts.
+        <i aria-hidden="true" class="bi bi-exclamation-triangle"></i> <code>-data-dir</code> is empty, so bans — including permanent ones — are lost when concert restarts.
       </div>
       <div class="d-flex flex-wrap align-items-center gap-3 mb-3">
-        <button type="button" class="btn btn-sm btn-danger" id="ban-new"><i class="bi bi-plus-circle"></i> Ban a client or range</button>
+        <button type="button" class="btn btn-sm btn-danger" id="ban-new"><i aria-hidden="true" class="bi bi-plus-circle"></i> Ban a client or range</button>
         <div class="form-check form-switch mb-0">
           <input class="form-check-input" type="checkbox" role="switch" id="bans-live" checked>
           <label class="form-check-label small" for="bans-live">Live</label>
         </div>
-        <button type="button" class="btn btn-sm btn-outline-secondary ms-auto" id="bans-refresh"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
+        <button type="button" class="btn btn-sm btn-outline-secondary ms-auto" id="bans-refresh"><i aria-hidden="true" class="bi bi-arrow-clockwise"></i> Refresh</button>
       </div>
       <div class="card stat-card">
         <div class="table-responsive">
@@ -277,7 +291,7 @@
     <div class="tab-pane fade" id="tab-visitors" role="tabpanel" aria-labelledby="tab-visitors-btn" tabindex="0">
       <div class="d-flex flex-wrap align-items-center gap-3 mb-3">
         <div class="input-group input-group-sm filter-input">
-          <span class="input-group-text"><i class="bi bi-search"></i></span>
+          <span class="input-group-text"><i aria-hidden="true" class="bi bi-search"></i></span>
           <input type="search" class="form-control" id="visitors-filter" placeholder="Filter by address or path, e.g. /.env" aria-label="Filter visitors">
         </div>
         <div class="form-check form-switch mb-0">
@@ -288,7 +302,7 @@
           <input class="form-check-input" type="checkbox" role="switch" id="visitors-live" checked>
           <label class="form-check-label small" for="visitors-live">Live</label>
         </div>
-        <button type="button" class="btn btn-sm btn-outline-secondary ms-auto" id="visitors-refresh"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
+        <button type="button" class="btn btn-sm btn-outline-secondary ms-auto" id="visitors-refresh"><i aria-hidden="true" class="bi bi-arrow-clockwise"></i> Refresh</button>
       </div>
       <div class="card stat-card">
         <div class="table-responsive">
@@ -315,7 +329,7 @@
           <div class="ms-auto" id="visitors-pager"></div>
         </div>
       </div>
-      <p class="small text-body-secondary mt-3 mb-0"><i class="bi bi-info-circle"></i> {{.HistoryNote}}
+      <p class="small text-body-secondary mt-3 mb-0"><i aria-hidden="true" class="bi bi-info-circle"></i> {{.HistoryNote}}
         Rows are tinted red for a permanent ban, amber for a temporary one, green when the last response was 2xx and blue otherwise.
         Hover the 4, 6 and 8 badges for an address in each form; click one to copy it.</p>
     </div>
@@ -324,14 +338,14 @@
     <div class="tab-pane fade" id="tab-banlog" role="tabpanel" aria-labelledby="tab-banlog-btn" tabindex="0">
       <div class="d-flex flex-wrap align-items-center gap-3 mb-3">
         <div class="input-group input-group-sm filter-input">
-          <span class="input-group-text"><i class="bi bi-search"></i></span>
+          <span class="input-group-text"><i aria-hidden="true" class="bi bi-search"></i></span>
           <input type="search" class="form-control" id="banlog-filter" placeholder="Filter by address or path" aria-label="Filter the ban log">
         </div>
         <div class="form-check form-switch mb-0">
           <input class="form-check-input" type="checkbox" role="switch" id="banlog-live" checked>
           <label class="form-check-label small" for="banlog-live">Live</label>
         </div>
-        <button type="button" class="btn btn-sm btn-outline-secondary ms-auto" id="banlog-refresh"><i class="bi bi-arrow-clockwise"></i> Refresh</button>
+        <button type="button" class="btn btn-sm btn-outline-secondary ms-auto" id="banlog-refresh"><i aria-hidden="true" class="bi bi-arrow-clockwise"></i> Refresh</button>
       </div>
       <div class="card stat-card">
         <div class="card-body pb-2">
@@ -365,25 +379,25 @@
     <!-- Settings -->
     <div class="tab-pane fade" id="tab-settings" role="tabpanel" aria-labelledby="tab-settings-btn" tabindex="0">
       <div class="alert alert-warning d-none" id="settings-unsaved" role="alert">
-        <i class="bi bi-exclamation-triangle"></i> <code>-data-dir</code> is empty: changes apply immediately but are lost when concert restarts.
+        <i aria-hidden="true" class="bi bi-exclamation-triangle"></i> <code>-data-dir</code> is empty: changes apply immediately but are lost when concert restarts.
       </div>
       <div class="row g-3">
         <div class="col-xl-8">
           <form id="settings-form" novalidate>
             <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
               <div class="input-group input-group-sm filter-input">
-                <span class="input-group-text"><i class="bi bi-search"></i></span>
+                <span class="input-group-text"><i aria-hidden="true" class="bi bi-search"></i></span>
                 <input type="search" class="form-control" id="settings-filter" placeholder="Filter by name, flag or variable" aria-label="Filter settings">
               </div>
-              <button type="button" class="btn btn-sm btn-outline-secondary ms-auto" id="settings-discard" disabled><i class="bi bi-x-circle"></i> Discard</button>
-              <button type="submit" class="btn btn-sm btn-primary" id="settings-apply" disabled><i class="bi bi-check2-circle"></i> <span id="settings-apply-label">Save changes</span></button>
+              <button type="button" class="btn btn-sm btn-outline-secondary ms-auto" id="settings-discard" disabled><i aria-hidden="true" class="bi bi-x-circle"></i> Discard</button>
+              <button type="submit" class="btn btn-sm btn-primary" id="settings-apply" disabled><i aria-hidden="true" class="bi bi-check2-circle"></i> <span id="settings-apply-label">Save changes</span></button>
             </div>
             <div id="settings-groups" class="d-grid gap-3"></div>
           </form>
         </div>
         <div class="col-xl-4">
           <div class="card stat-card mb-3"><div class="card-body">
-            <h2 class="h6 mb-3"><i class="bi bi-layers"></i> Where settings come from</h2>
+            <h2 class="h6 mb-3"><i aria-hidden="true" class="bi bi-layers"></i> Where settings come from</h2>
             <p class="small mb-2">Each setting uses the first of these that has a value:</p>
             <ol class="small mb-3 ps-3">
               <li><span class="badge text-bg-success">saved</span> changed here, stored in settings.json</li>
@@ -399,7 +413,7 @@
             <p class="small mb-0 text-break">File: <span class="font-monospace" id="settings-file">–</span></p>
           </div></div>
           <div class="card stat-card"><div class="card-body">
-            <h2 class="h6 mb-3"><i class="bi bi-lock"></i> Environment only, and listeners</h2>
+            <h2 class="h6 mb-3"><i aria-hidden="true" class="bi bi-lock"></i> Environment only, and listeners</h2>
             <dl class="row small mb-0" id="settings-fixed"></dl>
           </div></div>
         </div>
@@ -446,7 +460,7 @@
       </div>
       <div class="modal-footer">
         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-        <button type="submit" class="btn btn-danger"><i class="bi bi-slash-circle"></i> <span id="ban-submit-label">Ban</span></button>
+        <button type="submit" class="btn btn-danger"><i aria-hidden="true" class="bi bi-slash-circle"></i> <span id="ban-submit-label">Ban</span></button>
       </div>
     </form>
   </div>
