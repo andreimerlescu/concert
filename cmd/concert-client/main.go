@@ -388,7 +388,7 @@ func run(ctx context.Context, args []string, getenv func(string) string) error {
 	if network == "" {
 		return errors.New("set CONCERT_CLIENT_NETWORK")
 	}
-	networks, err := gateway.LoadNetworks(env("CONCERT_NETWORKS_CONFIG", "examples/networks.testnet.json"))
+	networks, err := gateway.LoadNetworks(env("CONCERT_NETWORKS_CONFIG", "examples/networks.json"))
 	if err != nil {
 		return err
 	}
