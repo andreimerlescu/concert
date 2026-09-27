@@ -297,6 +297,13 @@ func (p *portal) routes() *gin.Engine {
 
 	api := r.Group("/api", p.requireSession, p.requireCSRF)
 	api.GET("/overview", p.apiOverview)
+	api.GET("/fastlane", func(c *gin.Context) {
+		if p.a.fastlane == nil {
+			c.JSON(200, gin.H{"enabled": false})
+			return
+		}
+		c.JSON(200, p.a.fastlane.Summary())
+	})
 	api.GET("/queue", p.apiQueue)
 	api.POST("/queue/promote", p.apiPromote)
 	api.POST("/queue/kick", p.apiKick)
