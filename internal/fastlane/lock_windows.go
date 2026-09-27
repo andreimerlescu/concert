@@ -3,9 +3,8 @@
 package fastlane
 
 import (
-	"os"
-
 	"golang.org/x/sys/windows"
+	"os"
 )
 
 func lockJournal(f *os.File) error {
