@@ -580,13 +580,17 @@ func (g *generation) priorityGate(c *gin.Context) {
 	ps, cfg, r := g.a.prio, g.cfg, c.Request
 	now := time.Now()
 	rank := ps.grants.rankOf(r, now)
-	ps.requests[rank].Add(1)
 
+	fast := g.a.fastlane != nil && g.a.fastlane.Eligible(r)
+	if fast && rank < rankCustomer {
+		rank = rankCustomer
+	}
+	ps.requests[rank].Add(1)
 	laneRank := priorityRank(cfg.priorityLaneRank)
 	if roomBusy(g.a.room) {
 		form := cfg.priorityForms && r.Method != http.MethodGet && r.Method != http.MethodHead &&
 			g.a.admit.valid(r, now)
-		if rank >= laneRank || form {
+		if rank >= laneRank || form || fast {
 			if g.lane.acquire(r.Context(), rank, cfg.priorityWait) {
 				defer g.lane.release()
 				ps.laneServed.Add(1)
@@ -598,6 +602,20 @@ func (g *generation) priorityGate(c *gin.Context) {
 				return
 			}
 			ps.laneFull.Add(1)
+			if fast && r.Method != http.MethodGet && r.Method != http.MethodHead {
+				// A paid pass remains valid. Queuing would swallow the POST, so
+				// refuse it without sending it upstream; a page request instead
+				// joins the line below like any other ranked visitor.
+				c.Header("Retry-After", strconv.Itoa(cfg.retryAfter))
+				c.Header("Cache-Control", "no-store")
+				if wantsHTML(r) {
+					c.Data(http.StatusServiceUnavailable, "text/html; charset=utf-8", []byte(formBusyPage))
+				} else {
+					c.JSON(http.StatusServiceUnavailable, gin.H{"error": "fast_lane_busy", "submitted": false, "charged_again": false, "retry_after_seconds": cfg.retryAfter})
+				}
+				c.Abort()
+				return
+			}
 			if form && rank < laneRank {
 				ps.formsRefused.Add(1)
 				g.refuseForm(c)
