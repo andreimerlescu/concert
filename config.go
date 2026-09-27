@@ -23,9 +23,11 @@ import (
 //	room_probe       — non-HttpOnly cookie-support probe
 //	concert_admit    — HttpOnly signed admission pass for the asset and stream tiers
 //	concert_priority — HttpOnly signed rank granted by the origin; see priority.go
-var proxyCookies = []string{"room_ticket", "room_pass", "room_probe", admitCookie, priorityCookie}
+var proxyCookies = []string{"room_ticket", "room_pass", "room_probe", admitCookie, priorityCookie, "concert_fastlane"}
 
 type config struct {
+	fastlaneFile string // immutable startup configuration; see docs/FASTLANE.md
+
 	listen         string
 	upstream       string
 	capacity       int
@@ -366,7 +368,8 @@ func validateRoutes(c *config) error {
 			if r.prefix && r.path == "" {
 				return fmt.Errorf("%s: \"/*\" would capture every path", g.flag)
 			}
-			if r.path == "/queue/status" || r.path == "/_room" || strings.HasPrefix(r.path, "/_room/") {
+			if r.path == "/queue/status" || r.path == "/_room" || strings.HasPrefix(r.path, "/_room/") ||
+				r.path == "/_concert" || strings.HasPrefix(r.path, "/_concert/") {
 				return fmt.Errorf("%s: %s is reserved by concert", g.flag, r.path)
 			}
 			if prev, dup := seen[r.pattern()]; dup {
