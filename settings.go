@@ -70,6 +70,8 @@ const (
 // checks each entry before joining them with ",".
 const (
 	listPaths = "path" // entries start with "/"; suffix /* for a prefix
+	listCIDRs = "cidr" // entries are IP addresses or CIDR ranges
+	listHosts = "host" // entries are bare, fully qualified hostnames
 )
 
 // Portal sections, in display order.
@@ -100,7 +102,7 @@ type settingDef struct {
 	ptr     func(*config) any // pointer to the config field
 	check   func(any) error   // extra validation for values from the file or portal
 	restart bool              // set only by flag or environment; takes effect on restart
-	list    string            // list kind (listPaths): the portal edits it one entry per input
+	list    string            // list kind (listPaths, listCIDRs, listHosts): the portal edits it one entry per input
 	kind    string            // derived from ptr in init
 }
 
@@ -181,7 +183,7 @@ var settingDefs = []settingDef{
 		ptr: func(c *config) any { return &c.preserveHost }},
 	{key: "trusted_proxies", flag: "trusted-proxies", env: "CONCERT_TRUSTED_PROXIES", group: groupOrigin, label: "Trusted proxies",
 		def: "127.0.0.1/32,::1/128", usage: "comma-separated CIDRs whose X-Forwarded-For and X-Forwarded-Proto are trusted",
-		ptr: func(c *config) any { return &c.trustedProxies }},
+		ptr: func(c *config) any { return &c.trustedProxies }, check: checkCIDRList, list: listCIDRs},
 	{key: "access_log", flag: "access-log", env: "CONCERT_ACCESS_LOG", group: groupOrigin, label: "Access log",
 		def: true, usage: "write an access log line per non-asset request",
 		ptr: func(c *config) any { return &c.accessLogEnabled }},
@@ -263,12 +265,12 @@ var settingDefs = []settingDef{
 		ptr: func(c *config) any { return &c.abuseMaxEntries }},
 	{key: "abuse_allow", flag: "abuse-allow", env: "CONCERT_ABUSE_ALLOW", group: groupAbuse, label: "Abuse allowlist",
 		def: "", usage: "comma-separated CIDRs that are never struck or banned",
-		ptr: func(c *config) any { return &c.abuseAllow }},
+		ptr: func(c *config) any { return &c.abuseAllow }, check: checkCIDRList, list: listCIDRs},
 
 	// ---- Let's Encrypt; see tls.go ----
 	{key: "tls_domains", flag: "tls-domains", env: "CONCERT_TLS_DOMAINS", group: groupTLS, label: "Certificate hostnames",
 		def: "", usage: "comma-separated hostnames to get Let's Encrypt certificates for; enables TLS on -listen",
-		ptr: func(c *config) any { return &c.tlsDomains }},
+		ptr: func(c *config) any { return &c.tlsDomains }, check: checkHostList, list: listHosts},
 	{key: "tls_email", flag: "tls-email", env: "CONCERT_TLS_EMAIL", group: groupTLS, label: "ACME contact email",
 		def: "", usage: "contact email for the ACME account (expiry notices)",
 		ptr: func(c *config) any { return &c.tlsEmail }},
@@ -285,7 +287,7 @@ var settingDefs = []settingDef{
 		ptr: func(c *config) any { return &c.portal.listen }},
 	{key: "portal_allow", flag: "portal-allow", env: "CONCERT_PORTAL_ALLOW", group: groupPortal, label: "Portal allowlist",
 		def: "127.0.0.1/32,::1/128", usage: "comma-separated CIDRs allowed to reach the admin portal",
-		ptr: func(c *config) any { return &c.portal.allowSpec }},
+		ptr: func(c *config) any { return &c.portal.allowSpec }, check: checkCIDRList, list: listCIDRs},
 	{key: "portal_session_ttl", flag: "portal-session-ttl", env: "CONCERT_PORTAL_SESSION_TTL", group: groupPortal, label: "Portal session length",
 		def: 8 * time.Hour, usage: "admin portal sign-in lifetime",
 		ptr: func(c *config) any { return &c.portal.sessionTTL }, check: durationAtLeast(5 * time.Minute)},
@@ -526,6 +528,54 @@ func checkPathList(v any) error {
 			return fmt.Errorf("lists %q more than once", entry)
 		}
 		seen[entry] = true
+	}
+	return nil
+}
+
+// checkCIDRList validates a comma-separated address list from the file or
+// the portal: every entry must be an IP address or a CIDR range, as
+// parsePrefixes reads them, and appear only once. Empty entries are
+// ignored, as parsePrefixes ignores them.
+func checkCIDRList(v any) error {
+	seen := map[string]bool{}
+	for _, entry := range strings.Split(v.(string), ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if _, err := parsePrefixes(entry); err != nil {
+			return fmt.Errorf("entry %q is not an IP address or CIDR range", entry)
+		}
+		if seen[entry] {
+			return fmt.Errorf("lists %q more than once", entry)
+		}
+		seen[entry] = true
+	}
+	return nil
+}
+
+// checkHostList validates a comma-separated hostname list from the file or
+// the portal: every entry must be a bare, fully qualified hostname, as
+// parseTLSDomains reads them, and appear only once, ignoring case and a
+// trailing dot. Empty entries are ignored.
+func checkHostList(v any) error {
+	seen := map[string]bool{}
+	for _, entry := range strings.Split(v.(string), ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if _, err := parseTLSDomains(entry); err != nil {
+			return err
+		}
+		h := strings.TrimSuffix(strings.ToLower(entry), ".")
+		if h == "" {
+			continue
+		}
+		if seen[h] {
+			return fmt.Errorf("lists %q more than once", entry)
+		}
+		seen[h] = true
 	}
 	return nil
 }
@@ -830,8 +880,9 @@ func (a *app) changeSettings(set map[string]json.RawMessage, reset []string, act
 }
 
 // settingView is one setting as the portal shows it. List is the list kind
-// (listPaths) for comma-separated settings the portal edits one entry per
-// input; the value is still the comma-joined string.
+// (listPaths, listCIDRs or listHosts) for comma-separated settings the
+// portal edits one entry per input; the value is still the comma-joined
+// string.
 type settingView struct {
 	Key     string `json:"key"`
 	Group   string `json:"group"`

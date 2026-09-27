@@ -372,13 +372,16 @@
       </div>
     </div>
 
-    <!-- Settings -->
+    <!-- Settings: section navigation | settings (info above input) | sources and fixed values -->
     <div class="tab-pane fade" id="tab-settings" role="tabpanel" aria-labelledby="tab-settings-btn" tabindex="0">
       <div class="alert alert-warning d-none" id="settings-unsaved" role="alert">
         <i aria-hidden="true" class="bi bi-exclamation-triangle"></i> <code>-data-dir</code> is empty: changes apply immediately but are lost when concert restarts.
       </div>
       <div class="row g-3">
-        <div class="col-xl-8">
+        <div class="col-xl-2">
+          <nav class="settings-nav nav nav-pills flex-row flex-xl-column gap-1" id="settings-nav" aria-label="Setting sections"></nav>
+        </div>
+        <div class="col-xl-6">
           <form id="settings-form" novalidate>
             <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
               <div class="input-group input-group-sm filter-input">

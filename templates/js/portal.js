@@ -797,10 +797,29 @@
     };
     let settingsData = null;
 
+    // Address checks for the list editors. They mirror what the server's
+    // netip parsing accepts closely enough to catch typos as they are
+    // typed; the server validates every value again before saving.
+    function validIPv4(s) {
+        const p = s.split('.');
+        return p.length === 4 && p.every((x) => /^(0|[1-9]\d{0,2})$/.test(x) && Number(x) <= 255);
+    }
+
+    function validIPv6(s) {
+        if (!s.includes(':') || !/^[0-9a-fA-F:.]+$/.test(s)) return false;
+        try {
+            new URL('http://[' + s + ']/');
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
     // List settings. A setting the server marks with a list kind is still one
     // comma-separated string on the server; here it is edited as one input per
     // entry, with a remove button on each and an add box below. Entries are
-    // checked as they are typed and joined with "," when saved.
+    // checked as they are typed and joined with "," when saved. norm, when
+    // present, is what two entries must differ in to not be duplicates.
     const LIST_RULES = {
         path: {
             placeholder: 'Add a path, e.g. /.env or /static/*',
@@ -809,6 +828,39 @@
                 if (!v.startsWith('/')) return `${v} must start with /.`;
                 if (/[\s,]/.test(v)) return 'One path per box: no spaces or commas.';
                 if (v === '/*') return '"/*" would capture every path.';
+                return '';
+            },
+        },
+        cidr: {
+            placeholder: 'Add an address or range, e.g. 203.0.113.9 or 10.0.0.0/8',
+            noun: ['address or range', 'addresses or ranges'],
+            check(v) {
+                if (/[\s,]/.test(v)) return 'One address or range per box: no spaces or commas.';
+                const parts = v.split('/');
+                if (parts.length > 2) return `${v} is not an address or CIDR range.`;
+                const [addr, bits] = parts;
+                const v4 = validIPv4(addr);
+                if (!v4 && !validIPv6(addr)) return `${addr} is not an IPv4 or IPv6 address.`;
+                if (bits !== undefined) {
+                    const max = v4 ? 32 : 128;
+                    if (!/^(0|[1-9]\d{0,2})$/.test(bits) || Number(bits) > max) {
+                        return `/${bits} is not a valid prefix length for IPv${v4 ? 4 : 6} (0–${max}).`;
+                    }
+                }
+                return '';
+            },
+        },
+        host: {
+            placeholder: 'Add a hostname, e.g. example.com',
+            noun: ['hostname', 'hostnames'],
+            norm: (v) => v.toLowerCase().replace(/\.$/, ''),
+            check(v) {
+                if (/[\s,]/.test(v)) return 'One hostname per box: no spaces or commas.';
+                const h = v.toLowerCase().replace(/\.$/, '');
+                if (/[/:*@]/.test(h)) return `${v}: list a bare hostname such as example.com, without scheme, port or wildcard.`;
+                if (validIPv4(h)) return `${v}: certificates are issued for hostnames, not IP addresses.`;
+                if (!h.includes('.')) return `${v} is not a fully qualified hostname.`;
+                if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(h)) return `${v} is not a valid hostname.`;
                 return '';
             },
         },
@@ -904,8 +956,9 @@
         const seen = new Set();
         for (const p of listParts(box)) {
             let msg = rule.check(p.value);
-            if (!msg && seen.has(p.value)) msg = `${p.value} is already listed.`;
-            seen.add(p.value);
+            const key = rule.norm ? rule.norm(p.value) : p.value;
+            if (!msg && seen.has(key)) msg = `${p.value} is already listed.`;
+            seen.add(key);
             if (msg && !errors.has(p.input)) errors.set(p.input, msg);
         }
         box.querySelectorAll('[data-list-item], [data-list-new]').forEach((input) => {
@@ -1024,36 +1077,45 @@
         }
     }
 
+    // settingRow stacks a setting's description above its input: the label,
+    // where its value comes from and the reset button on top, then the help
+    // text, flag and variable, then the input across the full column.
     function settingRow(s) {
-        const row = node('div', 'row g-2 align-items-start py-2 border-top setting-row');
+        const row = node('div', 'py-3 border-top setting-row');
         row.dataset.search = [s.label, s.key, s.flag, s.env, s.help].join(' ').toLowerCase();
 
-        const left = node('div', 'col-md-6');
+        const head = node('div', 'd-flex align-items-start gap-2');
+        const info = node('div', 'setting-info flex-grow-1');
+        const title = node('div', 'd-flex flex-wrap align-items-center gap-2');
         const label = node('label', 'form-label mb-0 fw-semibold', s.label);
         label.htmlFor = 'set-' + s.key;
-        left.append(label);
-        const [cls, text, title] = SOURCE_BADGES[s.source] || SOURCE_BADGES.default;
-        const src = node('span', 'badge ms-2 align-middle ' + cls, text);
-        src.title = title;
-        left.append(src);
+        title.append(label);
+        const [cls, text, tip] = SOURCE_BADGES[s.source] || SOURCE_BADGES.default;
+        const src = node('span', 'badge ' + cls, text);
+        src.title = tip;
+        title.append(src);
         if (s.restart) {
-            const r = node('span', 'badge ms-1 align-middle bg-warning-subtle text-warning-emphasis border border-warning-subtle', 'restart');
+            const r = node('span', 'badge bg-warning-subtle text-warning-emphasis border border-warning-subtle', 'restart');
             r.title = 'Changed only in concert.env; applies when concert restarts';
-            left.append(r);
+            title.append(r);
         }
-        left.append(node('div', 'form-text mt-1', s.help));
-        left.append(node('div', 'form-text font-monospace', '-' + s.flag + ' · ' + s.env));
-
-        const mid = node('div', 'col-md-5');
-        mid.append(settingInput(s));
-
-        const right = node('div', 'col-md-1 text-md-end');
+        info.append(title);
+        info.append(node('div', 'form-text mt-1', s.help));
+        info.append(node('div', 'form-text font-monospace', '-' + s.flag + ' · ' + s.env));
+        head.append(info);
         if (s.source === 'file') {
-            right.append(iconButton('reset', 'btn-sm btn-outline-secondary', 'bi-arrow-counterclockwise',
+            head.append(iconButton('reset', 'btn-sm btn-outline-secondary flex-shrink-0', 'bi-arrow-counterclockwise',
                 'Reset: remove from settings.json', { key: s.key }));
         }
-        row.append(left, mid, right);
+
+        const input = node('div', 'setting-input mt-2');
+        input.append(settingInput(s));
+        row.append(head, input);
         return row;
+    }
+
+    function groupId(name) {
+        return 'settings-group-' + String(name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
     }
 
     function renderSettings(d) {
@@ -1064,15 +1126,21 @@
         for (const s of d.settings) {
             let body = bodies.get(s.group);
             if (!body) {
-                const card = node('div', 'card stat-card settings-group');
+                const card = node('section', 'card stat-card settings-group');
+                card.id = groupId(s.group);
+                card.dataset.group = s.group;
                 body = node('div', 'card-body');
-                body.append(node('h2', 'h6 mb-2', s.group));
+                const h = node('h2', 'h6 mb-2', s.group);
+                h.id = card.id + '-title';
+                card.setAttribute('aria-labelledby', h.id);
+                body.append(h);
                 card.append(body);
                 groups.append(card);
                 bodies.set(s.group, body);
             }
             body.append(settingRow(s));
         }
+        renderSettingsNav();
 
         const dl = byId('settings-fixed');
         dl.replaceChildren();
@@ -1085,6 +1153,121 @@
         updateDirty();
         applySettingsFilter();
     }
+
+    // ── Settings: section navigation ───────────────────────────────────────
+    // One pill per settings card, in page order. The pill for the card at
+    // the top of the viewport is highlighted as the page scrolls; clicking a
+    // pill scrolls to its card. Each pill shows how many settings its card
+    // lists (after the filter) and a dot while the card has unsaved changes.
+    let spyActive = '';
+    let spyFrame = 0;
+    let spyPinned = false;
+    let spyPinTimer = 0;
+
+    function navLinkFor(cardId) {
+        return document.querySelector(`#settings-nav a[data-target="${cardId}"]`);
+    }
+
+    function renderSettingsNav() {
+        const nav = byId('settings-nav');
+        if (!nav) return;
+        const links = [...document.querySelectorAll('#settings-groups .settings-group')].map((card) => {
+            const a = node('a', 'nav-link');
+            a.href = '#' + card.id;
+            a.dataset.target = card.id;
+            a.append(node('span', 'settings-nav-label text-truncate', card.dataset.group));
+            const meta = node('span', 'd-flex align-items-center gap-1 flex-shrink-0');
+            const dot = node('span', 'settings-nav-dot');
+            dot.setAttribute('aria-hidden', 'true');
+            meta.append(dot, node('span', 'settings-nav-count'));
+            a.append(meta);
+            return a;
+        });
+        nav.replaceChildren(...links);
+        spyActive = '';
+    }
+
+    function stickyOffset() {
+        const bar = document.querySelector('.navbar.sticky-top');
+        return bar ? bar.getBoundingClientRect().height : 0;
+    }
+
+    function setSpyActive(id) {
+        if (id === spyActive) return;
+        spyActive = id;
+        const nav = byId('settings-nav');
+        if (!nav) return;
+        nav.querySelectorAll('a[data-target]').forEach((a) => {
+            const on = a.dataset.target === id;
+            a.classList.toggle('active', on);
+            if (on) a.setAttribute('aria-current', 'true');
+            else a.removeAttribute('aria-current');
+        });
+        // In the horizontal layout, keep the active pill in view without
+        // scrolling the page itself.
+        const active = nav.querySelector('a.active');
+        if (active && nav.scrollWidth > nav.clientWidth) {
+            nav.scrollLeft = active.offsetLeft - nav.clientWidth / 2 + active.offsetWidth / 2;
+        }
+    }
+
+    function updateSpy() {
+        spyFrame = 0;
+        if (spyPinned || activeTab() !== 'tab-settings') return;
+        const cards = [...document.querySelectorAll('#settings-groups .settings-group:not(.d-none)')];
+        if (!cards.length) { setSpyActive(''); return; }
+        const line = stickyOffset() + 32;
+        let current = cards[0];
+        for (const c of cards) {
+            if (c.getBoundingClientRect().top <= line) current = c;
+            else break;
+        }
+        // At the bottom of the page the last cards can never reach the top.
+        const doc = document.documentElement;
+        if (window.scrollY > 0 && window.innerHeight + window.scrollY >= doc.scrollHeight - 2) {
+            current = cards[cards.length - 1];
+        }
+        setSpyActive(current.id);
+    }
+
+    function scheduleSpy() {
+        if (!spyFrame) spyFrame = requestAnimationFrame(updateSpy);
+    }
+
+    // pinSpy keeps a clicked pill highlighted while the page scrolls to its
+    // card, so the pills it passes do not flicker on the way.
+    function pinSpy(id) {
+        setSpyActive(id);
+        spyPinned = true;
+        clearTimeout(spyPinTimer);
+        spyPinTimer = setTimeout(() => { spyPinned = false; }, 900);
+    }
+
+    window.addEventListener('scroll', () => {
+        if (spyPinned) {
+            clearTimeout(spyPinTimer);
+            spyPinTimer = setTimeout(() => { spyPinned = false; }, 200);
+            return;
+        }
+        scheduleSpy();
+    }, { passive: true });
+    window.addEventListener('resize', scheduleSpy);
+
+    byId('settings-nav').addEventListener('click', (ev) => {
+        const a = ev.target.closest('a[data-target]');
+        if (!a) return;
+        ev.preventDefault();
+        const card = byId(a.dataset.target);
+        if (!card) return;
+        pinSpy(card.id);
+        const top = card.getBoundingClientRect().top + window.scrollY - stickyOffset() - 12;
+        window.scrollTo({ top: Math.max(0, top), behavior: reduceMotion ? 'auto' : 'smooth' });
+        const heading = card.querySelector('h2');
+        if (heading) {
+            heading.tabIndex = -1;
+            heading.focus({ preventScroll: true });
+        }
+    });
 
     function changedInputs() {
         return [...document.querySelectorAll('#settings-groups [data-original]')]
@@ -1099,6 +1282,13 @@
         byId('settings-apply').disabled = n === 0;
         byId('settings-discard').disabled = n === 0;
         setText('settings-apply-label', n ? `Save ${plural(n, 'change')}` : 'Save changes');
+        document.querySelectorAll('#settings-groups .settings-group').forEach((card) => {
+            const a = navLinkFor(card.id);
+            if (!a) return;
+            const c = card.querySelectorAll('.setting-row.setting-changed').length;
+            a.classList.toggle('settings-nav-changed', c > 0);
+            a.title = c ? `${plural(c, 'unsaved change')} in ${card.dataset.group}` : card.dataset.group;
+        });
     }
 
     function applySettingsFilter() {
@@ -1111,7 +1301,14 @@
                 if (show) visible++;
             });
             card.classList.toggle('d-none', visible === 0);
+            const a = navLinkFor(card.id);
+            if (a) {
+                a.classList.toggle('d-none', visible === 0);
+                const count = a.querySelector('.settings-nav-count');
+                if (count) count.textContent = String(visible);
+            }
         });
+        scheduleSpy();
     }
 
     async function loadSettings() {
@@ -1295,7 +1492,7 @@
             const id = ev.target.getAttribute('data-bs-target').slice(1);
             const t = tables[id];
             if (t) { t.loaded = false; t.refresh(); }
-            if (id === 'tab-settings') loadSettings();
+            if (id === 'tab-settings') loadSettings().then(scheduleSpy);
         });
     });
 
