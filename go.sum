@@ -37,6 +37,8 @@ github.com/andreimerlescu/env v0.0.1 h1:R3DTdLyRSuKLTHvlmTaHLloVpTnrHrX/JGbjM/28
 github.com/andreimerlescu/env v0.0.1/go.mod h1:Jzu9qHPCv7c0o/rBmagt6z6Kf49K3ba0WIpi0D2YYUg=
 github.com/andreimerlescu/goenv v1.0.0 h1:S+cz2HppreKnTCcbNs/z90mlReT+jD+srDMVMn2LKh8=
 github.com/andreimerlescu/goenv v1.0.0/go.mod h1:ehn80sBXiQAH4v3FUUVze1Oh23OeHWIk/gYwxTl6WKw=
+github.com/andreimerlescu/naddr v0.0.1 h1:yr5BXiBgb1Vnkn0XDl7eN/cgxUCXd8atpboDcW9LVGU=
+github.com/andreimerlescu/naddr v0.0.1/go.mod h1:ZcdKgUdoePInqWpxfp8+/oFlf13bOda3SmzQ6Kez1Cs=
 github.com/andreimerlescu/room v1.4.0 h1:FT11J5549C6OkoJaQlzI5mU3WC62PLSjDmh2HeeNWa4=
 github.com/andreimerlescu/room v1.4.0/go.mod h1:BK9Xi3TDygwKyeerWKM2pHyLTGUdXyKYV30zMywpQS0=
 github.com/andreimerlescu/sema v1.1.0 h1:0ivMbf9oWXIJZrrgltBA58DNdUrz1d2hS5PdFgnjNgQ=

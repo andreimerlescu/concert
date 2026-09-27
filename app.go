@@ -18,9 +18,9 @@ import (
 
 // app is concert's long-lived state plus the generation currently serving
 // requests; see reload.go. The waiting room, the abuse registry, the
-// admission pass signer, the priority grants and the counters live as long
-// as the process. Everything built from settings lives in the generation and
-// is replaced when a setting changes.
+// admission pass signer, the priority grants, the IP database and the
+// counters live as long as the process. Everything built from settings lives
+// in the generation and is replaced when a setting changes.
 type app struct {
 	cfg       config // as concert started; the running configuration is current().cfg
 	room      *room.WaitingRoom
@@ -37,8 +37,20 @@ type app struct {
 	surgeBits atomic.Uint64 // skip-the-line surge, float64 bits
 	gen       atomic.Pointer[generation]
 
+	// ipinfo answers who owns an address, from naddr's ess package; see
+	// ipinfo.go. Always present; it reports "off" when neither NADDR_DATA
+	// nor NADDR_ADDR is usable.
+	ipinfo *ipLookup
+
+	// history is the portal's request history, set by newPortal; nil when
+	// the portal is off. See history.go.
+	history *history
+
 	// Listeners, set by run once serving starts; guarded by settings.mu.
 	mainEP, portalEP *endpoint
+
+	closeMu sync.Mutex
+	closers []func() // run by Close, newest first, after the background loops stop
 
 	stop     chan struct{}
 	stopOnce sync.Once
@@ -46,9 +58,9 @@ type app struct {
 }
 
 // newApp builds the waiting room, abuse registry, admission signer, priority
-// grants and the first generation without binding a port. With -data-dir set
-// it also restores bans.json and the saved queue, and starts the ban writer.
-// Callers must Close the returned app.
+// grants, the IP database and the first generation without binding a port.
+// With -data-dir set it also restores bans.json and the saved queue, and
+// starts the ban writer. Callers must Close the returned app.
 //
 // Order matters for the queue: room's settings (including the ticket TTL
 // and first-poll grace, which judge what is stale) are applied by commit
@@ -122,6 +134,10 @@ func newApp(cfg config) (*app, error) {
 		}
 	}
 
+	// IP details never stop startup: without a usable NADDR_DATA or
+	// NADDR_ADDR the portal shows bare addresses.
+	a.ipinfo = newIPLookup(ipInfoGetenv)
+
 	// Every new ban drops that network's waiting visitors from room's line.
 	a.abuse.setOnBan(a.queueDrop)
 
@@ -148,20 +164,45 @@ func (a *app) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	a.current().engine.ServeHTTP(w, r)
 }
 
-// Close stops the janitors and the drop loop, flushes unsaved bans, saves
-// the queue, and stops the waiting room's background workers. run calls it
-// after the listeners have drained, so no new tickets arrive while the
-// queue is being saved.
+// onClose registers f to run when the app closes, after the background
+// loops have stopped and before the queue is saved. Closers run newest first.
+func (a *app) onClose(f func()) {
+	a.closeMu.Lock()
+	a.closers = append(a.closers, f)
+	a.closeMu.Unlock()
+}
+
+// attachHistory records the portal's history so the settings view can
+// describe it, and closes it with the app, which flushes the history log.
+func (a *app) attachHistory(h *history) {
+	a.history = h
+	a.onClose(h.close)
+}
+
+// Close stops the janitors and the drop loop, flushes unsaved bans and the
+// history log, saves the queue, and stops the IP database watcher and the
+// waiting room's background workers. run calls it after the listeners have
+// drained, so no new tickets or history arrive while they are being saved.
 func (a *app) Close() {
 	a.stopOnce.Do(func() {
 		close(a.stop)
 		a.wg.Wait()
+
+		a.closeMu.Lock()
+		closers := a.closers
+		a.closers = nil
+		a.closeMu.Unlock()
+		for i := len(closers) - 1; i >= 0; i-- {
+			closers[i]()
+		}
+
 		if a.queuePath != "" {
 			a.saveQueue()
 		}
 		if g := a.current(); g != nil {
 			g.assets.users.close()
 		}
+		a.ipinfo.close()
 		a.room.Stop()
 	})
 }
@@ -220,8 +261,8 @@ func (a *app) churnStrike(key string) {
 
 // run builds the app, starts the admin portal when configured, binds the
 // main listener, and serves until ctx is cancelled. Both listeners are
-// endpoints (see server.go); the deferred Close saves the queue after they
-// have drained.
+// endpoints (see server.go); the deferred Close saves the queue and the
+// history after they have drained.
 func run(ctx context.Context, cfg config) error {
 	a, err := newApp(cfg)
 	if err != nil {
@@ -291,9 +332,9 @@ func run(ctx context.Context, cfg config) error {
 	}
 	if c.dataDir != "" {
 		if err := ensureWritableDir(c.dataDir); err != nil {
-			log.Printf("data dir: %v; settings, bans and the queue changed now will not be saved", err)
+			log.Printf("data dir: %v; settings, bans, the queue and the history changed now will not be saved", err)
 		} else {
-			log.Printf("data dir: %s (settings.json overrides flags and environment; bans and the queue survive restarts)", c.dataDir)
+			log.Printf("data dir: %s (settings.json overrides flags and environment; bans, the queue and the history survive restarts)", c.dataDir)
 		}
 	}
 	if c.admitSecretGenerated {

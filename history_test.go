@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bufio"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -61,6 +65,48 @@ func hitsFor(list any, name string) float64 {
 		}
 	}
 	return 0
+}
+
+// startLogged starts concert with a portal the test stops itself, so the
+// history log can be closed and read back before a restart.
+func startLogged(t *testing.T, cfg config) (*app, *portal, *httptest.Server) {
+	t.Helper()
+	a, err := newApp(cfg)
+	if err != nil {
+		t.Fatalf("newApp: %v", err)
+	}
+	p, err := newPortal(a)
+	if err != nil {
+		a.Close()
+		t.Fatalf("newPortal: %v", err)
+	}
+	return a, p, httptest.NewServer(p.wrap(a.handler))
+}
+
+func stopLogged(a *app, p *portal, front *httptest.Server) {
+	front.Close()
+	p.closeListener()
+	a.Close()
+}
+
+func readEvents(t *testing.T, path string) []historyEvent {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("history log: %v", err)
+	}
+	defer f.Close()
+	var out []historyEvent
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64<<10), historyLogLineMax)
+	for sc.Scan() {
+		var ev historyEvent
+		if err := json.Unmarshal(sc.Bytes(), &ev); err != nil {
+			t.Fatalf("history log line is not JSON: %q", sc.Text())
+		}
+		out = append(out, ev)
+	}
+	return out
 }
 
 func TestHistory_GroupsRequestsByClient(t *testing.T) {
@@ -239,5 +285,152 @@ func TestHistory_BansInForceAtStartAreListed(t *testing.T) {
 	log := maps(historyList(t, p, ck)["bans"])
 	if len(log) != 1 || log[0]["began"] != nil || log[0]["permanent"] != true || log[0]["active"] != true {
 		t.Errorf("a ban restored at startup should be listed with an unknown start: %v", log)
+	}
+}
+
+// ─── the history log ─────────────────────────────────────────────────────────
+
+func TestHistoryLogPath(t *testing.T) {
+	cases := []struct {
+		dataDir, setting, want string
+	}{
+		{"", "", ""},
+		{"/var/lib/concert/data", "", filepath.Join("/var/lib/concert/data", historyLogName)},
+		{"/var/lib/concert/data", "off", ""},
+		{"/var/lib/concert/data", "/srv/concert/history.jsonl", "/srv/concert/history.jsonl"},
+		{"", "/srv/concert/history.jsonl", "/srv/concert/history.jsonl"},
+	}
+	for _, c := range cases {
+		if got := historyLogPath(config{dataDir: c.dataDir, historyLog: c.setting}); got != c.want {
+			t.Errorf("dataDir=%q history-log=%q: got %q, want %q", c.dataDir, c.setting, got, c.want)
+		}
+	}
+}
+
+func TestHistory_LogSurvivesRestart(t *testing.T) {
+	up := newFakeUpstream(t)
+	cfg := portalTestConfig(up.URL())
+	cfg.trustedProxies = "127.0.0.1/32"
+	cfg.banPaths = "/.env"
+	cfg.dataDir = t.TempDir()
+	const ip = "203.0.113.9"
+
+	a, p, front := startLogged(t, cfg)
+	get(t, front.URL+"/hello", withXFF(ip))
+	get(t, front.URL+"/.env", withXFF(ip))
+	get(t, front.URL+"/wp-login.php", withXFF(ip))
+	get(t, front.URL+"/x", withXFF(ip))
+	stopLogged(a, p, front)
+
+	if _, err := os.Stat(filepath.Join(cfg.dataDir, historyLogName)); err != nil {
+		t.Fatalf("history log not written: %v", err)
+	}
+
+	b, q, front2 := startLogged(t, cfg)
+	defer stopLogged(b, q, front2)
+	ck, _ := portalLogin(t, q)
+
+	v := historyOf(t, q, ck, ip)
+	entries := maps(v["entries"])
+	if len(entries) != 4 {
+		t.Fatalf("entries after restart: %v", entries)
+	}
+	if entries[2]["path"] != "/.env" || entries[2]["triggered_ban"] != true {
+		t.Errorf("the request that started the ban was not restored: %v", entries[2])
+	}
+	if entries[0]["blocked"] != true || entries[3]["blocked"] != false {
+		t.Errorf("blocked flags after restart: %v", entries)
+	}
+	bans := maps(v["bans"])
+	if len(bans) != 1 {
+		t.Fatalf("bans after restart: %v", bans)
+	}
+	w := bans[0]
+	trig, _ := w["trigger"].(map[string]any)
+	if w["began"] == nil || w["active"] != true || w["requests"] != float64(2) || trig == nil || trig["path"] != "/.env" {
+		t.Errorf("ban window after restart (known start, trigger, 2 blocked): %v", w)
+	}
+	if log := maps(historyList(t, q, ck)["bans"]); len(log) != 1 {
+		t.Errorf("a restart must not duplicate the ban in the log: %v", log)
+	}
+}
+
+func TestHistory_BlockedFloodIsAggregated(t *testing.T) {
+	up := newFakeUpstream(t)
+	cfg := portalTestConfig(up.URL())
+	cfg.trustedProxies = "127.0.0.1/32"
+	cfg.dataDir = t.TempDir()
+	const ip = "203.0.113.20"
+	n := historyRawPerBan + 30
+
+	a, p, front := startLogged(t, cfg)
+	if _, err := a.abuse.banFor(netip.MustParseAddr(ip), time.Hour, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < n; i++ {
+		get(t, front.URL+"/probe-"+strconv.Itoa(i%3), withXFF(ip))
+	}
+	stopLogged(a, p, front)
+
+	raw, agg := 0, int64(0)
+	for _, ev := range readEvents(t, filepath.Join(cfg.dataDir, historyLogName)) {
+		switch {
+		case ev.T == evRequest && ev.Blocked:
+			raw++
+		case ev.T == evAgg:
+			agg += ev.Count
+		}
+	}
+	if raw != historyRawPerBan || agg != 30 {
+		t.Errorf("log lines: %d raw blocked requests and %d aggregated, want %d and 30", raw, agg, historyRawPerBan)
+	}
+
+	b, q, front2 := startLogged(t, cfg)
+	defer stopLogged(b, q, front2)
+	ck, _ := portalLogin(t, q)
+	c := historyOf(t, q, ck, ip)["client"].(map[string]any)
+	if c["blocked"] != float64(n) {
+		t.Errorf("blocked after restart: %v, want %d", c["blocked"], n)
+	}
+	log := maps(historyList(t, q, ck)["bans"])
+	if len(log) != 1 || log[0]["requests"] != float64(n) {
+		t.Errorf("ban log after restart should count every blocked request: %v", log)
+	}
+}
+
+func TestHistoryLog_RotatesAndReplaysInOrder(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "h.jsonl")
+	l, err := openHistoryLog(path, 400, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 50; i++ {
+		l.emit(&historyEvent{T: evRequest, At: time.Now().UTC(), IP: "192.0.2.1", Path: "/" + strconv.Itoa(i), Status: 200})
+	}
+	l.close()
+
+	for _, name := range []string{path, path + ".1", path + ".2"} {
+		if _, err := os.Stat(name); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(path + ".3"); !os.IsNotExist(err) {
+		t.Errorf("only 2 rotated files should be kept: %v", err)
+	}
+
+	var got []int
+	if _, err := replayHistoryLog(path, 2, time.Time{}, func(ev *historyEvent) {
+		n, _ := strconv.Atoi(strings.TrimPrefix(ev.Path, "/"))
+		got = append(got, n)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) == 0 || len(got) >= 50 || got[len(got)-1] != 49 {
+		t.Fatalf("replayed %v", got)
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i] != got[i-1]+1 {
+			t.Fatalf("replay out of order: %v", got)
+		}
 	}
 }

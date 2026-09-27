@@ -31,19 +31,20 @@ import (
 // Resetting a setting in the portal removes it from the file again.
 //
 // Every change applies immediately, without restarting concert: see
-// reload.go. The listen addresses are the exception: they are set by flag
-// or environment and take a restart. Secrets (CONCERT_ADMIN_TOKEN,
-// CONCERT_ADMIT_SECRET, CONCERT_PORTAL_PASS) and -data-dir itself are never
-// stored in the file.
+// reload.go. The listen addresses and the history log are the exception:
+// they are set by flag or environment and take a restart. Secrets
+// (CONCERT_ADMIN_TOKEN, CONCERT_ADMIT_SECRET, CONCERT_PORTAL_PASS), -data-dir
+// itself and the IP database (NADDR_DATA, NADDR_ADDR) are never stored in
+// the file.
 
 const (
 	settingsFileName    = "settings.json"
 	settingsFileVersion = 1
 )
 
-// defaultDataDir is where settings.json, bans.json and the saved queue live
-// unless -data-dir or CONCERT_DATA_DIR says otherwise. Tests point it
-// somewhere empty.
+// defaultDataDir is where settings.json, bans.json, the saved queue and the
+// history log live unless -data-dir or CONCERT_DATA_DIR says otherwise.
+// Tests point it somewhere empty.
 var defaultDataDir = "/var/lib/concert/data"
 
 // Where a setting's current value came from.
@@ -286,6 +287,9 @@ var settingDefs = []settingDef{
 	{key: "portal_secure_cookie", flag: "portal-secure-cookie", env: "CONCERT_PORTAL_SECURE_COOKIE", group: groupPortal, label: "Secure portal cookie",
 		def: false, usage: "mark the portal session cookie Secure (portal served over HTTPS)",
 		ptr: func(c *config) any { return &c.portal.secureCookie }},
+	{key: "history_log", flag: "history-log", env: "CONCERT_HISTORY_LOG", group: groupPortal, label: "History log file", restart: true,
+		def: "", usage: "JSON-lines file the portal's request history is written to and restored from; empty means history.jsonl in -data-dir, off keeps it in memory only (flag or CONCERT_HISTORY_LOG only; takes a restart)",
+		ptr: func(c *config) any { return &c.historyLog }},
 }
 
 // settingByKey indexes settingDefs by key.
@@ -856,9 +860,9 @@ func (a *app) settingsViews() ([]settingView, string) {
 	return out, m.path
 }
 
-// fixedSettings describes what the portal cannot change — secrets and the
-// data directory, which are environment- or command-line-only — plus where
-// concert is listening right now.
+// fixedSettings describes what the portal cannot change — secrets, the data
+// directory and the IP database, which are environment- or command-line-only —
+// plus where concert is listening right now and where its history goes.
 func (a *app) fixedSettings() map[string]string {
 	a.settings.mu.Lock()
 	mainEP, portalEP := a.mainEP, a.portalEP
@@ -882,6 +886,8 @@ func (a *app) fixedSettings() map[string]string {
 		"Admission secret": secret,
 		"Admin token":      token,
 		"Portal pass":      "set (CONCERT_PORTAL_PASS)",
+		"IP details":       a.ipinfo.describe(),
+		"History log":      a.history.describeLog(),
 		"Main listener":    mainEP.describe(),
 		"Portal listener":  portalEP.describe(),
 		"Version":          BinaryVersion(),

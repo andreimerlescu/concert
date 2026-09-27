@@ -11,7 +11,11 @@
 
 A FIFO waiting room reverse proxy. Put Concert in front of any HTTP origin, such as a PHP site, a WordPress install, or a legacy app that falls over under load. When traffic exceeds what the origin can handle, visitors wait in an orderly queue with a live position instead of getting 502s and timeouts. Admitted visitors load their page's assets through a separate tier that queued and denied visitors can't reach, and clients that misbehave are blocked for an escalating cooldown.
 
-Concert is a single Go binary built on [room](https://github.com/andreimerlescu/room), a FIFO waiting room middleware for Gin, and [sema](https://github.com/andreimerlescu/sema), a resizable semaphore.
+Concert is a single Go binary built on:
+
+- [room](https://github.com/andreimerlescu/room), a FIFO waiting room middleware for Gin
+- [sema](https://github.com/andreimerlescu/sema), a resizable semaphore
+- the `ess` package of [naddr](https://github.com/andreimerlescu/naddr), which tells the admin portal who owns every address it shows: country flag, ASN, network, and the IPv4, IPv6 and IPv8 forms
 
 ## Why
 
@@ -23,7 +27,7 @@ Concert caps the number of concurrent page requests that reach your origin. Ever
 
     browser ──▶ TLS terminator ──▶ concert :8080 ──▶ origin :3000
                                       │
-              every request ──────────┼─▶ client banned? ──▶ 429 until the cooldown ends
+              every request ──────────┼─▶ client banned? ──▶ 429 until the cooldown ends (403 if permanent)
                                       │   ban path? ──────▶ ban now, 429
                                       │
               page requests ──────────┼─▶ room: slot free?
@@ -34,6 +38,8 @@ Concert caps the number of concurrent page requests that reach your origin. Ever
                                       │     no  ──▶ 403
                                       │     yes ──▶ per-user semaphore (HTTP/1.1 or HTTP/2 rule)
                                       │               ──▶ global asset semaphore ──▶ proxied
+                                      │
+              stream paths ───────────┼─▶ valid pass and a free stream slot ──▶ proxied, outside the room
                                       │
               bypass paths ───────────┴─▶ proxied, no guard
 
@@ -55,7 +61,9 @@ Or build from source:
     cd concert
     make build
 
-`make build` writes static binaries for Linux, macOS and Windows on amd64 and arm64 to `bin/`. Requires Go 1.22 or newer.
+`make build` writes static binaries for Linux, macOS and Windows on amd64 and arm64 to `bin/`. Requires Go 1.26 or newer.
+
+On RHEL, Alma, Rocky, CentOS Stream or Fedora, `installer.sh` installs a prebuilt binary as a confined systemd service under SELinux enforcing mode, downloads the IPtoASN database for IP details, and schedules its daily refresh. See the comments at the top of the script.
 
 ## Quick start
 
@@ -73,25 +81,34 @@ Open `http://127.0.0.1:8080/` in a browser, then generate load from another term
 
 Refresh the browser while the load test runs and you'll land in the waiting room, then be admitted automatically as slots open.
 
+To watch it from the admin portal with IP details, also set:
+
+    curl -fsSL -o ip2asn-combined.tsv.gz https://iptoasn.com/data/ip2asn-combined.tsv.gz
+    export NADDR_DATA=$PWD/ip2asn-combined.tsv.gz
+    export CONCERT_PORTAL_PASS=$(openssl rand -hex 16)
+
+and open `http://127.0.0.1:8081/`.
+
 ## Configuration
 
-Every option can be set with a flag or an environment variable. A flag overrides its environment variable, and the environment variable overrides the built-in default.
+Every option can be set with a flag or an environment variable. A flag overrides its environment variable, and the environment variable overrides the built-in default. Values changed in the admin portal are saved to `settings.json` and override both; see [Persistent settings, bans, queue and history](#persistent-settings-bans-queue-and-history).
 
 | Flag | Environment | Default | Description |
 |---|---|---|---|
-| `-listen` | `CONCERT_LISTEN` | `:8080` | Address to listen on |
+| `-listen` | `CONCERT_LISTEN` | `:8080` | Address to listen on (restart to change) |
 | `-upstream` | `CONCERT_UPSTREAM` | `http://127.0.0.1:3000` | Origin to proxy to (`http` or `https`) |
-| `-cap` | `CONCERT_CAPACITY` | `500` | Max concurrent page requests allowed through to the origin |
-| `-max-queue` | `CONCERT_MAX_QUEUE` | `10000` | Reject new arrivals with 503 beyond this queue depth (0 = unlimited) |
-| `-reaper` | `CONCERT_REAPER` | `30s` | How often abandoned tickets are cleaned up |
+| `-cap` | `CONCERT_CAPACITY` | `434` | Max concurrent page requests allowed through to the origin |
+| `-max-queue` | `CONCERT_MAX_QUEUE` | `369` | Reject new arrivals with 503 beyond this queue depth (0 = unlimited) |
+| `-reaper` | `CONCERT_REAPER` | `36s` | How often abandoned tickets are cleaned up |
 | `-token-ttl` | `CONCERT_TOKEN_TTL` | `0` (room default, 5m) | Sliding lifetime of a queued ticket, 30s–24h |
+| `-first-poll-grace` | `CONCERT_FIRST_POLL_GRACE` | `30s` | Reclaim a new ticket whose visitor never polls (0 = off) |
 | `-secure-cookie` | `CONCERT_SECURE_COOKIE` | `false` | Mark cookies `Secure` (only if browsers reach you over HTTPS) |
 | `-cookie-path` | `CONCERT_COOKIE_PATH` | `/` | Path attribute of cookies |
 | `-cookie-domain` | `CONCERT_COOKIE_DOMAIN` | *(empty)* | Domain attribute of cookies |
 | `-preserve-host` | `CONCERT_PRESERVE_HOST` | `true` | Forward the client's `Host` header to the origin |
 | `-trusted-proxies` | `CONCERT_TRUSTED_PROXIES` | `127.0.0.1/32,::1/128` | CIDRs whose `X-Forwarded-For` and `X-Forwarded-Proto` are trusted |
 | `-bypass` | `CONCERT_BYPASS` | `/favicon.ico` | Paths that skip every guard; suffix `/*` for a prefix |
-| `-assets` | `CONCERT_ASSETS` | *(empty)* | Asset paths that require an admission pass; suffix `/*` for a prefix |
+| `-assets` | `CONCERT_ASSETS` | *(empty)* | Asset paths that require an admission pass |
 | `-asset-public` | `CONCERT_ASSET_PUBLIC` | *(empty)* | Asset paths served without a pass, still under the global asset cap |
 | `-asset-cap` | `CONCERT_ASSET_CAP` | `0` (derived) | Global concurrent asset requests; 0 means `cap × asset-user-cap-h2` |
 | `-asset-wait` | `CONCERT_ASSET_WAIT` | `2s` | Max wait for a global asset slot before 503 |
@@ -100,6 +117,12 @@ Every option can be set with a flag or an environment variable. A flag overrides
 | `-asset-user-wait` | `CONCERT_ASSET_USER_WAIT` | `2s` | Max wait for a per-pass asset slot before 429 |
 | `-admit-ttl` | `CONCERT_ADMIT_TTL` | `10m` | Sliding lifetime of the admission pass (minimum 30s) |
 | `-client-proto-header` | `CONCERT_CLIENT_PROTO_HEADER` | *(empty)* | Header from a trusted TLS terminator carrying the client's HTTP protocol |
+| `-stream-paths` | `CONCERT_STREAM_PATHS` | *(empty)* | WebSocket and SSE paths served outside the room, admission pass required |
+| `-stream-cap` | `CONCERT_STREAM_CAP` | `1000` | Most stream connections open at once |
+| `-priority-cap` | `CONCERT_PRIORITY_CAP` | `0` (a quarter of `-cap`) | Priority lane slots, on top of `-cap` |
+| `-priority-lane-rank` | `CONCERT_PRIORITY_LANE_RANK` | `3` (customer) | Lowest rank that uses the priority lane |
+| `-priority-wait` | `CONCERT_PRIORITY_WAIT` | `5s` | Longest wait for a lane slot before joining the line |
+| `-priority-forms` | `CONCERT_PRIORITY_FORMS` | `true` | Forms from admitted visitors use the lane, and get 503 instead of queuing |
 | `-abuse` | `CONCERT_ABUSE` | `true` | Enable the abuse registry |
 | `-abuse-strikes` | `CONCERT_ABUSE_STRIKES` | `20` | Strike total within the window that triggers a ban |
 | `-abuse-window` | `CONCERT_ABUSE_WINDOW` | `1m` | Window over which strikes accumulate |
@@ -107,7 +130,7 @@ Every option can be set with a flag or an environment variable. A flag overrides
 | `-abuse-max-cooldown` | `CONCERT_ABUSE_MAX_COOLDOWN` | `24h` | Longest ban; also how long ban history is remembered |
 | `-abuse-max-entries` | `CONCERT_ABUSE_MAX_ENTRIES` | `100000` | Max clients tracked at once |
 | `-abuse-allow` | `CONCERT_ABUSE_ALLOW` | *(empty)* | CIDRs that are never struck or banned |
-| `-ban-paths` | `CONCERT_BAN_PATHS` | *(empty)* | Paths that ban the client on first hit; suffix `/*` for a prefix |
+| `-ban-paths` | `CONCERT_BAN_PATHS` | *(empty)* | Paths that ban the client on first hit |
 | `-access-log` | `CONCERT_ACCESS_LOG` | `true` | Write an access log line per non-asset request |
 | `-html` | `CONCERT_HTML_FILE` | *(empty)* | Custom waiting room HTML file |
 | `-skip-url` | `CONCERT_SKIP_URL` | *(empty)* | Payment page URL for the skip-the-line card (see limitations) |
@@ -117,11 +140,25 @@ Every option can be set with a flag or an environment variable. A flag overrides
 | `-upstream-timeout` | `CONCERT_UPSTREAM_TIMEOUT` | `30s` | How long to wait for the origin's response headers |
 | `-api-json` | `CONCERT_API_JSON` | `true` | Answer queued non-browser clients with JSON 429 instead of HTML |
 | `-retry-after` | `CONCERT_RETRY_AFTER` | `5` | `Retry-After` seconds sent to queued API clients |
+| `-tls-domains` | `CONCERT_TLS_DOMAINS` | *(empty)* | Hostnames to get Let's Encrypt certificates for; enables TLS on `-listen` |
+| `-tls-email` | `CONCERT_TLS_EMAIL` | *(empty)* | ACME contact email |
+| `-tls-cache` | `CONCERT_TLS_CACHE` | `/var/lib/concert/acme` | ACME account key and certificate directory |
+| `-tls-staging` | `CONCERT_TLS_STAGING` | `false` | Use the Let's Encrypt staging directory |
+| `-portal-listen` | `CONCERT_PORTAL_LISTEN` | `127.0.0.1:8081` | Admin portal address (restart to change) |
+| `-portal-allow` | `CONCERT_PORTAL_ALLOW` | `127.0.0.1/32,::1/128` | CIDRs allowed to reach the portal |
+| `-portal-session-ttl` | `CONCERT_PORTAL_SESSION_TTL` | `8h` | Portal sign-in lifetime |
+| `-portal-secure-cookie` | `CONCERT_PORTAL_SECURE_COOKIE` | `false` | Mark the portal session cookie `Secure` |
+| `-history-log` | `CONCERT_HISTORY_LOG` | *(empty)* | Portal history log file; empty means `history.jsonl` in `-data-dir`, `off` for memory only (restart to change) |
+| `-data-dir` | `CONCERT_DATA_DIR` | `/var/lib/concert/data` | Directory for settings, bans, the saved queue and the history log (empty disables persistence) |
 | `-version` | | | Print the version and exit |
 | | `CONCERT_ADMIN_TOKEN` | *(empty)* | Bearer token for the admin endpoints; they are disabled when unset |
-| | `CONCERT_ADMIT_SECRET` | *(random)* | Key that signs admission passes; at least 32 bytes |
+| | `CONCERT_ADMIT_SECRET` | *(random)* | Key that signs admission passes and priority grants; at least 32 bytes |
+| | `CONCERT_PORTAL_PASS` | *(empty)* | Admin portal password, at least 16 characters; the portal is off without it |
+| | `NADDR_DATA` | *(empty)* | IPtoASN file for IP details in the portal (plain or `.gz`) |
+| | `NADDR_DATA_POLL` | `30s` | How often `NADDR_DATA` is checked for changes; `off` disables reloading |
+| | `NADDR_ADDR` | *(empty)* | A running naddr service (`host:port` or URL), used when `NADDR_DATA` is empty or unusable |
 
-Both secrets are environment-only on purpose: command-line arguments are visible in `ps` output and shell history.
+Secrets are environment-only on purpose: command-line arguments are visible in `ps` output and shell history.
 
 When `CONCERT_ADMIT_SECRET` is unset, Concert generates a random key at startup. Passes then stop working on restart, and a second instance won't accept the first instance's passes. Set it explicitly in production:
 
@@ -135,7 +172,7 @@ For a PHP-FPM origin, start with `-cap` at or slightly below the pool's `pm.max_
 
 Throughput follows from Little's law: requests admitted per second ≈ `cap` ÷ average time a slot is held. With `-cap 50` and a 200 ms average response, Concert admits about 250 requests per second. If the origin slows down under load, admissions slow down with it, which is exactly the protection you want.
 
-Page capacity can be changed at runtime without a restart; see `POST /_room/cap` below.
+Page capacity can be changed at runtime without a restart, in the portal or with `POST /_room/cap`.
 
 ## Client addresses and trusted proxies
 
@@ -149,24 +186,99 @@ The default trusts loopback only. That is safe even when Concert faces the inter
 
     -trusted-proxies "127.0.0.1/32,::1/128,10.0.0.0/8"
 
-## Persistent settings and bans
+## Admin portal
 
-Concert keeps two files in `-data-dir` (default `/var/lib/concert/data`), created with mode `0600`:
+Set `CONCERT_PORTAL_PASS` and the portal listens on `-portal-listen` (default `127.0.0.1:8081`) for addresses in `-portal-allow`. It has six tabs:
+
+| Tab | Shows |
+|---|---|
+| Overview | Page, asset, stream, priority and abuse counters |
+| Queue | Visitors waiting in line, with actions to move to the front, remove, or remove and ban |
+| Bans | Active bans and ranges; create, change or lift a ban, temporary or permanent |
+| Visitors | Every client the history recorded, with its requests and the bans covering it |
+| Ban log | Every ban in the history: when it began and ends, what started it, and what the banned network requested while blocked |
+| Settings | Every setting, where its value comes from, and a form to change it live |
+
+The Queue, Bans, Visitors and Ban log tables are rendered on the server one page at a time (25 rows by default; 50 and 100 are offered) and only the visible tab updates, every 3 seconds. Rows that move within the page slide to their new place, rows arriving are labeled with where they came from, and rows leaving say which page they moved to. Hovering over a table pauses its updates, each tab has a **Live** switch, and `prefers-reduced-motion` turns the motion off. Expanding a row loads its detail once and reloads it only when the row itself changes.
+
+Visitors rows are tinted by state: red for a permanent ban, amber for a temporary one, green when the last response was 2xx, and blue otherwise.
+
+### IP details
+
+Every address in the portal shows, when the IP database knows it:
+
+- the country's flag emoji, with the country name as a tooltip
+- the ASN and network description
+- badges for the address forms: **4** and **8** for an IPv4 client, **6** for an IPv6 client. The tooltip shows the address, and the **8** tooltip shows both IPv8 forms (8-octet and ASN dot). Click a badge to copy the address.
+
+Expanded rows also show the containing IPv4 or IPv6 range and its IPv8 range. IPv8 follows the Internet-Draft `draft-thain-ipv8-02`, as implemented by naddr's `ess` package.
+
+Concert gets IP details from, in order:
+
+1. `NADDR_DATA`, a local copy of the [IPtoASN](https://iptoasn.com/) combined database, plain or gzip. It is loaded into memory and answers in microseconds. A replaced file is reloaded every `NADDR_DATA_POLL` without a restart; replace it atomically (download to a temporary file in the same directory, then `mv`).
+2. `NADDR_ADDR`, a running naddr service. Concert asks its `/ip` endpoint in the background and caches answers for an hour.
+
+With neither, the portal shows bare addresses and nothing else changes. When `NADDR_DATA` is set but can't be loaded yet, for example while the first download is still running, Concert tries again every minute and switches to it once it loads. The portal's navigation bar and the Settings tab show which source is in use.
+
+Concert never downloads the database itself. `installer.sh` downloads it to `/var/lib/concert/naddr/`, labels it for SELinux, and installs a daily `concert-naddr-data.timer` that refreshes it. Elsewhere:
+
+    curl -fsSL -o /var/lib/concert/naddr/.new https://iptoasn.com/data/ip2asn-combined.tsv.gz
+    gzip -t /var/lib/concert/naddr/.new
+    mv /var/lib/concert/naddr/.new /var/lib/concert/naddr/ip2asn-combined.tsv.gz
+
+The IPtoASN data is governed by its provider's terms.
+
+### Request history
+
+The access log goes to stdout and never sees banned clients, because bans are enforced before it runs. The portal's history does. It keeps:
+
+- every request the access log records
+- every request from a banned client
+- the request that started each ban
+- every 4xx or 5xx response, including on asset paths
+
+It keeps the last 100 requests from each of up to 4,096 addresses, for 72 hours after an address's last request, and each ban for 72 hours after it ends. Successful asset and waiting-room status requests are left out, as they are from the access log.
+
+## Persistent settings, bans, queue and history
+
+Concert keeps these files in `-data-dir` (default `/var/lib/concert/data`), created with mode `0600`:
 
 | File | Holds |
 |---|---|
 | `settings.json` | Settings changed in the admin portal or with `POST /_room/cap` |
 | `bans.json` | Every ban, permanent bans, and offense history |
+| `queue.snapshot` | The waiting line, saved on shutdown and restored on start |
+| `history.jsonl` | The portal's request history and ban log |
 
 Each setting takes the first value it finds, in this order:
 
     settings.json  >  command-line flag  >  CONCERT_* environment variable  >  built-in default
 
-`settings.json` only holds values an operator changed, so everything else keeps following your flags and `concert.env`. **Reset** in the portal removes a value from the file. Every change is validated by building a throwaway copy of Concert before it is written, so a saved file always starts. If you edit the file by hand and Concert refuses to start, the error names the file: fix it or delete it.
+`settings.json` only holds values an operator changed, so everything else keeps following your flags and `concert.env`. **Reset** in the portal removes a value from the file. Every change is validated by building a complete new configuration before it is written, so a saved file always starts. If you edit the file by hand and Concert refuses to start, the error names the file: fix it or delete it.
 
-Page slots, queue depth, ticket TTL, pricing, the skip URL and VIP pass lifetime apply immediately. Every other setting is saved at once and takes effect on the next `systemctl restart concert`; the portal marks those as *pending restart*. Secrets (`CONCERT_ADMIN_TOKEN`, `CONCERT_ADMIT_SECRET`, `CONCERT_PORTAL_PASS`) and `-data-dir` itself are never stored in the file.
+Every setting applies immediately, without a restart, except the listen address, the portal address and the history log, which are set in `concert.env` and take a restart. Secrets (`CONCERT_ADMIN_TOKEN`, `CONCERT_ADMIT_SECRET`, `CONCERT_PORTAL_PASS`), `-data-dir` itself and the IP database (`NADDR_*`) are never stored in the file.
 
-Bans are restored at startup. Administrator bans are written before the API answers; automatic bans within a second. Addresses added to `-abuse-allow` since a ban was made are not restored as banned. A corrupt `bans.json` stops startup rather than silently lifting permanent bans. Set `-data-dir ""` to keep everything in memory as before.
+Bans are restored at startup. Administrator bans are written before the API answers; automatic bans within a second. Addresses added to `-abuse-allow` since a ban was made are not restored as banned. A corrupt `bans.json` stops startup rather than silently lifting permanent bans. Set `-data-dir ""` to keep everything in memory.
+
+### The history log
+
+With `-data-dir` set, the history is also written to `history.jsonl` (`-history-log` moves it, or turns it off with `off`), so an attack that ended in a restart still shows who was banned and what they probed. Each line is one JSON event:
+
+| `t` | Event |
+|---|---|
+| `req` | A recorded request, with what `ess` said about its address (`ess`: country, ASN, description, range, IPv8 form) |
+| `agg` | Requests a banned client made past its first 100 during a ban, counted per path once a second |
+| `ban` | A ban began or changed (the full state; the latest line wins) |
+| `lift` | A ban was lifted early |
+| `trig` | The request that started a ban, when it was identified afterwards |
+
+For example:
+
+    {"t":"req","at":"2026-09-26T21:18:20.1Z","ip":"203.0.113.9","method":"GET","path":"/.env","status":429,"latency_us":83,"ua":"curl/8.5","triggered":true,"ban":12,"ess":{"cc":"LT","country":"Lithuania","n":218785,"asn":"AS218785","desc":"UAB Cherry Servers","range":"203.0.113.0/24","ip8":"0.3.86.161.203.0.113.9"}}
+
+Writes go through a buffer flushed every second, so a request never waits for the disk; under extreme load events that don't fit are dropped and counted (see Settings → History log). A flood from a banned client is written one line per request for its first 100 requests during that ban, then summarised once a second, so an attack can't fill the disk. The file rotates at 64 MB, keeping four older files (`history.jsonl.1` is the newest).
+
+On startup the files are replayed oldest first: requests older than 72 hours are skipped, and bans still in force are matched with `bans.json`. The replay takes a few seconds for a full set of files.
 
 ### Permanent bans
 
@@ -174,7 +286,7 @@ The portal's ban dialog has a **Permanent** switch, for single addresses and ran
 
 ### Bans drop waiting visitors
 
-Any new ban, whether from the portal, a ban path or strikes, removes that address's or range's visitors from the line at once. Their next `/queue/status` poll returns `ready:true`, so the waiting room page reloads straight into the block notice, and their `room_ticket` is invalidated so an unban means rejoining at the back. room's internal `queue_depth` keeps counting the old ticket until the reaper removes it; `live_queue_depth` and the portal are accurate immediately.
+Any new ban, whether from the portal, a ban path or strikes, removes that address's or range's visitors from the line at once. Their next `/queue/status` poll returns `ready:true`, so the waiting room page reloads straight into the block notice, and their `room_ticket` is invalidated so an unban means rejoining at the back.
 
 ## Assets
 
@@ -210,15 +322,13 @@ A request that finds its pool full waits up to `-asset-user-wait`, then gets `42
 
     concert -client-proto-header X-Client-Proto ...
 
-Values starting with `HTTP/1` use the HTTP/1.1 rule, and `HTTP/2` or `HTTP/3` use the HTTP/2 rule. Anything else falls back to the protocol of Concert's own connection. Only enable this when a terminator you control sets the header, since it overwrites whatever the client sent.
+Values starting with `HTTP/1` use the HTTP/1.1 rule, and `HTTP/2` or `HTTP/3` use the HTTP/2 rule. Anything else falls back to the protocol of Concert's own connection. Only enable this when a terminator you control sets the header, since it overwrites whatever the client sent. When Concert terminates TLS itself (`-tls-domains`), it sees the protocol directly and needs no header.
 
 ### Global asset concurrency
 
 After its per-user check, every asset request takes a slot from one global semaphore. By default its size is `cap × asset-user-cap-h2`: with `-cap 1200` and `-asset-user-cap-h2 200`, the asset cap is 240,000. Set `-asset-cap` to override it with a number that reflects what your asset tier can actually serve. A request that can't get a global slot within `-asset-wait` gets `503 Service Unavailable` with `Retry-After: 1`.
 
 The per-user check runs first, so a client over its own limit is rejected before it can take a global slot.
-
-The asset cap is fixed at startup. `POST /_room/cap` changes only the page cap.
 
 ### Public assets
 
@@ -235,6 +345,15 @@ List those paths in `-asset-public`. They skip the pass check but still count ag
 
 The asset path writes no log lines; activity is counted in `/_room/stats`. Asset paths, `/queue/status` and `/_room/healthz` are also left out of the access log, and `-access-log=false` turns the access log off entirely.
 
+## Streams
+
+WebSocket and server-sent event connections can stay open for hours. In the waiting room each one would hold a page slot for its whole life. Paths listed in `-stream-paths` are served outside the room instead, with two guards of their own:
+
+- **A valid admission pass.** Only visitors already admitted to a page can open a stream, so nobody skips the line through one.
+- **A global cap of `-stream-cap` connections.** When it is full, new connections get `503` with `Retry-After`; stream clients reconnect on their own.
+
+A forged pass earns the same strike as on the asset tier.
+
 ## Abuse registry
 
 Concert keeps a registry of clients that misbehave. Each abusive act adds weighted strikes to the client's address. When a client's strikes within `-abuse-window` reach `-abuse-strikes`, it is banned for a cooldown. While banned, every request from it gets:
@@ -246,7 +365,7 @@ Concert keeps a registry of clients that misbehave. Each abusive act adds weight
 
     {"error":"temporarily blocked","retry_after_seconds":300}
 
-Enforcement happens before anything else: before the queue, the asset tier, the operations endpoints and the access log. It is a single map lookup, and banned requests are not logged.
+Enforcement happens before anything else: before the queue, the asset tier, the operations endpoints and the access log. It is a single map lookup, and banned requests are not logged (the portal's history records them).
 
 ### What earns strikes
 
@@ -273,11 +392,15 @@ Only list paths your site genuinely never serves. Don't list `/wp-login.php` or 
 
 The first ban lasts `-abuse-cooldown`. Each later ban of the same client doubles it, up to `-abuse-max-cooldown`: with the defaults, 5 minutes, then 10, 20, 40, and so on to 24 hours. A client whose last ban ended more than `-abuse-max-cooldown` ago, with no strikes since, is forgotten and starts from the beginning.
 
+### Range bans
+
+Administrators can ban a whole CIDR range from the portal or the admin API, as broad as `/8` for IPv4 and `/16` for IPv6. Ranges are never banned by strikes. Addresses in `-abuse-allow` and `-trusted-proxies` stay reachable inside a banned range.
+
 ### Who is never banned
 
 Addresses in `-abuse-allow` and in `-trusted-proxies` are never struck or banned. List your monitoring systems, your office, and your own address there, so an operator mistake can't lock you out of the admin endpoints. Trusted proxies are exempt because they only appear as the client when a request carries no forwarding headers, such as nginx's own health checks.
 
-Think carefully about shared addresses. Behind carrier-grade NAT or a large office network, thousands of real people can share one IPv4 address, and their strikes add up together. If you expect heavy traffic from such networks, add their ranges to `-abuse-allow` or raise `-abuse-strikes`.
+Think carefully about shared addresses. Behind carrier-grade NAT or a large office network, thousands of real people can share one IPv4 address, and their strikes add up together. If you expect heavy traffic from such networks, add their ranges to `-abuse-allow` or raise `-abuse-strikes`. The portal's IP details help here: the ASN and description show when an address belongs to a mobile carrier or a large network.
 
 IPv6 clients are tracked by their `/64` prefix, because a single IPv6 host can rotate through billions of addresses in its own `/64`.
 
@@ -293,7 +416,7 @@ At most `-abuse-max-entries` clients are tracked. When the table is full, a new 
 
 That covers payment-provider webhooks, certificate renewal challenges and uptime checks. Bypassed paths are otherwise unprotected, so never bypass anything that runs expensive application code.
 
-A path may appear in only one of `-bypass`, `-assets`, `-asset-public` and `-ban-paths`. Overlapping or conflicting entries are rejected at startup.
+A path may appear in only one of `-bypass`, `-assets`, `-asset-public`, `-stream-paths` and `-ban-paths`. Overlapping or conflicting entries are rejected at startup.
 
 ## API and non-browser clients
 
@@ -325,44 +448,12 @@ These are never queued, so they keep answering even when the room is full. Banne
 | Endpoint | Purpose |
 |---|---|
 | `GET /_room/healthz` | Liveness check; returns `ok` |
-| `GET /_room/stats` | Page, asset and abuse counters |
-| `POST /_room/cap` | Change page capacity at runtime (admin) |
-| `GET /_room/abuse` | List banned clients (admin) |
-| `DELETE /_room/abuse?client=…` | Unban a client and forget its history (admin) |
+| `GET /_room/stats` | Page, asset, stream and abuse counters |
+| `POST /_room/cap` | Change page capacity at runtime and save it to `settings.json` (admin) |
+| `GET /_room/abuse` | List banned clients and ranges (admin) |
+| `DELETE /_room/abuse?client=…` | Unban a client or range and forget its history (admin) |
 
 Admin endpoints require `Authorization: Bearer $CONCERT_ADMIN_TOKEN` and return 404 when the token is unset. Wrong tokens earn strikes.
-
-Example stats output:
-
-    {
-      "abuse_bans_total": 7,
-      "abuse_dropped_total": 0,
-      "abuse_enabled": true,
-      "abuse_rejected_total": 1893,
-      "abuse_strikes_total": 164,
-      "abuse_tracked": 41,
-      "asset_cap": 64000,
-      "asset_denied_total": 312,
-      "asset_global_throttled_total": 0,
-      "asset_in_flight": 214,
-      "asset_served_total": 48211,
-      "asset_user_cap_h1": 8,
-      "asset_user_cap_h2": 128,
-      "asset_user_throttled_total": 9,
-      "asset_users": 1180,
-      "cap": 500,
-      "evicted_total": 3,
-      "live_queue_depth": 118,
-      "max_queue_depth": 10000,
-      "occupancy": 500,
-      "promoted_total": 0,
-      "queue_depth": 121,
-      "queued_total": 412,
-      "timeouts_total": 0,
-      "token_ttl": "5m0s",
-      "upstream": "http://127.0.0.1:3000",
-      "utilization": 0.98
-    }
 
 `live_queue_depth` counts only clients still holding a ticket, so it is the better number for dashboards than `queue_depth`, which briefly includes abandoned tickets. `asset_users` is the number of passes with an active per-user pool.
 
@@ -371,12 +462,10 @@ Listing and lifting bans:
     curl https://example.com/_room/abuse \
          -H "Authorization: Bearer $CONCERT_ADMIN_TOKEN"
 
-    {"bans":[{"client":"203.0.113.9","until":"2026-09-21T18:04:11Z","remaining_seconds":243,"offenses":1}],"tracked":41}
-
     curl -X DELETE "https://example.com/_room/abuse?client=203.0.113.9" \
          -H "Authorization: Bearer $CONCERT_ADMIN_TOKEN"
 
-IPv6 clients appear and are unbanned as their `/64`, for example `client=2001:db8:1:2::/64`.
+IPv6 clients appear and are unbanned as their `/64`, for example `client=2001:db8:1:2::/64`; ranges as their CIDR, for example `client=203.0.0.0/16`.
 
 Raising page capacity during an event:
 
@@ -403,6 +492,8 @@ Your application ranks its own visitors by adding a header to any page response:
 
     Concert-Priority: checkout; ttl=30m
 
+`concert.php` in this repository is a ready-made helper for PHP applications.
+
 | Rank | Value | Send it when | While the room is full | Default TTL |
 |---|---|---|---|---|
 | 0 | `guest` | Anonymous, or to clear a grant | First come, first served | — |
@@ -413,14 +504,14 @@ Your application ranks its own visitors by adding a header to any page response:
 | 5 | `checkout` | Payment in progress | Priority lane | 30m |
 | 6 | `staff` | Operators and support | Priority lane, served first | 8h |
 
-While the room is busy, ranks at or above `-priority-lane-rank` skip the line through the priority lane: a separate pool of `-priority-cap` slots, so the origin sees at most `-cap + -priority-cap` page requests at once. A lane request waits up to `-priority-wait` for a slot, highest rank first, then joins the line. Ranks below it wait in arrival order for now; set the lane rank to 2 to let prospects skip the line too. Bans apply at every rank.
+Concert removes the header before the response reaches the browser and stores the grant in `concert_priority`, a cookie signed with a key derived from `CONCERT_ADMIT_SECRET` and bound to the visitor's admission pass. Browsers can't forge a grant or move one to another pass.
 
 - The latest header wins, so the application can raise, lower or clear (`guest`) a rank, and every header renews it.
 - `ttl` is seconds or a duration, clamped to 1m–24h.
 - Unknown values are ignored and logged.
 - Only page responses grant ranks: asset, bypass and stream responses can't.
 
-While the room is busy, ranks below `-priority-lane-rank` still wait, but the line stays ordered by rank. Ranks at or above it skip the line through the priority lane: a separate pool of `-priority-cap` slots, so the origin sees at most `-cap + -priority-cap` page requests at once. A lane request waits up to `-priority-wait` for a slot, highest rank first, then joins the line at the front of its rank. Bans apply at every rank.
+While the room is busy, ranks at or above `-priority-lane-rank` skip the line through the priority lane: a separate pool of `-priority-cap` slots, so the origin sees at most `-cap + -priority-cap` page requests at once. A lane request waits up to `-priority-wait` for a slot, highest rank first, then joins the line. Ranks below the lane rank wait in arrival order, and the portal shows their rank. Set the lane rank to 2 to let prospects skip the line too. Bans apply at every rank.
 
 With `-priority-forms`, a form submission from a visitor already admitted uses the lane too. If the lane stays full, the visitor gets `503` and a page saying the form was not sent. Queuing the submission would lose the form.
 
@@ -433,7 +524,8 @@ Concert removes all of these from requests before forwarding to the origin, so y
 | `room_ticket` | HttpOnly. Identifies a queued visitor's place in line |
 | `room_pass` | HttpOnly. VIP pass after paying to skip the line |
 | `room_probe` | Readable by JavaScript. Lets the waiting room page detect whether cookies work; carries no secret |
-| `concert_admit` | HttpOnly. Signed admission pass for the asset tier |
+| `concert_admit` | HttpOnly. Signed admission pass for the asset and stream tiers |
+| `concert_priority` | HttpOnly. Signed rank granted by your application |
 
 A browser that refuses cookies can't hold a place in line. Instead of reloading forever, the waiting room page detects this and tells the visitor that cookies are required.
 
@@ -463,6 +555,8 @@ The waiting room page loads before the visitor has an admission pass. Any styles
 A typical layout keeps TLS at the edge and Concert on localhost:
 
     internet ──▶ nginx :443 (TLS) ──▶ concert 127.0.0.1:8080 ──▶ php-fpm site 127.0.0.1:3000
+
+Or let Concert terminate TLS itself with Let's Encrypt (`-tls-domains`), listening on `:443`.
 
 nginx:
 
@@ -494,7 +588,7 @@ nginx:
 
 Put the `map` block in the `http` section. `X-Forwarded-For` is what lets Concert identify and ban individual clients; without it every request appears to come from nginx, which is exempt. Turning `proxy_buffering` off lets streamed responses reach clients immediately.
 
-systemd unit (`/etc/systemd/system/concert.service`):
+On RHEL-family systems, `installer.sh` sets up everything below with SELinux confinement. By hand, a systemd unit (`/etc/systemd/system/concert.service`):
 
     [Unit]
     Description=Concert waiting room proxy
@@ -503,18 +597,8 @@ systemd unit (`/etc/systemd/system/concert.service`):
 
     [Service]
     ExecStart=/usr/local/bin/concert
-    Environment=CONCERT_LISTEN=127.0.0.1:8080
-    Environment=CONCERT_UPSTREAM=http://127.0.0.1:3000
-    Environment=CONCERT_CAPACITY=50
-    Environment=CONCERT_SECURE_COOKIE=true
-    Environment=CONCERT_CLIENT_PROTO_HEADER=X-Client-Proto
-    Environment=CONCERT_ASSETS=/wp-content/themes/*,/wp-content/plugins/*,/wp-includes/*
-    Environment=CONCERT_ASSET_PUBLIC=/wp-content/uploads/*
-    Environment=CONCERT_BYPASS=/favicon.ico,/robots.txt,/.well-known/acme-challenge/*
-    Environment=CONCERT_BAN_PATHS=/.env,/.git/*,/.aws/*,/phpmyadmin/*,/wp-config.php.bak
-    Environment=CONCERT_ABUSE_ALLOW=198.51.100.10
-    Environment=CONCERT_ACCESS_LOG=false
-    EnvironmentFile=/etc/concert/secrets.env
+    EnvironmentFile=/etc/concert/concert.env
+    StateDirectory=concert
     Restart=on-failure
     DynamicUser=yes
     NoNewPrivileges=yes
@@ -522,22 +606,38 @@ systemd unit (`/etc/systemd/system/concert.service`):
     [Install]
     WantedBy=multi-user.target
 
-`/etc/concert/secrets.env`, mode `0600`:
+`/etc/concert/concert.env`, mode `0600`:
 
+    CONCERT_LISTEN=127.0.0.1:8080
+    CONCERT_UPSTREAM=http://127.0.0.1:3000
+    CONCERT_CAPACITY=50
+    CONCERT_SECURE_COOKIE=true
+    CONCERT_CLIENT_PROTO_HEADER=X-Client-Proto
+    CONCERT_ASSETS=/wp-content/themes/*,/wp-content/plugins/*,/wp-includes/*
+    CONCERT_ASSET_PUBLIC=/wp-content/uploads/*
+    CONCERT_BYPASS=/favicon.ico,/robots.txt,/.well-known/acme-challenge/*
+    CONCERT_BAN_PATHS=/.env,/.git/*,/.aws/*,/phpmyadmin/*,/wp-config.php.bak
+    CONCERT_ABUSE_ALLOW=198.51.100.10
+    CONCERT_DATA_DIR=/var/lib/concert/data
+    NADDR_DATA=/var/lib/concert/naddr/ip2asn-combined.tsv.gz
+    NADDR_DATA_POLL=5m
     CONCERT_ADMIT_SECRET=…
     CONCERT_ADMIN_TOKEN=…
+    CONCERT_PORTAL_PASS=…
 
-On `SIGTERM` Concert stops accepting new connections and gives in-flight requests up to 30 seconds to finish.
+On `SIGTERM` Concert stops accepting new connections, gives in-flight requests up to 30 seconds to finish, then saves the queue, bans and history.
 
 ## Limitations
 
-**One instance, one queue, one registry.** Queue state, asset semaphores and the abuse registry live in the process's memory. Two Concert instances are two independent waiting rooms: the origin sees up to twice `-cap`, a visitor's place in line exists only on the instance that issued their ticket, and a client banned on one instance is not banned on the other. If you must run more than one, divide `-cap` by the number of instances and enable sticky sessions at the load balancer. Use a cookie the load balancer inserts itself, because `room_ticket` is only issued once a visitor is queued. Admission passes work across instances as long as they share `CONCERT_ADMIT_SECRET`.
+**One instance, one queue, one registry.** Queue state, asset semaphores, the abuse registry and the history live in the process's memory. Two Concert instances are two independent waiting rooms: the origin sees up to twice `-cap`, a visitor's place in line exists only on the instance that issued their ticket, and a client banned on one instance is not banned on the other. If you must run more than one, divide `-cap` by the number of instances and enable sticky sessions at the load balancer. Use a cookie the load balancer inserts itself, because `room_ticket` is only issued once a visitor is queued. Admission passes and priority grants work across instances as long as they share `CONCERT_ADMIT_SECRET`.
 
 **A pass limits concurrency, not request rate.** A pass holder can have at most its per-user cap of asset requests in flight, but fast assets finish quickly, so a single pass can still generate many requests per second. The global semaphore bounds the total load on the host regardless. Volumetric attacks from many addresses belong at a CDN or WAF in front of Concert; the abuse registry handles individual misbehaving clients.
 
-**Long-lived connections hold slots.** WebSockets and server-sent event streams keep their page slot until they close. With `-cap 50` and 50 open sockets, nobody else gets in. Run a separate Concert instance for long-lived paths.
+**Ranked visitors below the lane rank wait in arrival order.** room can't yet reorder its line by rank, so `member` and `prospect` visitors keep their arrival position; the portal still shows their rank.
 
-**Skip the line is not wired end to end.** `-rate`, `-surge`, `-skip-url`, and `-pass` enable the pricing card on the waiting room page. But promoting a paid visitor requires calling room's in-process API after payment, and Concert does not yet expose an endpoint your payment flow can call. Leave `-rate` at `0` in production for now.
+**Skip the line is not wired end to end.** `-rate`, `-surge`, `-skip-url`, and `-pass` enable the pricing card on the waiting room page. But promoting a paid visitor requires calling room's in-process API after payment, and Concert does not yet expose an endpoint your payment flow can call. Leave `-rate` at `0` in production for now. The portal's "move to the front" works without pricing.
+
+**IPv8 is a draft.** The IPv8 forms follow an individual Internet-Draft, not an IETF standard, and are derived from IPtoASN's IPv4-to-ASN mapping.
 
 ## Development
 
@@ -545,16 +645,20 @@ On `SIGTERM` Concert stops accepting new connections and gives in-flight request
     make build                  # binaries for linux, darwin, windows × amd64, arm64 in bin/
     go test -race -count=1 ./...
 
-The test suite runs the real waiting room, asset tier and abuse registry against a fake origin. It covers:
+The test suite runs the real waiting room, asset tier, abuse registry, portal and history against a fake origin. It covers:
 
-- configuration precedence and validation
+- configuration precedence, validation and live changes
 - client address resolution through trusted and untrusted proxies
 - admission pass signing, tampering, staleness, expiry and refresh
-- per-user HTTP/1.1 and HTTP/2 limits, and the global asset limit
-- every strike source, ban paths, escalating cooldowns, allowlists, IPv6 /64 grouping, and the admin ban endpoints
-- queueing for browsers and API clients, the queue-depth breaker, and cookie-jar resume
-- bypass routing, streaming, and forwarded-header handling
-- graceful shutdown
+- per-user HTTP/1.1 and HTTP/2 limits, the global asset limit, and streams
+- every strike source, ban paths, escalating cooldowns, allowlists, IPv6 /64 grouping, range bans, permanent bans and their persistence
+- queueing for browsers and API clients, the queue-depth breaker, cookie-jar resume, and the queue across restarts
+- priority grants, the priority lane and forms
+- IP details from a local IPtoASN file and from a naddr service, flags, and the 4 / 6 / 8 badges
+- the portal's paginated fragments, row tints, and the history log across restarts, flood aggregation and rotation
+- bypass routing, streaming, forwarded-header handling, and graceful shutdown
+
+The tests never read your `NADDR_DATA`; they build small databases of their own.
 
 ## License
 

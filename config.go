@@ -91,8 +91,14 @@ type config struct {
 	// declared with every other flag, from settingDefs in settings.go.
 	portal portalConfig
 
-	// dataDir holds settings.json, bans.json and the saved queue; see
-	// settings.go, persist.go and queue.go. Empty disables persistence.
+	// historyLog is where the portal's request history is written and
+	// restored from; see history_log.go. Empty means history.jsonl in
+	// dataDir; "off" keeps the history in memory only.
+	historyLog string
+
+	// dataDir holds settings.json, bans.json, the saved queue and the
+	// history log; see settings.go, persist.go, queue.go and history_log.go.
+	// Empty disables persistence.
 	dataDir string
 
 	// Filled by parseConfig; see loadSettingsLayer. Nil for configs built
@@ -126,7 +132,7 @@ func parseConfig(fs *flag.FlagSet, args []string) (config, bool, error) {
 
 	// -data-dir says where settings.json is, so it cannot itself live there.
 	fs.StringVar(&cfg.dataDir, "data-dir", env.String("CONCERT_DATA_DIR", defaultDataDir),
-		"directory for settings.json, bans.json and the saved queue (empty disables persistence)")
+		"directory for settings.json, bans.json, the saved queue and the history log (empty disables persistence)")
 
 	showVersion := fs.Bool("version", false, "show version")
 

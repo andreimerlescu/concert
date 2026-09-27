@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/netip"
@@ -15,34 +17,32 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// Request history for the admin portal's History tab.
+// Request history for the admin portal's Visitors and Ban log tabs.
 //
 // The access log goes to stdout and scrolls away, and it never sees banned
-// clients at all: bans are enforced before the logger runs. A ban that fired
-// while nobody was watching left no trace of what the client was probing
-// for. The history keeps, in memory, the recent requests of every client the
-// main listener has seen, grouped by client address, plus a log of every
-// ban: when it began, when it ends or ended, which request started it, and
-// every request the banned network made while it was blocked.
+// clients at all: bans are enforced before the logger runs. The history
+// keeps, in memory, the recent requests of every client the main listener
+// has seen, grouped by client address, plus a log of every ban: when it
+// began, when it ends or ended, which request started it, and every request
+// the banned network made while it was blocked. With a history log (see
+// history_log.go) all of it survives restarts.
 //
 // What is recorded: everything the access log records, and also requests
 // from banned clients, the request that started a ban, and any request
 // answered with 4xx or 5xx, including on asset and status paths (a forged
 // admission pass shows up here). Successful asset, /queue/status and
-// /_room/healthz requests are left out, as they are from the access log:
-// they are most of the traffic and say nothing about abuse.
+// /_room/healthz requests are left out, as they are from the access log.
 //
 // Recording happens in portal.wrap once the response status is known (the
 // first header or body write), so a WebSocket or event stream appears the
 // moment it opens rather than when it closes.
 //
 // Bounds: at most historyMaxClients addresses with historyPerClient requests
-// each. When the table is full, the quietest client that was never banned
-// makes room. A ban window keeps up to historyWindowPaths distinct paths and
-// historyWindowClients addresses and counts the rest. Clients idle for
-// historyRetention, and bans that ended that long ago, are forgotten. The
-// history lives in memory only; bans still in force at startup (restored
-// from bans.json) are listed with an unknown start.
+// each; the portal pages through them. When the table is full, the quietest
+// client that was never banned makes room. A ban window keeps up to
+// historyWindowPaths distinct paths and historyWindowClients addresses and
+// counts the rest. Clients idle for historyRetention, and bans that ended
+// that long ago, are forgotten.
 
 const (
 	historyShards        = 16
@@ -55,12 +55,15 @@ const (
 	historyRetention     = 72 * time.Hour
 	historyPathLen       = 256
 	historyUALen         = 200
-	historyListLimit     = 500 // clients the History tab lists
-	historyBanLimit      = 200 // bans the ban log lists
+	historyListLimit     = 500 // clients the JSON API lists
+	historyBanLimit      = 200 // bans the JSON API lists
 	historySummaryPaths  = 3   // top paths shown per ban in the ban log
 	historyTriggerDelay  = 500 * time.Millisecond
 	historyTriggerWindow = 5 * time.Second
 	historyUAOther       = uint8(255)
+	historyRawPerBan     = 100 // blocked requests per client per ban written to the log one by one
+	historyAggEvery      = time.Second
+	historyAggMax        = 50000 // clients aggregated per second before counts are dropped
 )
 
 // ─── recording ───────────────────────────────────────────────────────────────
@@ -169,6 +172,10 @@ type banTrigger struct {
 	at     time.Time
 }
 
+func (t *banTrigger) logTrigger() *logTrigger {
+	return &logTrigger{Client: t.client.String(), Method: t.method, Path: t.path, Status: t.status, At: t.at.UTC()}
+}
+
 // banWindow is one ban from start to end, with what the banned network
 // requested while it was blocked.
 type banWindow struct {
@@ -192,6 +199,27 @@ type banWindow struct {
 	otherPaths   int64
 	clients      map[netip.Addr]int64
 	otherClients int64
+
+	logged map[netip.Addr]int // blocked requests written to the log, per client
+}
+
+func newBanWindow(id uint64, scope netip.Prefix, begin time.Time) *banWindow {
+	single := isSingleScope(scope)
+	w := &banWindow{
+		id:       id,
+		scope:    scope,
+		rangeBan: !single,
+		begin:    begin,
+		paths:    make(map[string]int64),
+		clients:  make(map[netip.Addr]int64),
+		logged:   make(map[netip.Addr]int),
+	}
+	if single {
+		w.target = displayKey(scope.Addr())
+	} else {
+		w.target = scope.String()
+	}
+	return w
 }
 
 func (w *banWindow) active(now time.Time) bool {
@@ -224,19 +252,74 @@ func (w *banWindow) untilIs(until int64) bool {
 	return !w.permanent && w.until.UnixNano() == until
 }
 
+// count adds n blocked requests from ip for path.
+func (w *banWindow) count(ip netip.Addr, path string, at time.Time, n int64) {
+	w.requests += n
+	if w.firstHit.IsZero() || at.Before(w.firstHit) {
+		w.firstHit = at
+	}
+	if at.After(w.lastHit) {
+		w.lastHit = at
+	}
+	countBounded(w.paths, path, historyWindowPaths, &w.otherPaths, n)
+	countBounded(w.clients, ip, historyWindowClients, &w.otherClients, n)
+}
+
+// event is the window's full state as a log line. Caller holds h.mu.
+func (w *banWindow) event() *historyEvent {
+	ev := &historyEvent{
+		T: evBan, At: time.Now().UTC(), Ban: w.id, Target: w.target, Scope: w.scope.String(),
+		Range: w.rangeBan, Begin: timePtr(w.begin), Permanent: w.permanent, Changes: w.changes, Source: w.source,
+	}
+	if !w.permanent {
+		ev.Until = timePtr(w.until)
+	}
+	return ev
+}
+
+func (w *banWindow) liftEvent() *historyEvent {
+	return &historyEvent{T: evLift, At: w.liftedAt.UTC(), Ban: w.id, By: w.liftedBy}
+}
+
+type aggKey struct {
+	id uint64
+	ip netip.Addr
+}
+
+type aggVal struct {
+	n     int64
+	first time.Time
+	last  time.Time
+	paths map[string]int64
+	other int64
+}
+
 // history is the portal's record of requests and bans.
 type history struct {
 	reg     *abuseRegistry  // always the app's registry, even while -abuse=false
 	grants  *priorityGrants // reads each request's rank; see priority.go
+	info    *ipLookup       // ess details written to the log with each request
+	log     *historyLog     // nil: memory only
+	logErr  string          // why the log is off, when one was asked for
 	shards  [historyShards]historyShard
 	count   atomic.Int64
 	evicted atomic.Int64
 
-	mu      sync.Mutex
-	windows []*banWindow // oldest first
+	mu      sync.RWMutex
+	windows []*banWindow          // oldest first
+	byID    map[uint64]*banWindow // every window in windows
+	active  map[uint64]*banWindow // windows that may still be in force
 	nextID  uint64
 
+	aggMu      sync.Mutex
+	agg        map[aggKey]*aggVal
+	aggDropped atomic.Int64
+
 	quietCache atomic.Pointer[quietRules]
+
+	stop     chan struct{}
+	stopOnce sync.Once
+	wg       sync.WaitGroup
 }
 
 type historyShard struct {
@@ -251,27 +334,130 @@ type quietRules struct {
 	rules []pathRule
 }
 
-// newHistory builds an empty history and lists every ban already in force,
-// such as those restored from bans.json, with an unknown start.
-func newHistory(reg *abuseRegistry, grants *priorityGrants, now time.Time) *history {
-	h := &history{reg: reg, grants: grants}
+// newHistory builds the history, replays the history log at logPath when
+// one is given, and lists every ban in force that the log did not know
+// about, such as bans restored from bans.json, with an unknown start.
+func newHistory(reg *abuseRegistry, grants *priorityGrants, info *ipLookup, logPath string, now time.Time) *history {
+	h := &history{
+		reg: reg, grants: grants, info: info,
+		byID:   map[uint64]*banWindow{},
+		active: map[uint64]*banWindow{},
+		agg:    map[aggKey]*aggVal{},
+		stop:   make(chan struct{}),
+	}
 	for i := range h.shards {
 		h.shards[i].m = make(map[netip.Addr]*historyClient)
 	}
-	for _, b := range reg.bans(now) {
+
+	if logPath != "" {
+		start := time.Now()
+		st, err := replayHistoryLog(logPath, historyLogKeep, now.Add(-historyRetention), h.apply)
+		if err != nil {
+			log.Printf("history: could not replay %s: %v; continuing with what was read", logPath, err)
+		}
+		if st.events > 0 || st.bad > 0 {
+			log.Printf("history: restored %d event(s) from %s in %s (%d unreadable, %d older than %s)",
+				st.events, logPath, time.Since(start).Round(time.Millisecond), st.bad, st.old, historyRetention)
+		}
+		h.mu.Lock()
+		h.dropEndedLocked(now.Add(-historyRetention), now)
+		h.trimLocked(now)
+		h.mu.Unlock()
+
+		l, err := openHistoryLog(logPath, historyLogMaxBytes, historyLogKeep)
+		if err != nil {
+			h.logErr = err.Error()
+			log.Printf("history: %v; the history is kept in memory only", err)
+		} else {
+			h.log = l
+		}
+	}
+
+	h.reconcile(now)
+	if h.log != nil {
+		h.wg.Add(1)
+		go h.aggLoop()
+	}
+	return h
+}
+
+// reconcile matches the windows the log restored with the bans actually in
+// force: a window whose ban is gone is ended, a ban with no window gets one.
+func (h *history) reconcile(now time.Time) {
+	inForce := map[netip.Prefix]int64{}
+	for _, b := range h.reg.bans(now) {
 		t, err := parseBanTarget(b.Client)
 		if err != nil {
 			continue
 		}
-		w := h.newWindowLocked(t.scope(), time.Time{})
-		if b.Permanent {
-			w.permanent = true
-		} else {
-			w.until = b.Until
+		until := banForever
+		if !b.Permanent {
+			until = b.Until.UnixNano()
 		}
-		w.source = "in force when concert started (restored from bans.json)"
+		inForce[t.scope()] = until
 	}
-	return h
+
+	var events []*historyEvent
+	h.mu.Lock()
+	for id, w := range h.active {
+		if !w.active(now) {
+			delete(h.active, id)
+			continue
+		}
+		until, ok := inForce[w.scope]
+		if !ok {
+			w.liftedAt, w.liftedBy = now, "concert restarted without it (not in bans.json)"
+			delete(h.active, id)
+			events = append(events, w.liftEvent())
+			continue
+		}
+		delete(inForce, w.scope)
+		if !w.untilIs(until) {
+			w.setUntil(until)
+			w.changes++
+			events = append(events, w.event())
+		}
+	}
+	for scope, until := range inForce {
+		w := h.newWindowLocked(scope, time.Time{})
+		w.setUntil(until)
+		w.source = "in force when concert started (restored from bans.json)"
+		events = append(events, w.event())
+	}
+	h.mu.Unlock()
+	for _, ev := range events {
+		h.log.emit(ev)
+	}
+}
+
+// close flushes the aggregates and the log. Safe on a nil history.
+func (h *history) close() {
+	if h == nil {
+		return
+	}
+	h.stopOnce.Do(func() {
+		close(h.stop)
+		h.wg.Wait()
+		if h.log != nil {
+			h.flushAgg()
+			h.log.close()
+		}
+	})
+}
+
+// describeLog is the history log's state for operators.
+func (h *history) describeLog() string {
+	if h == nil {
+		return "off: the admin portal is off, so no history is kept"
+	}
+	if h.log == nil {
+		if h.logErr != "" {
+			return "off: " + h.logErr
+		}
+		return "off: memory only (-history-log off, or -data-dir empty)"
+	}
+	return fmt.Sprintf("%s · %d event(s) written · %d dropped", h.log.path,
+		h.log.written.Load(), h.log.dropped.Load()+h.aggDropped.Load())
 }
 
 // attach adds the history to the registry's ban callback, keeping the
@@ -352,74 +538,119 @@ func (h *history) record(g *generation, ip netip.Addr, req historyRequest, statu
 		blocked: blocked,
 		rank:    req.rank,
 	}
+	logRaw := true
 	if blocked || bannedNow {
-		e.window, e.triggered = h.hitWindow(ip, e, start, !blocked)
+		e.window, e.triggered, logRaw = h.hitWindow(ip, e, start, !blocked)
 	}
-	h.add(ip, e, clip(req.ua, historyUALen))
+	ua := clip(req.ua, historyUALen)
+	h.add(ip, e, ua)
+	if h.log == nil {
+		return
+	}
+	if logRaw {
+		h.log.emit(h.requestEvent(ip, e, ua))
+	} else {
+		h.aggAdd(e.window, ip, e.path, e.at)
+	}
+}
+
+func (h *history) requestEvent(ip netip.Addr, e historyEntry, ua string) *historyEvent {
+	return &historyEvent{
+		T: evRequest, At: e.at.UTC(), IP: ip.String(), Method: e.method, Path: e.path, Status: e.status,
+		LatencyUS: e.latency.Microseconds(), UA: ua, Blocked: e.blocked, Triggered: e.triggered,
+		Ban: e.window, Rank: rankLabel(e.rank), Info: h.info.logInfo(ip),
+	}
 }
 
 // hitWindow attributes a request to the ban covering ip. A blocked request
 // is counted against the ban. A request after which ip became banned starts
 // the ban when the ban covers only this client and began while the request
-// was being answered.
-func (h *history) hitWindow(ip netip.Addr, e historyEntry, start time.Time, triggering bool) (uint64, bool) {
+// was being answered. logRaw is false once a client has had
+// historyRawPerBan blocked requests written to the log for this ban.
+func (h *history) hitWindow(ip netip.Addr, e historyEntry, start time.Time, triggering bool) (id uint64, triggered, logRaw bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	w := h.activeForLocked(ip, e.at)
 	if w == nil {
-		return 0, false
+		return 0, false, true
 	}
 	if triggering {
 		if w.trigger == nil && !w.rangeBan && !w.begin.Before(start) {
 			w.trigger = &banTrigger{client: ip, method: e.method, path: e.path, status: e.status, at: e.at}
-			return w.id, true
+			return w.id, true, true
 		}
-		return w.id, false
+		return w.id, false, true
 	}
-	w.requests++
-	if w.firstHit.IsZero() {
-		w.firstHit = e.at
+	w.count(ip, e.path, e.at, 1)
+	n, seen := w.logged[ip]
+	if !seen && len(w.logged) >= historyWindowClients*10 {
+		return w.id, false, false
 	}
-	w.lastHit = e.at
-	countBounded(w.paths, e.path, historyWindowPaths, &w.otherPaths)
-	countBounded(w.clients, ip, historyWindowClients, &w.otherClients)
-	return w.id, false
+	w.logged[ip] = n + 1
+	return w.id, false, n < historyRawPerBan
 }
 
 // activeForLocked is the narrowest ban in force covering ip. Caller holds h.mu.
 func (h *history) activeForLocked(ip netip.Addr, now time.Time) *banWindow {
 	var best *banWindow
-	for _, w := range h.windows {
-		if w.active(now) && w.scope.Contains(ip) && (best == nil || w.scope.Bits() > best.scope.Bits()) {
+	for _, w := range h.active {
+		if !w.active(now) || !w.scope.Contains(ip) {
+			continue
+		}
+		if best == nil || w.scope.Bits() > best.scope.Bits() ||
+			(w.scope.Bits() == best.scope.Bits() && w.id > best.id) {
 			best = w
 		}
 	}
 	return best
 }
 
-func countBounded[K comparable](m map[K]int64, k K, max int, other *int64) {
-	if _, ok := m[k]; ok || len(m) < max {
-		m[k]++
-		return
+// activeScopeLocked is the newest ban in force on exactly p. Caller holds h.mu.
+func (h *history) activeScopeLocked(p netip.Prefix, now time.Time) *banWindow {
+	var best *banWindow
+	for _, w := range h.active {
+		if w.scope == p && w.active(now) && (best == nil || w.id > best.id) {
+			best = w
+		}
 	}
-	*other++
+	return best
 }
 
-// add appends e to ip's history, making room when the table is full.
-func (h *history) add(ip netip.Addr, e historyEntry, ua string) {
-	sh := h.shard(ip)
-	sh.mu.Lock()
-	defer sh.mu.Unlock()
+func countBounded[K comparable](m map[K]int64, k K, max int, other *int64, n int64) {
+	if _, ok := m[k]; ok || len(m) < max {
+		m[k] += n
+		return
+	}
+	*other += n
+}
+
+// clientLocked returns ip's client, making room when the table is full.
+// Caller holds sh.mu.
+func (h *history) clientLocked(sh *historyShard, ip netip.Addr, at time.Time) *historyClient {
 	c := sh.m[ip]
 	if c == nil {
 		if len(sh.m) >= historyMaxClients/historyShards {
 			h.evictLocked(sh)
 		}
-		c = &historyClient{first: e.at}
+		c = &historyClient{first: at, last: at}
 		sh.m[ip] = c
 		h.count.Add(1)
 	}
-	c.last = e.at
+	return c
+}
+
+// add appends e to ip's history.
+func (h *history) add(ip netip.Addr, e historyEntry, ua string) {
+	sh := h.shard(ip)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	c := h.clientLocked(sh, ip, e.at)
+	if e.at.After(c.last) {
+		c.last = e.at
+	}
+	if e.at.Before(c.first) {
+		c.first = e.at
+	}
 	c.requests++
 	switch {
 	case e.blocked:
@@ -432,6 +663,22 @@ func (h *history) add(ip netip.Addr, e historyEntry, ua string) {
 	}
 	e.ua = c.uaIndex(ua)
 	c.push(e)
+}
+
+// addCount counts n blocked requests that were aggregated in the log.
+func (h *history) addCount(ip netip.Addr, at time.Time, n int64) {
+	if n <= 0 {
+		return
+	}
+	sh := h.shard(ip)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	c := h.clientLocked(sh, ip, at)
+	if at.After(c.last) {
+		c.last = at
+	}
+	c.requests += n
+	c.blocked += n
 }
 
 // evictLocked removes the client least worth keeping: one never banned or
@@ -461,6 +708,71 @@ func (h *history) evictLocked(sh *historyShard) {
 	}
 }
 
+// markTriggered flags the request that started ban id.
+func (h *history) markTriggered(ip netip.Addr, at time.Time, path string, id uint64) {
+	sh := h.shard(ip)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	c := sh.m[ip]
+	if c == nil {
+		return
+	}
+	for i := 0; i < len(c.entries); i++ {
+		if e := c.at(i); e.at.Equal(at) && e.path == path && !e.triggered {
+			e.triggered, e.window = true, id
+			c.triggered++
+			return
+		}
+	}
+}
+
+// ─── aggregation of floods ───────────────────────────────────────────────────
+
+func (h *history) aggAdd(id uint64, ip netip.Addr, path string, at time.Time) {
+	h.aggMu.Lock()
+	defer h.aggMu.Unlock()
+	k := aggKey{id: id, ip: ip}
+	v := h.agg[k]
+	if v == nil {
+		if len(h.agg) >= historyAggMax {
+			h.aggDropped.Add(1)
+			return
+		}
+		v = &aggVal{first: at, paths: map[string]int64{}}
+		h.agg[k] = v
+	}
+	v.n++
+	v.last = at
+	countBounded(v.paths, path, historyWindowPaths, &v.other, 1)
+}
+
+func (h *history) aggLoop() {
+	defer h.wg.Done()
+	t := time.NewTicker(historyAggEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-h.stop:
+			return
+		case <-t.C:
+			h.flushAgg()
+		}
+	}
+}
+
+func (h *history) flushAgg() {
+	h.aggMu.Lock()
+	batch := h.agg
+	h.agg = map[aggKey]*aggVal{}
+	h.aggMu.Unlock()
+	for k, v := range batch {
+		h.log.emit(&historyEvent{
+			T: evAgg, At: v.last.UTC(), First: timePtr(v.first), Ban: k.id, IP: k.ip.String(),
+			Count: v.n, Paths: v.paths, OtherPaths: v.other,
+		})
+	}
+}
+
 // ─── ban windows ─────────────────────────────────────────────────────────────
 
 func isSingleScope(p netip.Prefix) bool {
@@ -469,32 +781,18 @@ func isSingleScope(p netip.Prefix) bool {
 
 // newWindowLocked appends a window for scope. Caller holds h.mu.
 func (h *history) newWindowLocked(scope netip.Prefix, begin time.Time) *banWindow {
-	h.nextID++
-	single := isSingleScope(scope)
-	w := &banWindow{
-		id:       h.nextID,
-		scope:    scope,
-		rangeBan: !single,
-		begin:    begin,
-		paths:    make(map[string]int64),
-		clients:  make(map[netip.Addr]int64),
-	}
-	if single {
-		w.target = displayKey(scope.Addr())
-	} else {
-		w.target = scope.String()
-	}
-	h.windows = append(h.windows, w)
+	w := newBanWindow(h.nextID+1, scope, begin)
+	h.addWindowLocked(w)
 	return w
 }
 
-func (h *history) windowLocked(id uint64) *banWindow {
-	for i := len(h.windows) - 1; i >= 0; i-- {
-		if h.windows[i].id == id {
-			return h.windows[i]
-		}
+func (h *history) addWindowLocked(w *banWindow) {
+	h.windows = append(h.windows, w)
+	h.byID[w.id] = w
+	h.active[w.id] = w
+	if w.id > h.nextID {
+		h.nextID = w.id
 	}
-	return nil
 }
 
 // trimLocked keeps at most historyMaxWindows, dropping the oldest ended bans
@@ -508,10 +806,28 @@ func (h *history) trimLocked(now time.Time) {
 				break
 			}
 		}
+		w := h.windows[i]
+		delete(h.byID, w.id)
+		delete(h.active, w.id)
 		copy(h.windows[i:], h.windows[i+1:])
 		h.windows[len(h.windows)-1] = nil
 		h.windows = h.windows[:len(h.windows)-1]
 	}
+}
+
+// dropEndedLocked forgets bans that ended before cutoff. Caller holds h.mu.
+func (h *history) dropEndedLocked(cutoff, now time.Time) {
+	kept := h.windows[:0]
+	for _, w := range h.windows {
+		if ended, _ := w.ended(now); !ended.IsZero() && ended.Before(cutoff) {
+			delete(h.byID, w.id)
+			delete(h.active, w.id)
+			continue
+		}
+		kept = append(kept, w)
+	}
+	clear(h.windows[len(kept):])
+	h.windows = kept
 }
 
 // banUntil reads when the ban on scope ends: unix nanos, banForever for a
@@ -547,23 +863,24 @@ func (h *history) banStarted(p netip.Prefix) {
 		return
 	}
 	h.mu.Lock()
-	var w *banWindow
-	for i := len(h.windows) - 1; i >= 0; i-- {
-		if x := h.windows[i]; x.scope == p && x.active(now) {
-			w = x
-			break
-		}
-	}
+	w := h.activeScopeLocked(p, now)
 	fresh := w == nil
+	changed := fresh
 	if fresh {
 		w = h.newWindowLocked(p, now)
 	} else if !w.untilIs(until) {
 		w.changes++
+		changed = true
 	}
 	w.setUntil(until)
 	id := w.id
+	var ev *historyEvent
+	if changed {
+		ev = w.event()
+	}
 	h.trimLocked(now)
 	h.mu.Unlock()
+	h.log.emit(ev)
 
 	// Strikes from room's queue events land a moment after the request that
 	// earned them. If no request claimed the ban by then, credit the
@@ -574,14 +891,14 @@ func (h *history) banStarted(p netip.Prefix) {
 }
 
 func (h *history) attributeTrigger(id uint64, scope netip.Prefix) {
-	h.mu.Lock()
-	w := h.windowLocked(id)
+	h.mu.RLock()
+	w := h.byID[id]
 	if w == nil || w.trigger != nil {
-		h.mu.Unlock()
+		h.mu.RUnlock()
 		return
 	}
 	begin := w.begin
-	h.mu.Unlock()
+	h.mu.RUnlock()
 
 	var best *banTrigger
 	look := func(sh *historyShard) {
@@ -614,63 +931,55 @@ func (h *history) attributeTrigger(id uint64, scope netip.Prefix) {
 	if best == nil {
 		return
 	}
+	h.markTriggered(best.client, best.at, best.path, id)
 
-	sh := h.shard(best.client)
-	sh.mu.Lock()
-	if c := sh.m[best.client]; c != nil {
-		for i := 0; i < len(c.entries); i++ {
-			if e := c.at(i); e.at.Equal(best.at) && e.path == best.path && !e.triggered {
-				e.triggered, e.window = true, id
-				c.triggered++
-				break
-			}
-		}
-	}
-	sh.mu.Unlock()
-
+	var ev *historyEvent
 	h.mu.Lock()
-	if w := h.windowLocked(id); w != nil && w.trigger == nil {
+	if w := h.byID[id]; w != nil && w.trigger == nil {
 		w.trigger = best
+		ev = &historyEvent{T: evTrigger, At: time.Now().UTC(), Ban: id, Trigger: best.logTrigger()}
 	}
 	h.mu.Unlock()
+	h.log.emit(ev)
 }
 
 // noteSource records who issued the ban in force on p.
 func (h *history) noteSource(p netip.Prefix, source string) {
 	now := time.Now()
+	var ev *historyEvent
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	for i := len(h.windows) - 1; i >= 0; i-- {
-		if w := h.windows[i]; w.scope == p && w.active(now) {
-			w.source = source
-			return
-		}
+	if w := h.activeScopeLocked(p, now); w != nil {
+		w.source = source
+		ev = w.event()
 	}
+	h.mu.Unlock()
+	h.log.emit(ev)
 }
 
 // lifted ends the ban in force on p early.
 func (h *history) lifted(p netip.Prefix, now time.Time, by string) {
+	var ev *historyEvent
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	for i := len(h.windows) - 1; i >= 0; i-- {
-		if w := h.windows[i]; w.scope == p && w.active(now) {
-			w.liftedAt, w.liftedBy = now, by
-			return
-		}
+	if w := h.activeScopeLocked(p, now); w != nil {
+		w.liftedAt, w.liftedBy = now, by
+		delete(h.active, w.id)
+		ev = w.liftEvent()
 	}
+	h.mu.Unlock()
+	h.log.emit(ev)
 }
 
 // sweep notices bans lifted or changed outside the portal, and forgets
 // clients and bans older than historyRetention. Run by the portal janitor.
 func (h *history) sweep(now time.Time) {
-	h.mu.Lock()
-	var open []*banWindow
-	for _, w := range h.windows {
+	h.mu.RLock()
+	open := make([]*banWindow, 0, len(h.active))
+	for _, w := range h.active {
 		if w.active(now) {
 			open = append(open, w)
 		}
 	}
-	h.mu.Unlock()
+	h.mu.RUnlock()
 
 	type state struct {
 		until int64
@@ -683,29 +992,36 @@ func (h *history) sweep(now time.Time) {
 	}
 
 	n := now.UnixNano()
-	cutoff := now.Add(-historyRetention)
+	var events []*historyEvent
 	h.mu.Lock()
-	kept := h.windows[:0]
-	for _, w := range h.windows {
-		if s, checked := states[w.id]; checked && w.active(now) {
-			if s.ok && (s.until == banForever || s.until > n) {
-				if !w.untilIs(s.until) {
-					w.setUntil(s.until)
-					w.changes++
-				}
-			} else {
-				w.liftedAt, w.liftedBy = now, "the admin API or another tool outside the portal"
-			}
-		}
-		if ended, _ := w.ended(now); !ended.IsZero() && ended.Before(cutoff) {
+	for id, w := range h.active {
+		if !w.active(now) {
+			delete(h.active, id)
 			continue
 		}
-		kept = append(kept, w)
+		s, checked := states[id]
+		if !checked {
+			continue
+		}
+		if s.ok && (s.until == banForever || s.until > n) {
+			if !w.untilIs(s.until) {
+				w.setUntil(s.until)
+				w.changes++
+				events = append(events, w.event())
+			}
+			continue
+		}
+		w.liftedAt, w.liftedBy = now, "the admin API or another tool outside the portal"
+		delete(h.active, id)
+		events = append(events, w.liftEvent())
 	}
-	clear(h.windows[len(kept):])
-	h.windows = kept
+	h.dropEndedLocked(now.Add(-historyRetention), now)
 	h.mu.Unlock()
+	for _, ev := range events {
+		h.log.emit(ev)
+	}
 
+	cutoff := now.Add(-historyRetention)
 	for i := range h.shards {
 		sh := &h.shards[i]
 		sh.mu.Lock()
@@ -717,6 +1033,131 @@ func (h *history) sweep(now time.Time) {
 		}
 		sh.mu.Unlock()
 	}
+}
+
+// ─── replay ──────────────────────────────────────────────────────────────────
+
+// apply rebuilds state from one log event. Used only while replaying, before
+// the log is open, so nothing is written back.
+func (h *history) apply(ev *historyEvent) {
+	switch ev.T {
+	case evRequest:
+		h.applyRequest(ev)
+	case evAgg:
+		h.applyAgg(ev)
+	case evBan:
+		h.applyBan(ev)
+	case evLift:
+		h.applyLift(ev)
+	case evTrigger:
+		h.applyTrigger(ev)
+	}
+}
+
+func (h *history) applyRequest(ev *historyEvent) {
+	ip, err := netip.ParseAddr(ev.IP)
+	if err != nil {
+		return
+	}
+	rank, _ := parseRank(ev.Rank)
+	e := historyEntry{
+		at: ev.At, method: ev.Method, path: ev.Path, status: ev.Status,
+		latency: time.Duration(ev.LatencyUS) * time.Microsecond,
+		blocked: ev.Blocked, triggered: ev.Triggered, window: ev.Ban, rank: rank,
+	}
+	if ev.Ban != 0 {
+		h.mu.Lock()
+		if w := h.byID[ev.Ban]; w != nil {
+			if ev.Blocked {
+				w.count(ip, e.path, e.at, 1)
+			}
+			if ev.Triggered && w.trigger == nil {
+				w.trigger = &banTrigger{client: ip, method: e.method, path: e.path, status: e.status, at: e.at}
+			}
+		}
+		h.mu.Unlock()
+	}
+	h.add(ip, e, ev.UA)
+}
+
+func (h *history) applyAgg(ev *historyEvent) {
+	ip, err := netip.ParseAddr(ev.IP)
+	if err != nil || ev.Count <= 0 {
+		return
+	}
+	h.mu.Lock()
+	if w := h.byID[ev.Ban]; w != nil {
+		var itemised int64
+		for p, n := range ev.Paths {
+			w.count(ip, p, ev.At, n)
+			itemised += n
+		}
+		if rest := ev.Count - itemised; rest > 0 {
+			w.requests += rest
+			w.otherPaths += rest
+			countBounded(w.clients, ip, historyWindowClients, &w.otherClients, rest)
+		}
+		if ev.First != nil && (w.firstHit.IsZero() || ev.First.Before(w.firstHit)) {
+			w.firstHit = *ev.First
+		}
+	}
+	h.mu.Unlock()
+	h.addCount(ip, ev.At, ev.Count)
+}
+
+func (h *history) applyBan(ev *historyEvent) {
+	scope, err := netip.ParsePrefix(ev.Scope)
+	if err != nil || ev.Ban == 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	w := h.byID[ev.Ban]
+	if w == nil {
+		var begin time.Time
+		if ev.Begin != nil {
+			begin = *ev.Begin
+		}
+		w = newBanWindow(ev.Ban, scope, begin)
+		h.addWindowLocked(w)
+	}
+	if ev.Target != "" {
+		w.target = ev.Target
+	}
+	w.rangeBan = ev.Range
+	if ev.Permanent {
+		w.permanent, w.until = true, time.Time{}
+	} else if ev.Until != nil {
+		w.permanent, w.until = false, *ev.Until
+	}
+	w.changes = ev.Changes
+	w.source = ev.Source
+}
+
+func (h *history) applyLift(ev *historyEvent) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if w := h.byID[ev.Ban]; w != nil {
+		w.liftedAt, w.liftedBy = ev.At, ev.By
+		delete(h.active, w.id)
+	}
+}
+
+func (h *history) applyTrigger(ev *historyEvent) {
+	if ev.Trigger == nil {
+		return
+	}
+	ip, err := netip.ParseAddr(ev.Trigger.Client)
+	if err != nil {
+		return
+	}
+	t := &banTrigger{client: ip, method: ev.Trigger.Method, path: ev.Trigger.Path, status: ev.Trigger.Status, at: ev.Trigger.At}
+	h.mu.Lock()
+	if w := h.byID[ev.Ban]; w != nil && w.trigger == nil {
+		w.trigger = t
+	}
+	h.mu.Unlock()
+	h.markTriggered(ip, t.at, t.path, ev.Ban)
 }
 
 // ─── views ───────────────────────────────────────────────────────────────────
@@ -735,6 +1176,7 @@ type historyClientView struct {
 	BannedNow     bool      `json:"banned_now"`
 	BanPermanent  bool      `json:"ban_permanent"`
 	BanRemaining  int       `json:"ban_remaining_seconds"`
+	BanUntilMS    int64     `json:"ban_until_ms,omitempty"`
 	Rank          string    `json:"rank"`
 
 	addr netip.Addr
@@ -766,6 +1208,7 @@ func (v *historyClientView) setBan(reg *abuseRegistry, now time.Time) {
 		return
 	}
 	v.BanRemaining = int((left + time.Second - 1) / time.Second)
+	v.BanUntilMS = now.Add(left).UnixMilli()
 }
 
 type historyEntryView struct {
@@ -846,7 +1289,7 @@ func topCounts[K comparable](m map[K]int64, limit int, name func(K) string) []na
 }
 
 // view renders w. limit caps the paths and addresses listed; 0 lists all.
-// Caller holds h.mu.
+// Caller holds h.mu (read or write).
 func (w *banWindow) view(now time.Time, limit int) banWindowView {
 	v := banWindowView{
 		ID: w.id, Target: w.target, Range: w.rangeBan, Permanent: w.permanent,
@@ -892,10 +1335,11 @@ func (w *banWindow) matches(q string) bool {
 	return false
 }
 
-// clientViews lists clients matching q (an address fragment or a path
-// fragment, lowercased), banned clients first, then clients that were
-// banned, then the most recent. It also returns how many matched.
-func (h *history) clientViews(q string, flagged bool, reg *abuseRegistry, now time.Time) ([]historyClientView, int) {
+// sortedClients lists every client matching q (an address fragment or a path
+// fragment, lowercased): permanently banned clients first, then temporarily
+// banned ones, then clients that were banned, then the most recent. Ties
+// break by address, so the order is stable between pages.
+func (h *history) sortedClients(q string, flagged bool, reg *abuseRegistry, now time.Time) []historyClientView {
 	out := []historyClientView{}
 	for i := range h.shards {
 		sh := &h.shards[i]
@@ -921,12 +1365,24 @@ func (h *history) clientViews(q string, flagged bool, reg *abuseRegistry, now ti
 		if a.BannedNow != b.BannedNow {
 			return a.BannedNow
 		}
+		if a.BannedNow && a.BanPermanent != b.BanPermanent {
+			return a.BanPermanent
+		}
 		fa, fb := a.Blocked > 0 || a.BansTriggered > 0, b.Blocked > 0 || b.BansTriggered > 0
 		if fa != fb {
 			return fa
 		}
-		return a.LastSeen.After(b.LastSeen)
+		if !a.LastSeen.Equal(b.LastSeen) {
+			return a.LastSeen.After(b.LastSeen)
+		}
+		return a.Client < b.Client
 	})
+	return kept
+}
+
+// clientViews is sortedClients capped for the JSON API, with how many matched.
+func (h *history) clientViews(q string, flagged bool, reg *abuseRegistry, now time.Time) ([]historyClientView, int) {
+	kept := h.sortedClients(q, flagged, reg, now)
 	matched := len(kept)
 	if len(kept) > historyListLimit {
 		kept = kept[:historyListLimit]
@@ -957,11 +1413,12 @@ func (h *history) clientDetail(ip netip.Addr) (historyClientView, []historyEntry
 	return c.summary(ip), entries, append([]string{}, c.uas...), true
 }
 
-// windowViews lists the ban log, newest first, with each ban's top paths.
+// windowViews lists the ban log for the JSON API, newest first, with each
+// ban's top paths.
 func (h *history) windowViews(q string, now time.Time) []banWindowView {
 	out := []banWindowView{}
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.mu.RLock()
+	defer h.mu.RUnlock()
 	for i := len(h.windows) - 1; i >= 0 && len(out) < historyBanLimit; i-- {
 		w := h.windows[i]
 		if q != "" && !w.matches(q) {
@@ -972,11 +1429,33 @@ func (h *history) windowViews(q string, now time.Time) []banWindowView {
 	return out
 }
 
+// windowPage is one page of the ban log, newest first. Only the page's bans
+// are rendered. where maps each key in keysParam to the page it is on now.
+func (h *history) windowPage(q string, now time.Time, page, size int, keysParam string) (views []banWindowView, total, p, pages int, where map[string]int) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	matched := make([]*banWindow, 0, len(h.windows))
+	for i := len(h.windows) - 1; i >= 0; i-- {
+		if w := h.windows[i]; q == "" || w.matches(q) {
+			matched = append(matched, w)
+		}
+	}
+	total = len(matched)
+	var start, end int
+	start, end, p, pages = paginate(total, page, size)
+	views = make([]banWindowView, 0, end-start)
+	for _, w := range matched[start:end] {
+		views = append(views, w.view(now, historySummaryPaths))
+	}
+	where = wherePages(keysParam, size, total, func(i int) string { return strconv.FormatUint(matched[i].id, 10) })
+	return views, total, p, pages, where
+}
+
 // windowsFor lists every ban that covered ip, newest first, in full.
 func (h *history) windowsFor(ip netip.Addr, now time.Time) []banWindowView {
 	out := []banWindowView{}
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.mu.RLock()
+	defer h.mu.RUnlock()
 	for i := len(h.windows) - 1; i >= 0; i-- {
 		if w := h.windows[i]; w.scope.Contains(ip) {
 			out = append(out, w.view(now, 0))
@@ -986,18 +1465,19 @@ func (h *history) windowsFor(ip netip.Addr, now time.Time) []banWindowView {
 }
 
 func (h *history) windowByID(id uint64, now time.Time) (banWindowView, bool) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if w := h.windowLocked(id); w != nil {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if w := h.byID[id]; w != nil {
 		return w.view(now, 0), true
 	}
 	return banWindowView{}, false
 }
 
-// ─── portal API ──────────────────────────────────────────────────────────────
+// ─── portal JSON API ─────────────────────────────────────────────────────────
 
 // apiHistory lists clients and the ban log. ?q= filters both by address or
-// path fragment; ?flagged=1 lists only clients that are or were banned.
+// path fragment; ?flagged=1 lists only clients that are or were banned. The
+// portal itself uses the paginated fragments in fragments.go.
 func (p *portal) apiHistory(c *gin.Context) {
 	now := time.Now()
 	g := p.a.current()
@@ -1011,6 +1491,7 @@ func (p *portal) apiHistory(c *gin.Context) {
 		"evicted":       p.history.evicted.Load(),
 		"bans":          p.history.windowViews(q, now),
 		"abuse_enabled": g.abuse != nil,
+		"persisted":     p.history.log != nil,
 		"limits": gin.H{
 			"max_clients":     historyMaxClients,
 			"per_client":      historyPerClient,

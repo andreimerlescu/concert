@@ -32,6 +32,8 @@
     const csrfMeta = document.querySelector('meta[name="csrf-token"]');
     const csrf = csrfMeta ? csrfMeta.getAttribute('content') : '';
     const numberFormat = new Intl.NumberFormat();
+    const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'medium' });
+    const reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
     // Set once the portal has moved away from this page's address; stops polling.
     let portalMoved = false;
@@ -53,8 +55,9 @@
         return data;
     }
 
-    // Every value from the server is attacker-influenced (user agents, paths),
-    // so the DOM is built with textContent only — never innerHTML.
+    // Values from the server outside the rendered fragments are attacker-
+    // influenced (user agents, paths), so the DOM here is built with
+    // textContent only. Fragments are escaped by Go's html/template.
     function node(tag, className, text) {
         const el = document.createElement(tag);
         if (className) el.className = className;
@@ -66,7 +69,10 @@
     function setText(id, text) { const el = byId(id); if (el) el.textContent = text; }
     function fmtNum(v) { return typeof v === 'number' ? numberFormat.format(v) : '–'; }
     function fmtMoney(v) { return '$' + Number(v || 0).toFixed(2); }
-    function fmtTime(iso) { return new Date(iso).toLocaleString(); }
+    function fmtTime(v) {
+        const d = new Date(v);
+        return Number.isNaN(d.getTime()) ? '–' : dateFormat.format(d);
+    }
     function plural(n, word) { return `${n} ${word}${n === 1 ? '' : 's'}`; }
 
     function fmtSeconds(total) {
@@ -77,14 +83,6 @@
         const h = Math.floor(m / 60);
         if (h < 48) return h + 'h ' + (m % 60) + 'm';
         return Math.floor(h / 24) + 'd ' + (h % 24) + 'h';
-    }
-
-    function fmtAgo(iso) { return fmtSeconds((Date.now() - Date.parse(iso)) / 1000); }
-
-    function fmtMS(ms) {
-        if (ms < 1) return '<1 ms';
-        if (ms < 1000) return Math.round(ms) + ' ms';
-        return (ms / 1000).toFixed(1) + ' s';
     }
 
     function toast(message, kind) {
@@ -117,12 +115,12 @@
         bar.parentElement.setAttribute('aria-valuenow', String(pct));
     }
 
-    function emptyRow(tbody, cols, text) {
-        const tr = node('tr');
+    function emptyRowEl(cols, text) {
+        const tr = node('tr', 'live-empty');
         const td = node('td', 'text-center text-body-secondary py-4', text);
         td.colSpan = cols;
         tr.append(td);
-        tbody.append(tr);
+        return tr;
     }
 
     function iconButton(action, cls, icon, label, data) {
@@ -136,16 +134,451 @@
         return b;
     }
 
-    // rankBadge shows a Concert-Priority rank granted by the application.
-    function rankBadge(rank) {
-        const b = node('span', 'badge text-bg-primary', rank);
-        b.title = 'Priority rank granted by the application (Concert-Priority)';
-        return b;
-    }
-
     function activeTab() {
         const pane = document.querySelector('.tab-pane.active');
         return pane ? pane.id : '';
+    }
+
+    function debounce(fn, ms) {
+        let t = 0;
+        return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+    }
+
+    // ── Tooltips and copying ───────────────────────────────────────────────
+    // One delegated instance covers every tooltip, including rows rendered
+    // later. Rows removed from a table dispose theirs first.
+    new bootstrap.Tooltip(document.body, { selector: '[data-bs-toggle="tooltip"]', trigger: 'hover focus' });
+
+    function disposeTips(el) {
+        if (!el || !el.querySelectorAll) return;
+        el.querySelectorAll('[data-bs-toggle="tooltip"]').forEach((t) => {
+            const inst = bootstrap.Tooltip.getInstance(t);
+            if (inst) inst.dispose();
+        });
+    }
+
+    document.addEventListener('click', async (ev) => {
+        const el = ev.target.closest('[data-copy]');
+        if (!el) return;
+        ev.preventDefault();
+        try {
+            await navigator.clipboard.writeText(el.dataset.copy);
+            toast('Copied ' + el.dataset.copy);
+        } catch (err) {
+            toast('Copy failed: the browser did not allow clipboard access.', 'danger');
+        }
+    });
+
+    // ── Times ──────────────────────────────────────────────────────────────
+    // Fragments carry unix milliseconds; the browser formats them, so a row's
+    // HTML only changes when its data does.
+    function tickRelative(scope, now) {
+        scope.querySelectorAll('.js-ago').forEach((el) => {
+            const ms = Number(el.dataset.ms);
+            if (ms > 0) el.textContent = fmtSeconds((now - ms) / 1000) + ' ago';
+        });
+        scope.querySelectorAll('.js-since').forEach((el) => {
+            const ms = Number(el.dataset.ms);
+            if (ms > 0) el.textContent = fmtSeconds((now - ms) / 1000);
+        });
+        scope.querySelectorAll('.js-left').forEach((el) => {
+            const ms = Number(el.dataset.ms);
+            if (ms > 0) el.textContent = fmtSeconds((ms - now) / 1000);
+        });
+    }
+
+    function decorate(scope) {
+        scope.querySelectorAll('.js-time').forEach((el) => {
+            const ms = Number(el.dataset.ms);
+            if (!(ms > 0)) return;
+            el.textContent = dateFormat.format(ms);
+            if ('dateTime' in el) el.dateTime = new Date(ms).toISOString();
+        });
+        tickRelative(scope, Date.now());
+    }
+
+    // ── Live tables ────────────────────────────────────────────────────────
+    // A LiveTable shows one page of a server-rendered fragment. Rows are
+    // matched by data-key: unchanged rows are kept, changed rows replaced,
+    // and with motion allowed rows slide to their new place (FLIP), rows
+    // arriving say where they came from and rows leaving say where they went.
+    const rowHTML = new WeakMap();
+    const ROWS = ':scope > tr[data-key]:not(.row-leaving)';
+
+    function addChip(row, label, kind) {
+        if (!label) return;
+        const cell = row.querySelector('[data-chip]') || row.cells[0];
+        if (!cell) return;
+        const chip = node('span', 'move-chip move-chip-' + kind, label);
+        chip.setAttribute('aria-hidden', 'true');
+        cell.prepend(chip);
+        setTimeout(() => chip.remove(), 2600);
+    }
+
+    class LiveTable {
+        constructor(o) {
+            this.o = o;
+            this.tbody = byId(o.tbody);
+            this.pager = byId(o.pager);
+            this.card = this.tbody.closest('.card');
+            this.page = 1;
+            this.pages = 1;
+            this.total = 0;
+            this.size = Number(localStorage.getItem('concert.portal.size.' + o.name)) || 25;
+            this.prevNow = 0;
+            this.loaded = false;
+            this.busy = false;
+            this.again = false;
+            this.hover = false;
+            this.pagerSig = '';
+
+            this.card.addEventListener('mouseenter', () => { this.hover = true; this.showState(); });
+            this.card.addEventListener('mouseleave', () => { this.hover = false; this.showState(); });
+            this.pager.addEventListener('click', (ev) => {
+                const b = ev.target.closest('button[data-page]');
+                if (!b || b.disabled) return;
+                this.go(Number(b.dataset.page));
+            });
+            this.pager.addEventListener('change', (ev) => {
+                if (!ev.target.matches('select')) return;
+                this.size = Number(ev.target.value);
+                localStorage.setItem('concert.portal.size.' + o.name, String(this.size));
+                this.go(1);
+            });
+            const sw = o.liveSwitch && byId(o.liveSwitch);
+            if (sw) sw.addEventListener('change', () => { this.showState(); if (sw.checked) this.refresh(); });
+            this.showState();
+        }
+
+        keys() { return [...this.tbody.querySelectorAll(ROWS)].map((r) => r.dataset.key); }
+
+        live() {
+            const sw = this.o.liveSwitch && byId(this.o.liveSwitch);
+            return !sw || sw.checked;
+        }
+
+        showState() {
+            const el = this.card.querySelector('.live-state');
+            if (!el) return;
+            let text = 'live';
+            let cls = 'text-bg-success';
+            let title = 'Updates every 3 seconds';
+            if (!this.live()) {
+                text = 'live off'; cls = 'text-bg-secondary'; title = 'Turn Live on, or press Refresh';
+            } else if (this.hover) {
+                text = 'paused'; cls = 'text-bg-warning'; title = 'Paused while the pointer is over the table';
+            }
+            el.className = 'badge live-state ' + cls;
+            el.textContent = text;
+            el.title = title;
+        }
+
+        poll() {
+            if (this.hover || !this.live()) return;
+            this.refresh();
+        }
+
+        // go loads another page, or the first page again after a filter
+        // change, without movement animations: every row would be "new".
+        go(page) {
+            this.page = page;
+            this.loaded = false;
+            this.refresh();
+        }
+
+        async refresh() {
+            if (portalMoved) return;
+            if (this.busy) { this.again = true; return; }
+            this.busy = true;
+            try {
+                const params = new URLSearchParams(this.o.params ? this.o.params() : {});
+                params.set('page', String(this.page));
+                params.set('size', String(this.size));
+                const keys = this.keys();
+                if (keys.length) params.set('keys', keys.join(','));
+                const d = await api('GET', this.o.url + '?' + params.toString());
+                this.page = d.page;
+                this.pages = d.pages;
+                this.size = d.size;
+                this.total = d.total;
+                this.apply(d);
+                if (this.o.summary) setText(this.o.summary, d.summary || '');
+                this.renderPager();
+                if (this.o.after) this.o.after(d);
+            } catch (err) {
+                toast(err.message, 'danger');
+            } finally {
+                this.busy = false;
+                if (this.again) { this.again = false; this.refresh(); }
+            }
+        }
+
+        leaveLabel(where) {
+            if (!where) return this.o.goneLabel || 'gone';
+            if (where > this.page) return `↓ page ${where}`;
+            if (where < this.page) return `↑ page ${where}`;
+            return '';
+        }
+
+        arrival(row) {
+            const first = Number(row.dataset.first || 0);
+            const last = Number(row.dataset.last || 0);
+            if (first && first > this.prevNow) return { label: 'new', from: -12 };
+            if (this.o.arrival) return this.o.arrival(row, this);
+            if (last && last > this.prevNow) return { label: '↑ moved up', from: 18 };
+            if (this.page > 1) return { label: `↓ from page ${this.page - 1}`, from: -18 };
+            return { label: 'moved', from: 12 };
+        }
+
+        apply(d) {
+            const tpl = document.createElement('template');
+            tpl.innerHTML = d.html || '';
+            const incoming = [...tpl.content.children].filter((el) => el.tagName === 'TR' && el.hasAttribute('data-key'));
+            const animate = this.loaded && !reduceMotion;
+
+            const old = new Map();
+            const firstTop = new Map();
+            this.tbody.querySelectorAll(ROWS).forEach((r) => {
+                old.set(r.dataset.key, r);
+                if (animate) firstTop.set(r.dataset.key, r.getBoundingClientRect().top);
+            });
+            const details = new Map();
+            this.tbody.querySelectorAll(':scope > tr[data-detail-for]').forEach((r) => details.set(r.dataset.detailFor, r));
+            this.tbody.querySelectorAll(':scope > tr.row-leaving').forEach((r) => { disposeTips(r); r.remove(); });
+
+            const next = [];
+            const entered = [];
+            const changed = [];
+            for (const row of incoming) {
+                const key = row.dataset.key;
+                const html = row.outerHTML;
+                const prev = old.get(key);
+                if (prev && rowHTML.get(prev) === html) {
+                    next.push(prev);
+                    old.delete(key);
+                    continue;
+                }
+                rowHTML.set(row, html);
+                if (prev) {
+                    old.delete(key);
+                    disposeTips(prev);
+                    changed.push(row);
+                } else {
+                    entered.push(row);
+                }
+                next.push(row);
+            }
+            const leaving = [...old.values()];
+
+            const nodes = [];
+            for (const r of next) {
+                nodes.push(r);
+                const det = details.get(r.dataset.key);
+                if (det) { nodes.push(det); details.delete(r.dataset.key); }
+            }
+            details.forEach((det, key) => {
+                disposeTips(det);
+                if (this.o.details) this.o.details.gone(key);
+            });
+            if (!next.length) nodes.push(emptyRowEl(this.o.cols, this.o.empty ? this.o.empty() : 'Nothing to show.'));
+            this.tbody.replaceChildren(...nodes);
+            decorate(this.tbody);
+
+            if (animate) {
+                for (const r of leaving) {
+                    const where = d.where ? d.where[r.dataset.key] : undefined;
+                    r.classList.add('row-leaving');
+                    this.tbody.append(r);
+                    addChip(r, this.leaveLabel(where), 'leave');
+                    const dx = where && where < this.page ? -28 : 28;
+                    const done = () => { disposeTips(r); r.remove(); };
+                    r.animate(
+                        [{ opacity: 1, transform: 'translateX(0)' }, { opacity: 0, transform: `translateX(${dx}px)` }],
+                        { duration: 700, easing: 'ease-in', fill: 'forwards' },
+                    ).finished.then(done, done);
+                }
+                for (const r of next) {
+                    const top0 = firstTop.get(r.dataset.key);
+                    if (top0 === undefined) continue;
+                    const dy = top0 - r.getBoundingClientRect().top;
+                    if (Math.abs(dy) > 1) {
+                        r.animate([{ transform: `translateY(${dy}px)` }, { transform: 'translateY(0)' }],
+                            { duration: 450, easing: 'cubic-bezier(.2,.8,.2,1)' });
+                    }
+                }
+                for (const r of entered) {
+                    const a = this.arrival(r);
+                    addChip(r, a.label, 'enter');
+                    r.animate([{ opacity: 0, transform: `translateY(${a.from}px)` }, { opacity: 1, transform: 'translateY(0)' }],
+                        { duration: 450, easing: 'ease-out' });
+                }
+                if (this.o.flash) {
+                    for (const r of changed) {
+                        r.classList.add('row-flash');
+                        setTimeout(() => r.classList.remove('row-flash'), 1200);
+                    }
+                }
+            } else {
+                leaving.forEach(disposeTips);
+                if (!this.loaded && !reduceMotion && next.length) {
+                    this.tbody.animate([{ opacity: 0.35 }, { opacity: 1 }], { duration: 180, easing: 'ease-out' });
+                }
+            }
+
+            this.loaded = true;
+            this.prevNow = d.now || Date.now();
+            if (this.o.details) this.o.details.afterApply(changed, entered);
+        }
+
+        renderPager() {
+            const sig = [this.page, this.pages, this.size].join('/');
+            if (sig === this.pagerSig) return;
+            this.pagerSig = sig;
+            const p = this.page;
+            const n = this.pages;
+            const wrap = node('div', 'd-flex align-items-center gap-2 flex-wrap');
+            const group = node('div', 'btn-group btn-group-sm');
+            group.setAttribute('role', 'group');
+            group.setAttribute('aria-label', 'Pages');
+            const btn = (page, icon, label, disabled) => {
+                const b = node('button', 'btn btn-outline-secondary');
+                b.type = 'button';
+                b.dataset.page = String(page);
+                b.disabled = disabled;
+                b.title = label;
+                b.setAttribute('aria-label', label);
+                b.append(node('i', 'bi ' + icon));
+                return b;
+            };
+            group.append(
+                btn(1, 'bi-chevron-double-left', 'First page', p <= 1),
+                btn(p - 1, 'bi-chevron-left', 'Previous page', p <= 1),
+                node('span', 'btn btn-outline-secondary disabled pager-current', `Page ${fmtNum(p)} of ${fmtNum(n)}`),
+                btn(p + 1, 'bi-chevron-right', 'Next page', p >= n),
+                btn(n, 'bi-chevron-double-right', 'Last page', p >= n),
+            );
+            const sel = node('select', 'form-select form-select-sm pager-size');
+            sel.setAttribute('aria-label', 'Rows per page');
+            [25, 50, 100].forEach((s) => {
+                const opt = node('option', null, s + ' per page');
+                opt.value = String(s);
+                opt.selected = s === this.size;
+                sel.append(opt);
+            });
+            wrap.append(group, sel);
+            this.pager.replaceChildren(wrap);
+        }
+    }
+
+    // DetailRows manages expanded rows under a LiveTable. A detail row is
+    // refetched only when its parent row's HTML changed, so an open row does
+    // not cost a request on every poll.
+    class DetailRows {
+        constructor(table, cols, url) {
+            this.table = table;
+            this.cols = cols;
+            this.url = url;
+            this.open = new Map();
+            table.o.details = this;
+        }
+
+        parentRow(key) {
+            for (const r of this.table.tbody.children) {
+                if (r.dataset.key === key && !r.classList.contains('row-leaving')) return r;
+            }
+            return null;
+        }
+
+        detailRow(key) {
+            for (const r of this.table.tbody.children) if (r.dataset.detailFor === key) return r;
+            return null;
+        }
+
+        setToggle(parent, open) {
+            const b = parent && parent.querySelector('button[data-action="toggle"]');
+            if (!b) return;
+            b.setAttribute('aria-expanded', open ? 'true' : 'false');
+            b.setAttribute('aria-label', open ? 'Hide details' : 'Show details');
+            const i = b.querySelector('i');
+            if (i) i.className = 'bi ' + (open ? 'bi-chevron-down' : 'bi-chevron-right');
+        }
+
+        ensure(parent, key) {
+            let d = this.detailRow(key);
+            if (!d) {
+                d = node('tr', 'history-detail');
+                d.dataset.detailFor = key;
+                const td = node('td');
+                td.colSpan = this.cols;
+                td.append(node('div', 'small text-body-secondary py-2', 'Loading…'));
+                d.append(td);
+                parent.after(d);
+            }
+            return d;
+        }
+
+        toggle(key) {
+            const parent = this.parentRow(key);
+            if (!parent) return;
+            if (this.open.has(key)) {
+                this.open.delete(key);
+                const d = this.detailRow(key);
+                if (d) { disposeTips(d); d.remove(); }
+                this.setToggle(parent, false);
+                return;
+            }
+            this.open.set(key, { page: 1, seq: 0 });
+            this.setToggle(parent, true);
+            this.ensure(parent, key);
+            this.load(key);
+        }
+
+        page(key, page) {
+            const st = this.open.get(key);
+            if (!st) return;
+            st.page = page;
+            this.load(key);
+        }
+
+        async load(key) {
+            const st = this.open.get(key);
+            if (!st) return;
+            const seq = ++st.seq;
+            try {
+                const d = await api('GET', this.url(key, st.page));
+                if (this.open.get(key) !== st || st.seq !== seq) return;
+                st.page = d.page;
+                const parent = this.parentRow(key);
+                if (!parent) return;
+                const row = this.ensure(parent, key);
+                const tpl = document.createElement('template');
+                tpl.innerHTML = d.html || '';
+                const td = row.firstElementChild;
+                disposeTips(td);
+                td.replaceChildren(tpl.content);
+                decorate(td);
+            } catch (err) {
+                const row = this.detailRow(key);
+                if (row) row.firstElementChild.replaceChildren(node('div', 'small text-danger py-2', err.message));
+            }
+        }
+
+        afterApply(changed, entered) {
+            const touched = new Set([...changed, ...entered].map((r) => r.dataset.key));
+            for (const key of [...this.open.keys()]) {
+                const parent = this.parentRow(key);
+                if (!parent) continue;
+                this.setToggle(parent, true);
+                if (!this.detailRow(key)) {
+                    this.ensure(parent, key);
+                    this.load(key);
+                } else if (touched.has(key)) {
+                    this.load(key);
+                }
+            }
+        }
+
+        gone(key) { this.open.delete(key); }
     }
 
     // ── Overview ───────────────────────────────────────────────────────────
@@ -167,107 +600,14 @@
             setText('stat-price', d.skip_url ? fmtMoney(d.rate) + ' + ' + fmtMoney(d.surge) + ' per queued' : 'off');
             setText('queue-count', fmtNum(d.live_queue_depth));
             setText('ban-count', fmtNum(d.active_bans));
-            setText('history-count', fmtNum(d.history_clients));
+            setText('visitors-count', fmtNum(d.history_clients));
             setText('updated-at', 'updated ' + new Date().toLocaleTimeString());
         } catch (err) {
             setText('updated-at', 'update failed: ' + err.message);
         }
     }
 
-    // ── Queue ──────────────────────────────────────────────────────────────
-    let lastQueue = { occupants: [] };
-
-    function renderQueue() {
-        const tbody = byId('queue-rows');
-        const filter = (byId('queue-filter').value || '').trim().toLowerCase();
-        const rows = lastQueue.occupants.filter((o) => !filter
-            || o.client.toLowerCase().includes(filter)
-            || o.path.toLowerCase().includes(filter)
-            || o.user_agent.toLowerCase().includes(filter));
-
-        tbody.replaceChildren();
-        if (rows.length === 0) {
-            emptyRow(tbody, 8, lastQueue.occupants.length ? 'No visitors match the filter.' : 'Nobody is waiting in line.');
-        }
-        for (const o of rows) {
-            const tr = node('tr');
-            tr.append(node('td', 'fw-semibold', o.position > 0 ? '#' + o.position : '—'));
-            tr.append(node('td', 'font-monospace', o.client || '—'));
-
-            const state = node('td');
-            if (o.ready) state.append(node('span', 'badge text-bg-success', 'ready'));
-            else if (o.idle_seconds > 15) state.append(node('span', 'badge text-bg-secondary', 'idle'));
-            else state.append(node('span', 'badge text-bg-primary', 'waiting'));
-            if (o.promoted) { state.append(' '); state.append(node('span', 'badge text-bg-info', 'moved up')); }
-            if (o.has_pass) { state.append(' '); state.append(node('span', 'badge text-bg-warning', 'VIP')); }
-            if (o.rank) { state.append(' '); state.append(rankBadge(o.rank)); }
-            tr.append(state);
-
-            tr.append(node('td', 'text-nowrap', fmtAgo(o.joined)));
-            tr.append(node('td', 'text-nowrap', fmtAgo(o.last_seen) + ' ago'));
-            const pathCell = node('td', 'text-truncate cell-path font-monospace small', o.path || '—');
-            pathCell.title = o.path;
-            tr.append(pathCell);
-            const uaCell = node('td', 'text-truncate cell-ua small', o.user_agent || '—');
-            uaCell.title = o.user_agent;
-            tr.append(uaCell);
-
-            const actions = node('td', 'text-end text-nowrap');
-            const group = node('div', 'btn-group btn-group-sm');
-            group.setAttribute('role', 'group');
-            group.append(iconButton('promote', 'btn-outline-success', 'bi-skip-start', 'Move to the front', { id: o.id }));
-            group.append(iconButton('kick', 'btn-outline-warning', 'bi-person-dash', 'Remove from the line', { id: o.id }));
-            group.append(iconButton('ban', 'btn-outline-danger', 'bi-slash-circle', 'Remove and ban', { id: o.id }));
-            actions.append(group);
-            tr.append(actions);
-            tbody.append(tr);
-        }
-        setText('queue-summary',
-            `${fmtNum(lastQueue.listed)} shown of ${fmtNum(lastQueue.live_queue_depth)} waiting · ${fmtNum(lastQueue.kicked)} removed`);
-    }
-
-    async function refreshQueue() {
-        try {
-            lastQueue = await api('GET', '/api/queue');
-            renderQueue();
-        } catch (err) {
-            toast(err.message, 'danger');
-        }
-    }
-
-    byId('queue-filter').addEventListener('input', renderQueue);
-    byId('queue-refresh').addEventListener('click', refreshQueue);
-
-    byId('queue-rows').addEventListener('click', async (ev) => {
-        const btn = ev.target.closest('button[data-action]');
-        if (!btn) return;
-        const { action, id } = btn.dataset;
-        const prompts = {
-            promote: 'Move this visitor to the front of the line?',
-            kick: 'Remove this visitor from the line? They can rejoin at the back.',
-            ban: 'Remove this visitor and ban their address for the abuse cooldown? Everyone else waiting from that address is removed too.',
-        };
-        if (!window.confirm(prompts[action])) return;
-        btn.disabled = true;
-        try {
-            if (action === 'promote') {
-                await api('POST', '/api/queue/promote', { id });
-                toast('Visitor moved to the front of the line.');
-            } else {
-                const r = await api('POST', '/api/queue/kick', { id, ban: action === 'ban' });
-                let msg = 'Visitor removed from the line.';
-                if (r.banned) msg = r.ban_seconds > 0 ? `Visitor removed and banned for ${fmtSeconds(r.ban_seconds)}.` : 'Visitor removed; their address is banned permanently.';
-                toast(msg, 'warning');
-            }
-        } catch (err) {
-            toast(err.message, 'danger');
-        } finally {
-            refreshQueue();
-            refreshOverview();
-        }
-    });
-
-    // ── Bans ───────────────────────────────────────────────────────────────
+    // ── Ban modal ──────────────────────────────────────────────────────────
     const banModalEl = byId('ban-modal');
 
     function setPermanent(on) {
@@ -275,64 +615,19 @@
         byId('ban-duration-group').disabled = on;
     }
 
-    function openBanModal(client, duration, permanent) {
+    function openBanModal(client, duration, permanent, prefill) {
         const editing = Boolean(client);
         setText('ban-modal-title', editing ? 'Change ban' : 'Ban a client');
         setText('ban-submit-label', editing ? 'Save' : 'Ban');
         const clientInput = byId('ban-client');
-        clientInput.value = client || '';
+        clientInput.value = client || prefill || '';
         clientInput.readOnly = editing;
         byId('ban-duration').value = duration || '1h';
         setPermanent(Boolean(permanent));
         bootstrap.Modal.getOrCreateInstance(banModalEl).show();
     }
 
-    async function refreshBans() {
-        const tbody = byId('ban-rows');
-        let d;
-        try {
-            d = await api('GET', '/api/bans');
-        } catch (err) {
-            toast(err.message, 'danger');
-            return;
-        }
-        byId('bans-disabled').classList.toggle('d-none', d.enabled);
-        byId('bans-not-persisted').classList.toggle('d-none', d.persisted);
-        byId('ban-new').disabled = !d.enabled;
-        tbody.replaceChildren();
-        if (!d.bans.length) emptyRow(tbody, 5, d.enabled ? 'No active bans.' : 'Bans are not enforced while the abuse registry is off.');
-        for (const b of d.bans) {
-            const tr = node('tr');
-            const clientCell = node('td', 'font-monospace', b.client);
-            if (b.range) { clientCell.append(' '); clientCell.append(node('span', 'badge text-bg-secondary', 'range')); }
-            tr.append(clientCell);
-            if (b.permanent) {
-                const until = node('td');
-                until.append(node('span', 'badge text-bg-danger', 'permanent'));
-                tr.append(until);
-                tr.append(node('td', 'text-nowrap text-body-secondary', '—'));
-            } else {
-                tr.append(node('td', 'text-nowrap', fmtTime(b.until)));
-                tr.append(node('td', 'text-nowrap', fmtSeconds(b.remaining_seconds)));
-            }
-            tr.append(node('td', null, b.offenses));
-            const actions = node('td', 'text-end text-nowrap');
-            const group = node('div', 'btn-group btn-group-sm');
-            group.setAttribute('role', 'group');
-            group.append(iconButton('edit', 'btn-outline-secondary', 'bi-pencil', 'Change ban', {
-                client: b.client, remaining: String(b.remaining_seconds), permanent: b.permanent ? '1' : '0',
-            }));
-            group.append(iconButton('unban', 'btn-outline-success', 'bi-unlock', 'Unban', { client: b.client }));
-            actions.append(group);
-            tr.append(actions);
-            tbody.append(tr);
-        }
-    }
-
-    byId('ban-new').addEventListener('click', () => openBanModal('', '1h', false));
-    byId('bans-refresh').addEventListener('click', refreshBans);
     byId('ban-permanent').addEventListener('change', (ev) => setPermanent(ev.target.checked));
-
     byId('ban-presets').addEventListener('click', (ev) => {
         const b = ev.target.closest('[data-duration]');
         if (b) byId('ban-duration').value = b.dataset.duration;
@@ -350,23 +645,81 @@
             if (r.dropped > 0) msg += ` ${plural(r.dropped, 'waiting visitor')} removed from the line.`;
             if (r.exempt_within && r.exempt_within.length) msg += ` Still reachable inside it: ${r.exempt_within.join(', ')}.`;
             toast(msg, 'warning');
-            refreshBans();
             refreshOverview();
-            if (activeTab() === 'tab-queue') refreshQueue();
-            if (activeTab() === 'tab-history') refreshHistory();
+            const t = activeTable();
+            if (t) t.refresh();
         } catch (err) {
             toast(err.message, 'danger');
         }
     });
 
+    // ── Queue ──────────────────────────────────────────────────────────────
+    const queueTable = new LiveTable({
+        name: 'queue', url: '/api/frag/queue', tbody: 'queue-rows', pager: 'queue-pager',
+        summary: 'queue-summary', liveSwitch: 'queue-live', cols: 8, goneLabel: 'left the line',
+        params: () => ({ q: byId('queue-filter').value.trim() }),
+        empty: () => (byId('queue-filter').value.trim() ? 'No visitors match the filter.' : 'Nobody is waiting in line.'),
+        arrival: (row, t) => ({ label: `↑ from page ${t.page + 1}`, from: 18 }),
+    });
+
+    byId('queue-filter').addEventListener('input', debounce(() => queueTable.go(1), 300));
+    byId('queue-refresh').addEventListener('click', () => queueTable.refresh());
+
+    byId('queue-rows').addEventListener('click', async (ev) => {
+        const btn = ev.target.closest('button[data-action]');
+        if (!btn) return;
+        const { action, id } = btn.dataset;
+        const prompts = {
+            promote: 'Move this visitor to the front of the line?',
+            kick: 'Remove this visitor from the line? They can rejoin at the back.',
+            ban: 'Remove this visitor and ban their address for the abuse cooldown? Everyone else waiting from that address is removed too.',
+        };
+        if (!prompts[action] || !window.confirm(prompts[action])) return;
+        btn.disabled = true;
+        try {
+            if (action === 'promote') {
+                await api('POST', '/api/queue/promote', { id });
+                toast('Visitor moved to the front of the line.');
+            } else {
+                const r = await api('POST', '/api/queue/kick', { id, ban: action === 'ban' });
+                let msg = 'Visitor removed from the line.';
+                if (r.banned) msg = r.ban_seconds > 0 ? `Visitor removed and banned for ${fmtSeconds(r.ban_seconds)}.` : 'Visitor removed; their address is banned permanently.';
+                toast(msg, 'warning');
+            }
+        } catch (err) {
+            toast(err.message, 'danger');
+        } finally {
+            queueTable.refresh();
+            refreshOverview();
+        }
+    });
+
+    // ── Bans ───────────────────────────────────────────────────────────────
+    const bansTable = new LiveTable({
+        name: 'bans', url: '/api/frag/bans', tbody: 'ban-rows', pager: 'bans-pager',
+        summary: 'bans-summary', liveSwitch: 'bans-live', cols: 5, goneLabel: 'lifted or expired',
+        empty: () => 'No active bans.',
+        after: (d) => {
+            const f = d.flags || {};
+            byId('bans-disabled').classList.toggle('d-none', Boolean(f.enabled));
+            byId('bans-not-persisted').classList.toggle('d-none', Boolean(f.persisted));
+            byId('ban-new').disabled = !f.enabled;
+        },
+    });
+
+    byId('ban-new').addEventListener('click', () => openBanModal('', '1h', false));
+    byId('bans-refresh').addEventListener('click', () => bansTable.refresh());
+
     byId('ban-rows').addEventListener('click', async (ev) => {
         const btn = ev.target.closest('button[data-action]');
         if (!btn) return;
-        const { action, client, remaining, permanent } = btn.dataset;
+        const { action, client } = btn.dataset;
         if (action === 'edit') {
-            openBanModal(client, Math.max(1, Math.ceil(Number(remaining) / 60)) + 'm', permanent === '1');
+            const mins = Math.max(1, Math.ceil((Number(btn.dataset.untilMs) - Date.now()) / 60000));
+            openBanModal(client, mins + 'm', btn.dataset.permanent === '1');
             return;
         }
+        if (action !== 'unban') return;
         if (!window.confirm(`Unban ${client}? Their offense history is forgotten.`)) return;
         btn.disabled = true;
         try {
@@ -375,370 +728,62 @@
         } catch (err) {
             toast(err.message, 'danger');
         } finally {
-            refreshBans();
+            bansTable.refresh();
             refreshOverview();
         }
     });
 
-    // ── History ────────────────────────────────────────────────────────────
-    // Clients and bans the operator expanded, and their fetched details.
-    // Details are refetched on every refresh so expanded rows stay live.
-    const historyOpen = { clients: new Set(), bans: new Set() };
-    const historyCache = { clients: new Map(), bans: new Map() };
-    let historyData = null;
-    let historyFilterTimer = 0;
+    // ── Visitors ───────────────────────────────────────────────────────────
+    const visitorsTable = new LiveTable({
+        name: 'visitors', url: '/api/frag/visitors', tbody: 'visitors-rows', pager: 'visitors-pager',
+        summary: 'visitors-summary', liveSwitch: 'visitors-live', cols: 9, flash: true, goneLabel: 'forgotten',
+        params: () => {
+            const p = { q: byId('visitors-filter').value.trim() };
+            if (byId('visitors-flagged').checked) p.flagged = '1';
+            return p;
+        },
+        empty: () => (byId('visitors-filter').value.trim() || byId('visitors-flagged').checked
+            ? 'No clients match.' : 'No requests recorded yet.'),
+    });
+    const visitorDetails = new DetailRows(visitorsTable, 9,
+        (key, page) => `/api/frag/visitor?client=${encodeURIComponent(key)}&page=${page}`);
 
-    function statusBadge(code) {
-        let cls = 'text-bg-success';
-        if (code >= 500) cls = 'text-bg-danger';
-        else if (code >= 400) cls = 'text-bg-warning';
-        else if (code >= 300) cls = 'text-bg-info';
-        else if (code < 200) cls = 'text-bg-secondary';
-        return node('span', 'badge ' + cls, String(code));
-    }
+    byId('visitors-filter').addEventListener('input', debounce(() => visitorsTable.go(1), 300));
+    byId('visitors-flagged').addEventListener('change', () => visitorsTable.go(1));
+    byId('visitors-refresh').addEventListener('click', () => visitorsTable.refresh());
 
-    function banStateBadge(w) {
-        if (w.active) return node('span', 'badge text-bg-danger', w.permanent ? 'permanent' : 'active');
-        return node('span', 'badge text-bg-light border', w.end_reason === 'lifted' ? 'lifted' : 'expired');
-    }
-
-    function banEndText(w) {
-        if (w.active) {
-            if (w.permanent) return 'Never: permanent until someone unbans it';
-            return `${fmtTime(w.until)} (${fmtSeconds(w.remaining_seconds)} left)`;
+    byId('visitors-rows').addEventListener('click', (ev) => {
+        const btn = ev.target.closest('button[data-action]');
+        if (!btn || btn.disabled) return;
+        const { action } = btn.dataset;
+        if (action === 'detail-page') {
+            const det = btn.closest('tr[data-detail-for]');
+            if (det) visitorDetails.page(det.dataset.detailFor, Number(btn.dataset.page));
+            return;
         }
-        if (w.end_reason === 'lifted') return `Lifted ${fmtTime(w.ended)}` + (w.lifted_by ? ` by ${w.lifted_by}` : '');
-        return `Expired ${fmtTime(w.ended)}`;
-    }
-
-    function toggleButton(open, data) {
-        return iconButton('toggle', 'btn-sm btn-link text-body p-0', open ? 'bi-chevron-down' : 'bi-chevron-right',
-            open ? 'Hide details' : 'Show details', data);
-    }
-
-    function detailRow(cols, data, render) {
-        const tr = node('tr', 'history-detail');
-        const td = node('td');
-        td.colSpan = cols;
-        if (!data) td.append(node('div', 'small text-body-secondary py-2', 'Loading…'));
-        else if (data.error) td.append(node('div', 'small text-danger py-2', data.error));
-        else td.append(render(data));
-        tr.append(td);
-        return tr;
-    }
-
-    function countTable(title, rows, other, otherLabel) {
-        const col = node('div', 'col-md-6');
-        col.append(node('div', 'small fw-semibold mb-1', title));
-        const table = node('table', 'table table-sm table-portal mb-0');
-        const tbody = node('tbody');
-        for (const r of rows) {
-            const tr = node('tr');
-            tr.append(node('td', 'small font-monospace text-break', r.name));
-            tr.append(node('td', 'small text-end fw-semibold text-nowrap', fmtNum(r.hits)));
-            tbody.append(tr);
-        }
-        if (other > 0) {
-            const tr = node('tr');
-            tr.append(node('td', 'small text-body-secondary', otherLabel));
-            tr.append(node('td', 'small text-end fw-semibold', fmtNum(other)));
-            tbody.append(tr);
-        }
-        if (!rows.length && !(other > 0)) emptyRow(tbody, 2, 'None');
-        table.append(tbody);
-        col.append(table);
-        return col;
-    }
-
-    function renderWindow(w) {
-        const card = node('div', 'history-ban border rounded p-3 mb-3');
-        const head = node('div', 'd-flex flex-wrap align-items-center gap-2 mb-2');
-        head.append(node('i', 'bi bi-slash-circle text-danger'));
-        head.append(node('span', 'fw-semibold font-monospace', w.target));
-        if (w.range) head.append(node('span', 'badge text-bg-secondary', 'range'));
-        head.append(banStateBadge(w));
-        card.append(head);
-
-        const dl = node('dl', 'row small mb-2');
-        const add = (k, v) => {
-            dl.append(node('dt', 'col-sm-3 text-body-secondary fw-normal', k));
-            dl.append(node('dd', 'col-sm-9 mb-1 text-break', v));
-        };
-        add('Began', w.began ? fmtTime(w.began) : 'Before concert last started (restored from bans.json)');
-        add(w.active ? 'Ends' : 'Ended', banEndText(w));
-        if (w.trigger) {
-            add('Started by', `${w.trigger.method} ${w.trigger.path} → ${w.trigger.status}, from ${w.trigger.client} at ${fmtTime(w.trigger.at)}`);
-        } else if (!w.source && w.began) {
-            add('Started by', 'Strikes that added up over several requests; see the client\'s requests below the ban start');
-        }
-        if (w.source) add('Issued', w.source);
-        if (w.changes) add('Changed', plural(w.changes, 'time') + ' while in force');
-        add('Requests during ban', w.requests
-            ? `${fmtNum(w.requests)} blocked · first ${fmtTime(w.first_hit)} · last ${fmtTime(w.last_hit)}`
-            : 'None: nothing from this network arrived while it was banned');
-        card.append(dl);
-
-        if (w.requests) {
-            const row = node('div', 'row g-3');
-            row.append(countTable('Paths requested while banned', w.paths, w.other_paths, 'Other paths (not itemised)'));
-            row.append(countTable('Addresses that made them', w.clients, w.other_clients, 'Other addresses (not itemised)'));
-            card.append(row);
-        }
-        return card;
-    }
-
-    function renderClientDetail(d) {
-        const box = node('div', 'py-2');
-        const c = d.client;
-        box.append(node('div', 'small text-body-secondary mb-1',
-            `First seen ${fmtTime(c.first_seen)} · last seen ${fmtTime(c.last_seen)} · `
-            + `${fmtNum(c.requests)} recorded, ${fmtNum(c.blocked)} blocked, ${fmtNum(c.errors)} errors`));
-        if (d.user_agents.length) {
-            box.append(node('div', 'small text-body-secondary mb-3 text-break',
-                'Browsers: ' + d.user_agents.map((u) => u || '(none sent)').join(' · ')));
-        }
-
-        if (d.bans.length) {
-            box.append(node('div', 'small fw-semibold mb-2', plural(d.bans.length, 'ban') + ' covering this address'));
-            d.bans.forEach((w) => box.append(renderWindow(w)));
-        }
-
-        box.append(node('div', 'small fw-semibold mb-2', `Requests, newest first (last ${fmtNum(d.entries.length)} kept)`));
-        const wrap = node('div', 'table-responsive');
-        const table = node('table', 'table table-sm table-portal mb-0');
-        const thead = node('thead');
-        const hr = node('tr');
-        ['Time', 'Request', 'Status', 'Response', 'Notes', 'Browser'].forEach((h) => hr.append(node('th', null, h)));
-        thead.append(hr);
-        table.append(thead);
-
-        const tbody = node('tbody');
-        if (!d.entries.length) emptyRow(tbody, 6, 'No requests kept.');
-        for (const entry of d.entries) {
-            const tr = node('tr', entry.triggered_ban ? 'history-trigger' : entry.blocked ? 'history-blocked' : '');
-
-            tr.append(node('td', 'small text-nowrap', fmtTime(entry.at)));
-
-            const req = node('td', 'small font-monospace text-truncate cell-hist-path', `${entry.method} ${entry.path}`);
-            req.title = entry.path;
-            tr.append(req);
-
-            const status = node('td');
-            status.append(statusBadge(entry.status));
-            tr.append(status);
-
-            tr.append(node('td', 'small text-nowrap', fmtMS(entry.latency_ms)));
-
-            const notes = node('td', 'text-nowrap');
-            if (entry.triggered_ban) notes.append(node('span', 'badge text-bg-danger', 'started ban'));
-            else if (entry.blocked) notes.append(node('span', 'badge text-bg-warning', 'during ban'));
-            if (entry.rank) {
-                if (notes.childNodes.length) notes.append(' ');
-                notes.append(rankBadge(entry.rank));
-            }
-            tr.append(notes);
-
-            const ua = node('td', 'small text-truncate cell-ua', entry.user_agent || '—');
-            ua.title = entry.user_agent;
-            tr.append(ua);
-
-            tbody.append(tr);
-        }
-        table.append(tbody);
-        wrap.append(table);
-        box.append(wrap);
-        return box;
-    }
-
-    function renderBanLog() {
-        const tbody = byId('history-ban-rows');
-        tbody.replaceChildren();
-        const bans = historyData.bans;
-        if (!bans.length) {
-            let text = 'No bans recorded since concert started.';
-            if (byId('history-filter').value.trim()) text = 'No bans match the filter.';
-            else if (!historyData.abuse_enabled) text = 'No bans recorded. The abuse registry is off.';
-            emptyRow(tbody, 8, text);
-        }
-        for (const w of bans) {
-            const key = String(w.id);
-            const open = historyOpen.bans.has(key);
-            const tr = node('tr');
-
-            const tog = node('td', 'history-toggle');
-            tog.append(toggleButton(open, { id: key }));
-            tr.append(tog);
-
-            const target = node('td', 'font-monospace text-nowrap', w.target);
-            if (w.range) { target.append(' '); target.append(node('span', 'badge text-bg-secondary', 'range')); }
-            tr.append(target);
-
-            const state = node('td');
-            state.append(banStateBadge(w));
-            tr.append(state);
-
-            tr.append(node('td', 'small text-nowrap', w.began ? fmtTime(w.began) : 'before restart'));
-            tr.append(node('td', 'small', banEndText(w)));
-            tr.append(node('td', w.requests ? 'fw-semibold text-danger' : 'text-body-secondary', fmtNum(w.requests)));
-
-            let top = w.paths.map((x) => `${x.name} ×${fmtNum(x.hits)}`).join(', ');
-            if (w.distinct_paths > w.paths.length) top += ` and ${fmtNum(w.distinct_paths - w.paths.length)} more`;
-            const topCell = node('td', 'small font-monospace text-truncate cell-hist-path', top || '—');
-            topCell.title = top;
-            tr.append(topCell);
-
-            const started = w.trigger ? `${w.trigger.method} ${w.trigger.path}` : (w.source || '—');
-            const startedCell = node('td', 'small text-truncate cell-hist-path' + (w.trigger ? ' font-monospace' : ''), started);
-            startedCell.title = started;
-            tr.append(startedCell);
-
-            tbody.append(tr);
-            if (open) tbody.append(detailRow(8, historyCache.bans.get(key), renderWindow));
-        }
-    }
-
-    function renderHistoryClients() {
-        const tbody = byId('history-client-rows');
-        tbody.replaceChildren();
-        const d = historyData;
-        if (!d.clients.length) {
-            const filtered = byId('history-filter').value.trim() || byId('history-flagged').checked;
-            emptyRow(tbody, 9, filtered ? 'No clients match.' : 'No requests recorded yet.');
-        }
-        for (const cl of d.clients) {
-            const open = historyOpen.clients.has(cl.client);
-            const tr = node('tr');
-
-            const tog = node('td', 'history-toggle');
-            tog.append(toggleButton(open, { client: cl.client }));
-            tr.append(tog);
-
-            tr.append(node('td', 'font-monospace text-nowrap', cl.client));
-
-            const state = node('td', 'text-nowrap');
-            if (cl.banned_now) {
-                state.append(node('span', 'badge text-bg-danger',
-                    cl.ban_permanent ? 'banned permanently' : 'banned · ' + fmtSeconds(cl.ban_remaining_seconds) + ' left'));
-            } else if (cl.bans_triggered || cl.blocked) {
-                state.append(node('span', 'badge text-bg-warning', 'was banned'));
-            } else {
-                state.append(node('span', 'badge text-bg-light border', 'ok'));
-            }
-            if (cl.rank) { state.append(' '); state.append(rankBadge(cl.rank)); }
-            tr.append(state);
-
-            tr.append(node('td', null, fmtNum(cl.requests)));
-            tr.append(node('td', cl.blocked ? 'fw-semibold text-danger' : 'text-body-secondary', fmtNum(cl.blocked)));
-            tr.append(node('td', cl.errors ? 'fw-semibold' : 'text-body-secondary', fmtNum(cl.errors)));
-            tr.append(node('td', 'small text-nowrap', fmtAgo(cl.last_seen) + ' ago'));
-
-            const last = node('td', 'small text-truncate cell-hist-path');
-            last.title = cl.last_path;
-            last.append(statusBadge(cl.last_status), ' ');
-            last.append(node('span', 'font-monospace', `${cl.last_method} ${cl.last_path}`));
-            tr.append(last);
-
-            const actions = node('td', 'text-end text-nowrap');
-            const ban = iconButton('ban', 'btn-sm btn-outline-danger', 'bi-slash-circle', 'Ban this address', { client: cl.client });
-            ban.disabled = cl.banned_now || !d.abuse_enabled;
-            actions.append(ban);
-            tr.append(actions);
-
-            tbody.append(tr);
-            if (open) tbody.append(detailRow(9, historyCache.clients.get(cl.client), renderClientDetail));
-        }
-    }
-
-    function renderHistory() {
-        if (!historyData) return;
-        const d = historyData;
-        renderBanLog();
-        renderHistoryClients();
-        let summary = `${fmtNum(d.listed)} shown of ${fmtNum(d.matched)} matching · ${fmtNum(d.tracked)} addresses recorded`;
-        if (d.evicted) summary += ` · ${fmtNum(d.evicted)} forgotten to make room`;
-        setText('history-summary', summary);
-        const l = d.limits;
-        setText('history-limits',
-            `Kept in memory: the last ${fmtNum(l.per_client)} requests from each of up to ${fmtNum(l.max_clients)} addresses, `
-            + `until ${l.retention_hours}h after an address's last request; bans are kept ${l.retention_hours}h after they end. `
-            + 'Requests from banned clients and every 4xx or 5xx response are always recorded; successful asset '
-            + 'and waiting-room status requests are not, as in the access log. A restart starts the history again.');
-    }
-
-    async function loadClient(ip) {
-        try {
-            historyCache.clients.set(ip, await api('GET', '/api/history/client?client=' + encodeURIComponent(ip)));
-        } catch (err) {
-            historyCache.clients.set(ip, { error: err.message });
-        }
-    }
-
-    async function loadBan(id) {
-        try {
-            historyCache.bans.set(id, (await api('GET', '/api/history/ban?id=' + encodeURIComponent(id))).ban);
-        } catch (err) {
-            historyCache.bans.set(id, { error: err.message });
-        }
-    }
-
-    async function refreshHistory() {
-        const params = new URLSearchParams();
-        const q = byId('history-filter').value.trim();
-        if (q) params.set('q', q);
-        if (byId('history-flagged').checked) params.set('flagged', '1');
-        try {
-            const [d] = await Promise.all([
-                api('GET', '/api/history?' + params.toString()),
-                ...[...historyOpen.clients].map(loadClient),
-                ...[...historyOpen.bans].map(loadBan),
-            ]);
-            historyData = d;
-            renderHistory();
-        } catch (err) {
-            toast(err.message, 'danger');
-        }
-    }
-
-    byId('history-refresh').addEventListener('click', refreshHistory);
-    byId('history-flagged').addEventListener('change', refreshHistory);
-    byId('history-filter').addEventListener('input', () => {
-        clearTimeout(historyFilterTimer);
-        historyFilterTimer = setTimeout(refreshHistory, 300);
+        const row = btn.closest('tr[data-key]');
+        if (!row) return;
+        if (action === 'toggle') visitorDetails.toggle(row.dataset.key);
+        if (action === 'ban') openBanModal('', '1h', false, btn.dataset.client);
     });
 
-    byId('history-ban-rows').addEventListener('click', async (ev) => {
+    // ── Ban log ────────────────────────────────────────────────────────────
+    const banlogTable = new LiveTable({
+        name: 'banlog', url: '/api/frag/banlog', tbody: 'banlog-rows', pager: 'banlog-pager',
+        summary: 'banlog-summary', liveSwitch: 'banlog-live', cols: 8, flash: true, goneLabel: 'gone',
+        params: () => ({ q: byId('banlog-filter').value.trim() }),
+        empty: () => (byId('banlog-filter').value.trim() ? 'No bans match the filter.' : 'No bans recorded.'),
+    });
+    const banlogDetails = new DetailRows(banlogTable, 8, (key) => `/api/frag/ban?id=${encodeURIComponent(key)}`);
+
+    byId('banlog-filter').addEventListener('input', debounce(() => banlogTable.go(1), 300));
+    byId('banlog-refresh').addEventListener('click', () => banlogTable.refresh());
+
+    byId('banlog-rows').addEventListener('click', (ev) => {
         const btn = ev.target.closest('button[data-action="toggle"]');
         if (!btn) return;
-        const id = btn.dataset.id;
-        if (historyOpen.bans.delete(id)) {
-            historyCache.bans.delete(id);
-            renderHistory();
-            return;
-        }
-        historyOpen.bans.add(id);
-        renderHistory();
-        await loadBan(id);
-        renderHistory();
-    });
-
-    byId('history-client-rows').addEventListener('click', async (ev) => {
-        const btn = ev.target.closest('button[data-action]');
-        if (!btn) return;
-        const { action, client } = btn.dataset;
-        if (action === 'ban') {
-            openBanModal('', '1h', false);
-            byId('ban-client').value = client;
-            return;
-        }
-        if (historyOpen.clients.delete(client)) {
-            historyCache.clients.delete(client);
-            renderHistory();
-            return;
-        }
-        historyOpen.clients.add(client);
-        renderHistory();
-        await loadClient(client);
-        renderHistory();
+        const row = btn.closest('tr[data-key]');
+        if (row) banlogDetails.toggle(row.dataset.key);
     });
 
     // ── Settings ───────────────────────────────────────────────────────────
@@ -1232,26 +1277,38 @@
     });
 
     // ── Polling ────────────────────────────────────────────────────────────
+    // Only the visible tab's table updates, every 3 seconds; relative times
+    // in the visible tab tick every second without a request.
+    const tables = {
+        'tab-queue': queueTable,
+        'tab-bans': bansTable,
+        'tab-visitors': visitorsTable,
+        'tab-banlog': banlogTable,
+    };
+    function activeTable() { return tables[activeTab()]; }
+
     document.querySelectorAll('button[data-bs-toggle="tab"]').forEach((btn) => {
         btn.addEventListener('shown.bs.tab', (ev) => {
             if (portalMoved) return;
-            const target = ev.target.getAttribute('data-bs-target');
-            if (target === '#tab-queue') refreshQueue();
-            if (target === '#tab-bans') refreshBans();
-            if (target === '#tab-history') refreshHistory();
-            if (target === '#tab-settings') loadSettings();
+            const id = ev.target.getAttribute('data-bs-target').slice(1);
+            const t = tables[id];
+            if (t) { t.loaded = false; t.refresh(); }
+            if (id === 'tab-settings') loadSettings();
         });
     });
 
     setInterval(() => {
         if (document.hidden || portalMoved) return;
         refreshOverview();
-        const tab = activeTab();
-        if (tab === 'tab-queue') refreshQueue();
-        if (tab === 'tab-bans') refreshBans();
-        if (tab === 'tab-history' && byId('history-live').checked) refreshHistory();
+        const t = activeTable();
+        if (t) t.poll();
     }, 3000);
 
+    setInterval(() => {
+        if (document.hidden) return;
+        const pane = document.querySelector('.tab-pane.active');
+        if (pane) tickRelative(pane, Date.now());
+    }, 1000);
+
     refreshOverview();
-    refreshBans();
 })();

@@ -38,7 +38,8 @@ var portalFS embed.FS
 // Files inside templates/. Templates are named after their file by
 // template.ParseFS, so templateIndex is also the name passed to
 // ExecuteTemplate. Vendored assets are referenced by these constants in
-// Go and passed to the templates, so the two can never disagree.
+// Go and passed to the templates, so the two can never disagree. The table
+// fragments live in templateFragments; see fragments.go.
 const (
 	templateHeader = "header.tpl"
 	templateFooter = "footer.tpl"
@@ -138,9 +139,11 @@ type portal struct {
 // newPortal builds the portal and, when -portal-listen is set, binds its
 // listener. It returns nil when CONCERT_PORTAL_PASS is unset: without a pass
 // there is no portal. With a pass but no address the portal exists but
-// does not listen.
+// does not listen. The history is created here, restored from its log, and
+// closed with the app.
 func newPortal(a *app) (*portal, error) {
-	pc := a.current().cfg.portal
+	cfg := a.current().cfg
+	pc := cfg.portal
 	if pc.pass == "" {
 		if pc.listen != "" {
 			log.Printf("portal disabled: set CONCERT_PORTAL_PASS to enable it on %s", pc.listen)
@@ -153,7 +156,7 @@ func newPortal(a *app) (*portal, error) {
 		return nil, fmt.Errorf("portal: %w", err)
 	}
 	for _, req := range []string{
-		templateHeader, templateFooter, templateIndex,
+		templateHeader, templateFooter, templateIndex, templateFragments,
 		assetBootstrapCSS, assetIconsCSS, assetBootstrapJS,
 		assetPortalLight, assetPortalDark, assetPortalJS,
 	} {
@@ -161,25 +164,28 @@ func newPortal(a *app) (*portal, error) {
 			return nil, fmt.Errorf("portal: templates/%s is missing", req)
 		}
 	}
-	tmpl, err := template.ParseFS(static, templateHeader, templateFooter, templateIndex)
-	if err != nil {
-		return nil, fmt.Errorf("portal templates: %w", err)
-	}
 
 	keyMAC := hmac.New(sha256.New, []byte(pc.pass))
 	keyMAC.Write([]byte("concert/portal/session-key"))
 
 	p := &portal{
 		a:          a,
-		tmpl:       tmpl,
 		static:     static,
 		sessionKey: keyMAC.Sum(nil),
 		passDigest: sha256.Sum256([]byte(pc.pass)),
 		notes:      newNoteStore(portalMaxNotes),
 		kicked:     &kickList{m: map[string]time.Time{}},
 		fails:      &loginLimiter{m: map[netip.Addr]*loginState{}},
-		history:    newHistory(a.abuse, a.prio.grants, time.Now()),
 	}
+	tmpl, err := template.New(templateIndex).Funcs(p.templateFuncs()).
+		ParseFS(static, templateHeader, templateFooter, templateIndex, templateFragments)
+	if err != nil {
+		return nil, fmt.Errorf("portal templates: %w", err)
+	}
+	p.tmpl = tmpl
+
+	p.history = newHistory(a.abuse, a.prio.grants, a.ipinfo, historyLogPath(cfg), time.Now())
+	a.attachHistory(p.history)
 	p.engine = p.routes()
 
 	if pc.enabled() {
@@ -304,6 +310,14 @@ func (p *portal) routes() *gin.Engine {
 	api.POST("/settings", p.apiSettingsSave)
 	api.DELETE("/settings", p.apiSettingsReset)
 
+	// Server-rendered tables; see fragments.go.
+	api.GET("/frag/queue", p.fragQueue)
+	api.GET("/frag/bans", p.fragBans)
+	api.GET("/frag/visitors", p.fragVisitors)
+	api.GET("/frag/visitor", p.fragVisitor)
+	api.GET("/frag/banlog", p.fragBanLog)
+	api.GET("/frag/ban", p.fragBan)
+
 	r.NoRoute(func(c *gin.Context) { c.String(http.StatusNotFound, "not found") })
 	return r
 }
@@ -373,7 +387,21 @@ type portalPage struct {
 	PortalJS     string
 	Version      string
 	Upstream     string
+	HistoryNote  string
+	IPInfo       string
 	Authed       bool
+}
+
+// historyNote explains the history's limits under the Visitors tab.
+func (p *portal) historyNote() string {
+	persist := "A restart starts the history again (no history log: -history-log off, or -data-dir empty)."
+	if p.history.log != nil {
+		persist = "It is also written to " + p.history.log.path + " and restored when concert restarts."
+	}
+	return fmt.Sprintf("Kept in memory: the last %d requests from each of up to %s addresses, until %dh after an "+
+		"address's last request; bans are kept %dh after they end. Requests from banned clients and every 4xx or 5xx "+
+		"response are always recorded; successful asset and waiting-room status requests are not, as in the access log. %s",
+		historyPerClient, fmtCount(historyMaxClients), int(historyRetention/time.Hour), int(historyRetention/time.Hour), persist)
 }
 
 func (p *portal) render(c *gin.Context, status int, page portalPage) {
@@ -385,6 +413,8 @@ func (p *portal) render(c *gin.Context, status int, page portalPage) {
 	page.PortalJS = assetPortalJS
 	page.Version = BinaryVersion()
 	page.Upstream = p.a.current().cfg.upstream
+	page.HistoryNote = p.historyNote()
+	page.IPInfo = p.a.ipinfo.describe()
 	var buf bytes.Buffer
 	if err := p.tmpl.ExecuteTemplate(&buf, templateIndex, page); err != nil {
 		log.Printf("portal: render: %v", err)

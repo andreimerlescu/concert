@@ -94,6 +94,10 @@ main {
     z-index: 1090;
 }
 
+.ipinfo-state {
+    max-width: 28rem;
+}
+
 /* Settings: the first row after a group heading needs no divider, and a
    changed-but-unsaved row is marked with a warning bar. */
 .settings-group .setting-row:first-of-type {
@@ -140,4 +144,132 @@ main {
 
 .table-portal tr.history-blocked > td:first-child {
     box-shadow: inset 3px 0 0 var(--bs-warning);
+}
+
+/* IP cells: flag, address, the 4 / 6 / 8 badges (tooltip shows the
+   address, click copies it), and the ASN line from ess. */
+.ipcell {
+    min-width: 12rem;
+}
+
+.ip-flag {
+    font-size: 1.15rem;
+    line-height: 1;
+    cursor: default;
+    font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
+}
+
+.ip-badge {
+    border: 0;
+    font-size: .65rem;
+    font-weight: 600;
+    padding: .2em .5em;
+    cursor: copy;
+    vertical-align: middle;
+}
+
+.ip-badge:focus-visible {
+    outline: 2px solid var(--bs-primary);
+    outline-offset: 1px;
+}
+
+.ip-badge-v4 {
+    background-color: var(--bs-primary-bg-subtle);
+    color: var(--bs-primary-text-emphasis);
+}
+
+.ip-badge-v6 {
+    background-color: var(--bs-info-bg-subtle);
+    color: var(--bs-info-text-emphasis);
+}
+
+.ip-badge-v8 {
+    background-color: var(--bs-warning-bg-subtle);
+    color: var(--bs-warning-text-emphasis);
+}
+
+.ip-asn {
+    max-width: 20rem;
+}
+
+.tip-pre .tooltip-inner {
+    white-space: pre-line;
+    text-align: left;
+    font-family: var(--bs-font-monospace);
+    max-width: 26rem;
+}
+
+/* Live tables: footers with paging, chips saying where a row came from or
+   went, rows sliding out, and a short highlight on changed rows. */
+.live-footer {
+    background-color: transparent;
+}
+
+.pager-size {
+    width: auto;
+}
+
+.pager-current {
+    font-variant-numeric: tabular-nums;
+}
+
+.live-table td[data-chip] {
+    position: relative;
+}
+
+.move-chip {
+    position: absolute;
+    top: .2rem;
+    right: .3rem;
+    z-index: 2;
+    padding: .1rem .45rem;
+    border-radius: 1rem;
+    font-size: .65rem;
+    font-weight: 600;
+    white-space: nowrap;
+    pointer-events: none;
+    color: #fff;
+    animation: chip-fade 2.6s ease forwards;
+}
+
+.move-chip-enter {
+    background-color: var(--bs-primary);
+}
+
+.move-chip-leave {
+    background-color: var(--bs-secondary);
+}
+
+@keyframes chip-fade {
+    0% { opacity: 0; transform: translateY(-4px); }
+    10% { opacity: 1; transform: none; }
+    80% { opacity: 1; }
+    100% { opacity: 0; }
+}
+
+.row-leaving {
+    pointer-events: none;
+}
+
+.row-flash > td {
+    animation: row-flash 1.2s ease;
+}
+
+@keyframes row-flash {
+    from { box-shadow: inset 0 0 0 9999px rgba(var(--bs-primary-rgb), .14); }
+    to { box-shadow: inset 0 0 0 9999px rgba(var(--bs-primary-rgb), 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .move-chip {
+        display: none;
+    }
+
+    .row-flash > td {
+        animation: none;
+    }
+
+    .progress-bar {
+        transition: none;
+    }
 }
