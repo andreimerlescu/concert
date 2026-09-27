@@ -15,13 +15,15 @@
     }
 
     const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-    applyTheme(localStorage.getItem(THEME_KEY) || (prefersDark ? 'dark' : 'light'));
+    let savedTheme = 'dark';
+    try { savedTheme = localStorage.getItem(THEME_KEY) || 'dark'; } catch {}
+    applyTheme(savedTheme);
 
     const themeToggle = document.getElementById('theme-toggle');
     if (themeToggle) {
         themeToggle.addEventListener('click', () => {
             const next = root.getAttribute('data-bs-theme') === 'dark' ? 'light' : 'dark';
-            localStorage.setItem(THEME_KEY, next);
+            try { localStorage.setItem(THEME_KEY, next); } catch {}
             applyTheme(next);
         });
     }
