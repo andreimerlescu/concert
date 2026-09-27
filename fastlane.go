@@ -2,10 +2,11 @@ package main
 
 import (
 	"embed"
-	"github.com/andreimerlescu/concert/internal/fastlane"
-	"github.com/gin-gonic/gin"
 	"net/http"
 	"strings"
+
+	"github.com/andreimerlescu/concert/internal/fastlane"
+	"github.com/gin-gonic/gin"
 )
 
 //go:embed web
@@ -26,8 +27,6 @@ func registerConcertRoutes(r *gin.Engine, g *generation) {
 			file = "waiting.js"
 		case "/access.js":
 			file = "access.js"
-		case "/solana-web3.min.js":
-			file = "solana-web3.min.js"
 		case "/wallet-adapters.js":
 			file = "wallet-adapters.js"
 		}
