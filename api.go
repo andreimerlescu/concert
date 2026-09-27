@@ -2,731 +2,403 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
-	"errors"
-	"io"
+	"fmt"
+	"github.com/andreimerlescu/concert/internal/fastlane"
 	"log"
-	"net"
+	"math"
 	"net/http"
-	"net/http/httputil"
 	"net/netip"
-	"net/url"
-	"strconv"
+	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/andreimerlescu/room"
 	"github.com/gin-gonic/gin"
 )
 
-// apiQueueResponses rewrites room's own responses (waiting-room HTML, breaker
-// 503) into JSON for clients that did not ask for HTML. It applies only to
-// gated catch-all requests: registered routes (/queue/status, /_room/*,
-// bypass, asset and stream paths) have a non-empty FullPath and are left alone.
-func apiQueueResponses(retryAfter int) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		if c.FullPath() != "" || wantsHTML(c.Request) {
-			c.Next()
-			return
-		}
-		c.Writer = &apiQueueWriter{
-			ResponseWriter: c.Writer,
-			c:              c,
-			retryAfter:     retryAfter,
-		}
-		c.Next()
-	}
+// app is concert's long-lived state plus the generation currently serving
+// requests; see reload.go. The waiting room, the abuse registry, the
+// admission pass signer, the priority grants, the IP database and the
+// counters live as long as the process. Everything built from settings lives
+// in the generation and is replaced when a setting changes.
+type app struct {
+	fastlane *fastlane.Service
+
+	cfg       config // as concert started; the running configuration is current().cfg
+	room      *room.WaitingRoom
+	stats     *counters
+	admit     *admitter
+	abuse     *abuseRegistry // always present; current().abuse is nil while -abuse=false
+	prio      *priorityState // rank grants, the ranked line and counters; see priority.go
+	handler   http.Handler   // serves every request with the current generation
+	settings  *settingsManager
+	drops     *dropper      // bans waiting to be removed from the line; see queue.go
+	bansPath  string        // bans.json, or "" when bans are not persisted
+	queuePath string        // saved queue, or "" when the queue is not persisted
+	rateBits  atomic.Uint64 // skip-the-line base price, float64 bits
+	surgeBits atomic.Uint64 // skip-the-line surge, float64 bits
+	gen       atomic.Pointer[generation]
+
+	// ipinfo answers who owns an address, from naddr's ess package; see
+	// ipinfo.go. Always present; it reports "off" when neither NADDR_DATA
+	// nor NADDR_ADDR is usable.
+	ipinfo *ipLookup
+
+	// history is the portal's request history, set by newPortal; nil when
+	// the portal is off. See history.go.
+	history *history
+
+	// Listeners, set by run once serving starts; guarded by settings.mu.
+	mainEP, portalEP *endpoint
+
+	closeMu sync.Mutex
+	closers []func() // run by Close, newest first, after the background loops stop
+
+	stop     chan struct{}
+	stopOnce sync.Once
+	wg       sync.WaitGroup // background writers and the drop loop, awaited on Close
 }
 
-func wantsHTML(r *http.Request) bool {
-	return strings.Contains(strings.Join(r.Header.Values("Accept"), ","), "text/html")
-}
-
-// apiQueueWriter decides once, at the first header or body write, whether
-// the response came from room (proxy not reached) or from the upstream
-// (proxy reached). Upstream responses pass through untouched, including
-// streaming, flushing, and connection hijacking for upgrades.
-type apiQueueWriter struct {
-	gin.ResponseWriter
-	c          *gin.Context
-	retryAfter int
-	decided    bool
-	swallow    bool
-}
-
-func (w *apiQueueWriter) WriteHeader(code int) {
-	if w.decided {
-		if !w.swallow {
-			w.ResponseWriter.WriteHeader(code)
-		}
-		return
-	}
-	w.decided = true
-
-	if w.c.GetBool(ctxAdmitted) {
-		w.ResponseWriter.WriteHeader(code)
-		return
-	}
-
-	// room is answering this request itself. Keep its Set-Cookie headers so
-	// clients with a cookie jar hold their place, replace everything else.
-	w.swallow = true
-	status, body := w.translate(code)
-
-	h := w.ResponseWriter.Header()
-	h.Del("Content-Length")
-	h.Set("Content-Type", "application/json; charset=utf-8")
-	h.Set("Cache-Control", "no-store")
-	if status == http.StatusTooManyRequests || status == http.StatusServiceUnavailable {
-		h.Set("Retry-After", strconv.Itoa(w.retryAfter))
-	}
-
-	w.ResponseWriter.WriteHeader(status)
-	w.ResponseWriter.WriteHeaderNow()
-	_, _ = w.ResponseWriter.Write(body)
-}
-
-func (w *apiQueueWriter) WriteHeaderNow() {
-	if !w.decided {
-		w.WriteHeader(w.ResponseWriter.Status())
-	}
-	if !w.swallow {
-		w.ResponseWriter.WriteHeaderNow()
-	}
-}
-
-func (w *apiQueueWriter) Write(b []byte) (int, error) {
-	if !w.decided {
-		w.WriteHeader(w.ResponseWriter.Status())
-	}
-	if w.swallow {
-		return len(b), nil
-	}
-	return w.ResponseWriter.Write(b)
-}
-
-func (w *apiQueueWriter) WriteString(s string) (int, error) {
-	if !w.decided {
-		w.WriteHeader(w.ResponseWriter.Status())
-	}
-	if w.swallow {
-		return len(s), nil
-	}
-	return w.ResponseWriter.WriteString(s)
-}
-
-func (w *apiQueueWriter) Flush() {
-	if !w.decided {
-		w.WriteHeader(w.ResponseWriter.Status())
-	}
-	w.ResponseWriter.Flush()
-}
-
-func (w *apiQueueWriter) translate(code int) (int, []byte) {
-	switch code {
-	case http.StatusOK:
-		// The waiting-room page. The client is queued.
-		return http.StatusTooManyRequests, mustJSON(gin.H{
-			"queued":              true,
-			"status_url":          "/queue/status",
-			"retry_after_seconds": w.retryAfter,
-			"hint":                "keep the room_ticket cookie and retry to hold your position",
-		})
-	case http.StatusServiceUnavailable:
-		// Breaker tripped or admission timed out.
-		return http.StatusServiceUnavailable, mustJSON(gin.H{
-			"queued":              false,
-			"error":               "waiting room is full",
-			"retry_after_seconds": w.retryAfter,
-		})
-	default:
-		return code, mustJSON(gin.H{"error": http.StatusText(code)})
-	}
-}
-
-func mustJSON(v any) []byte {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return []byte(`{"error":"internal"}`)
-	}
-	return b
-}
-
-// ─── reverse proxy ───────────────────────────────────────────────────────────
-
-// newProxy builds the reverse proxy to the origin. modify runs on every
-// origin response; concert uses it to turn Concert-Priority into a grant
-// (see priority.go).
-func newProxy(target *url.URL, preserveHost bool, headerTimeout time.Duration, trusted []netip.Prefix,
-	modify func(*http.Response) error) *httputil.ReverseProxy {
-	transport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout:   5 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          512,
-		MaxIdleConnsPerHost:   256,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: time.Second,
-		ResponseHeaderTimeout: headerTimeout,
-	}
-
-	return &httputil.ReverseProxy{
-		Transport: transport,
-		// -1 flushes immediately, which keeps SSE and chunked responses live.
-		FlushInterval: -1,
-		// Turns the origin's Concert-Priority header into a signed grant and
-		// keeps the header from reaching browsers.
-		ModifyResponse: modify,
-		Rewrite: func(pr *httputil.ProxyRequest) {
-			pr.SetURL(target)
-
-			// Rewrite strips inbound X-Forwarded-* before this runs. Restore
-			// the chain from trusted proxies so SetXForwarded appends to it;
-			// from anyone else it is client-controlled and discarded.
-			// SetXForwarded also sets X-Forwarded-Proto from the inbound
-			// connection, so an origin behind concert's own TLS sees https.
-			ra, ok := remoteAddr(pr.In)
-			fromTrusted := ok && containsAddr(trusted, ra)
-			if fromTrusted {
-				if v := pr.In.Header.Values("X-Forwarded-For"); len(v) > 0 {
-					pr.Out.Header["X-Forwarded-For"] = append([]string(nil), v...)
-				}
-			}
-			pr.SetXForwarded()
-			if fromTrusted {
-				if p := pr.In.Header.Get("X-Forwarded-Proto"); p != "" {
-					pr.Out.Header.Set("X-Forwarded-Proto", p)
-				}
-			}
-
-			if preserveHost {
-				pr.Out.Host = pr.In.Host
-				pr.Out.Header.Set("X-Forwarded-Host", pr.In.Host)
-			}
-			stripCookies(pr.Out, proxyCookies...)
-			for _, name := range []string{"PAYMENT-SIGNATURE", "PAYMENT-REQUIRED", "PAYMENT-RESPONSE", "Concert-Session", "X-Concert-CSRF"} {
-				pr.Out.Header.Del(name)
-			}
-		},
-		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
-			if errors.Is(err, context.Canceled) {
-				return // client hung up; nothing to report
-			}
-			log.Printf("upstream error %s %s: %v", req.Method, req.URL.Path, err)
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			w.WriteHeader(http.StatusBadGateway)
-			_, _ = w.Write([]byte("upstream unavailable\n"))
-		},
-	}
-}
-
-func stripCookies(req *http.Request, names ...string) {
-	cookies := req.Cookies()
-	if len(cookies) == 0 {
-		return
-	}
-	drop := make(map[string]struct{}, len(names))
-	for _, n := range names {
-		drop[n] = struct{}{}
-	}
-	req.Header.Del("Cookie")
-	for _, c := range cookies {
-		if _, skip := drop[c.Name]; skip {
-			continue
-		}
-		req.AddCookie(c)
-	}
-}
-
-// ─── API: overview ───────────────────────────────────────────────────────────
-
-func (p *portal) apiOverview(c *gin.Context) {
-	a, g := p.a, p.a.current()
-	wr, stats := a.room, a.stats
-	rate, surge := a.pricing()
-	h := gin.H{
-		"cap":                          wr.Cap(),
-		"occupancy":                    wr.Len(),
-		"queue_depth":                  wr.QueueDepth(),
-		"live_queue_depth":             wr.LiveQueueDepth(),
-		"max_queue_depth":              wr.MaxQueueDepth(),
-		"utilization":                  wr.UtilizationSmoothed(),
-		"first_poll_grace":             wr.FirstPollGrace().String(),
-		"queued_total":                 stats.queued.Load(),
-		"evicted_total":                stats.evicted.Load(),
-		"timeouts_total":               stats.timeouts.Load(),
-		"promoted_total":               stats.promoted.Load(),
-		"removed_total":                stats.removed.Load(),
-		"asset_cap":                    g.assets.global.Cap(),
-		"asset_in_flight":              g.assets.global.Len(),
-		"asset_users":                  g.assets.users.count.Load(),
-		"asset_served_total":           stats.assetServed.Load(),
-		"asset_denied_total":           stats.assetDenied.Load(),
-		"asset_user_throttled_total":   stats.assetUserThrottled.Load(),
-		"asset_global_throttled_total": stats.assetGlobalThrottled.Load(),
-		"stream_cap":                   g.streams.sem.Cap(),
-		"stream_active":                g.streams.sem.Len(),
-		"stream_served_total":          stats.streamServed.Load(),
-		"stream_denied_total":          stats.streamDenied.Load(),
-		"stream_throttled_total":       stats.streamThrottled.Load(),
-		"abuse_enabled":                g.abuse != nil,
-		"abuse_tracked":                g.abuse.tracked(),
-		"abuse_range_bans":             g.abuse.rangeCount(),
-		"abuse_strikes_total":          stats.abuseStrikes.Load(),
-		"abuse_bans_total":             stats.abuseBans.Load(),
-		"abuse_rejected_total":         stats.abuseRejected.Load(),
-		"abuse_dropped_total":          stats.abuseDropped.Load(),
-		"active_bans":                  len(g.abuse.bans(time.Now())),
-		"notes_tracked":                p.notes.count(),
-		"notes_dropped":                p.notes.dropped.Load(),
-		"kicked_active":                p.kicked.count(),
-		"history_clients":              p.history.count.Load(),
-		"rate":                         rate,
-		"surge":                        surge,
-		"skip_url":                     wr.SkipURL(),
-	}
-	for k, v := range g.priorityView() {
-		h[k] = v
-	}
-	c.JSON(http.StatusOK, h)
-}
-
-// ─── API: queue ──────────────────────────────────────────────────────────────
-
-// occupantView is one waiting visitor as the portal shows it. Raw tickets
-// never leave concert; the UI addresses visitors by an opaque ID derived
-// from the ticket.
-type occupantView struct {
-	ID          string    `json:"id"`
-	Client      string    `json:"client"`
-	UserAgent   string    `json:"user_agent"`
-	Path        string    `json:"path"`
-	Joined      time.Time `json:"joined"`
-	LastSeen    time.Time `json:"last_seen"`
-	IdleSeconds int       `json:"idle_seconds"`
-	Position    int64     `json:"position"`
-	Ready       bool      `json:"ready"`
-	HasPass     bool      `json:"has_pass"`
-	Promoted    bool      `json:"promoted"`
-	Rank        string    `json:"rank"`
-}
-
-func occupantID(token string) string {
-	sum := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(sum[:8])
-}
-
-// queueViews lists the front of room's line, in line order, with the path
-// and browser noted when each visitor joined.
-func (p *portal) queueViews(now time.Time) []occupantView {
-	line := p.a.room.Queue(portalQueueLimit)
-	out := make([]occupantView, 0, len(line))
-	for _, t := range line {
-		note, _ := p.notes.get(t.Token)
-		out = append(out, occupantView{
-			ID:          occupantID(t.Token),
-			Client:      t.ClientKey,
-			UserAgent:   note.ua,
-			Path:        note.path,
-			Joined:      t.IssuedAt.UTC(),
-			LastSeen:    t.LastSeen.UTC(),
-			IdleSeconds: int(now.Sub(t.LastSeen) / time.Second),
-			Position:    t.Position,
-			Ready:       t.Position <= 0,
-			HasPass:     t.HasPass,
-			Promoted:    t.Promoted,
-			Rank:        rankLabel(p.a.prio.line.rankOf(t.Token)),
-		})
-	}
-	return out
-}
-
-// lookup finds a listed visitor by the ID the UI shows. Only visitors the
-// queue view lists can be acted on.
-func (p *portal) lookup(id string) (room.TicketInfo, bool) {
-	for _, t := range p.a.room.Queue(portalQueueLimit) {
-		if occupantID(t.Token) == id {
-			return t, true
-		}
-	}
-	return room.TicketInfo{}, false
-}
-
-func (p *portal) apiQueue(c *gin.Context) {
-	list := p.queueViews(time.Now())
-	c.JSON(http.StatusOK, gin.H{
-		"occupants":        list,
-		"listed":           len(list),
-		"limit":            portalQueueLimit,
-		"kicked":           p.kicked.count(),
-		"live_queue_depth": p.a.room.LiveQueueDepth(),
-	})
-}
-
-type occupantAction struct {
-	ID  string `json:"id"`
-	Ban bool   `json:"ban"`
-}
-
-// apiPromote moves a visitor to the front of the line. It is an operator
-// promotion: no price, and no VIP pass, because only the visitor's own
-// response could carry the pass cookie.
-func (p *portal) apiPromote(c *gin.Context) {
-	var body occupantAction
-	if err := c.ShouldBindJSON(&body); err != nil || body.ID == "" {
-		jsonError(c, http.StatusBadRequest, "id is required")
-		return
-	}
-	t, ok := p.lookup(body.ID)
-	if !ok {
-		jsonError(c, http.StatusNotFound, "that visitor is no longer in line")
-		return
-	}
-	if err := p.a.room.AdminPromote(t.Token, 1); err != nil {
-		jsonError(c, http.StatusConflict, "room refused the promotion: "+err.Error())
-		return
-	}
-	log.Printf("portal: %s moved %s (%s) to the front", portalActor(c), body.ID, t.ClientKey)
-	c.JSON(http.StatusOK, gin.H{"promoted": body.ID})
-}
-
-// apiKick removes a visitor from the line and, with ban, bans their address.
-// A removed visitor's next poll reloads their page into a removal notice,
-// and they can rejoin at the back. A banned visitor's reload shows the block
-// notice, and the ban drops everyone else waiting from the same address.
-func (p *portal) apiKick(c *gin.Context) {
-	var body occupantAction
-	if err := c.ShouldBindJSON(&body); err != nil || body.ID == "" {
-		jsonError(c, http.StatusBadRequest, "id is required")
-		return
-	}
-	t, ok := p.lookup(body.ID)
-	if !ok {
-		jsonError(c, http.StatusNotFound, "that visitor is no longer in line")
-		return
-	}
-
-	now := time.Now()
-	var banFor time.Duration
-	if body.Ban {
-		reg := p.a.current().abuse
-		if reg == nil {
-			jsonError(c, http.StatusConflict, errAbuseDisabled.Error())
-			return
-		}
-		ip, err := netip.ParseAddr(t.ClientKey)
-		if err != nil {
-			jsonError(c, http.StatusConflict, "concert has no address for that visitor")
-			return
-		}
-		left, banned := reg.banNow(ip, now)
-		if !banned {
-			jsonError(c, http.StatusConflict, errClientExempt.Error())
-			return
-		}
-		banFor = left
-		if k, ok := abuseKey(ip); ok {
-			p.history.noteSource(keyPrefix(k), "removed from the line and banned in the portal by "+portalActor(c))
-		}
-		p.a.saveBansNow()
-	} else {
-		p.kicked.add(t.Token, now.Add(p.a.room.TokenTTL()+time.Minute))
-	}
-
-	if err := p.a.room.RemoveToken(t.Token); err != nil {
-		var notFound room.ErrTokenNotFound
-		if !errors.As(err, &notFound) {
-			log.Printf("portal: removing %s: %v", body.ID, err)
-		}
-	}
-	p.notes.remove(t.Token)
-	log.Printf("portal: %s removed %s (%s) from the line, ban=%v", portalActor(c), body.ID, t.ClientKey, body.Ban)
-
-	secs := int(banFor / time.Second)
-	if banFor == banForeverLeft {
-		secs = 0
-	}
-	c.JSON(http.StatusOK, gin.H{
-		"kicked":      body.ID,
-		"banned":      body.Ban,
-		"ban_seconds": secs,
-	})
-}
-
-// ─── API: bans ───────────────────────────────────────────────────────────────
-
-func (p *portal) apiBans(c *gin.Context) {
-	reg := p.a.current().abuse
-	c.JSON(http.StatusOK, gin.H{
-		"enabled":   reg != nil,
-		"tracked":   reg.tracked(),
-		"ranges":    reg.rangeCount(),
-		"persisted": p.a.bansPath != "",
-		"bans":      reg.bans(time.Now()),
-	})
-}
-
-// apiBanSave creates a ban or replaces an existing one. The client may be a
-// single address (IPv6 is banned by its /64) or a CIDR range such as
-// 203.0.0.0/16. A permanent ban lasts until it is lifted. Waiting visitors
-// the ban covers are removed from the line at once; "dropped" counts them.
-func (p *portal) apiBanSave(c *gin.Context) {
-	var body struct {
-		Client    string `json:"client"`
-		Duration  string `json:"duration"`
-		Permanent bool   `json:"permanent"`
-	}
-	if err := c.ShouldBindJSON(&body); err != nil {
-		jsonError(c, http.StatusBadRequest, "client and duration are required")
-		return
-	}
-	reg := p.a.current().abuse
-	if reg == nil {
-		jsonError(c, http.StatusConflict, errAbuseDisabled.Error())
-		return
-	}
-	target, err := parseBanTarget(body.Client)
-	if err != nil {
-		jsonError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	var d time.Duration // 0 = permanent
-	if !body.Permanent {
-		d, err = time.ParseDuration(strings.TrimSpace(body.Duration))
-		if err != nil || d < time.Minute || d > 365*24*time.Hour {
-			jsonError(c, http.StatusBadRequest, "duration must be between 1m and 8760h, for example 30m or 24h, or the ban must be permanent")
-			return
-		}
-	}
-	now := time.Now()
-	var until any
-	if !body.Permanent {
-		until = now.Add(d).UTC()
-	}
-	lasting := "permanently"
-	if !body.Permanent {
-		lasting = "for " + d.String()
-	}
-	source := "banned in the portal by " + portalActor(c)
-
-	if target.single {
-		key, err := reg.banFor(target.prefix.Addr(), d, now)
-		switch {
-		case errors.Is(err, errAbuseDisabled), errors.Is(err, errClientExempt), errors.Is(err, errRegistryFull):
-			jsonError(c, http.StatusConflict, err.Error())
-			return
-		case err != nil:
-			jsonError(c, http.StatusBadRequest, err.Error())
-			return
-		}
-		p.history.noteSource(target.scope(), source)
-		// The ban's own drop runs moments later in a batch; removing now
-		// gives the operator an exact count. The batch catches anyone who
-		// joined in between.
-		dropped := p.a.dropWaiting(target.scope())
-		p.a.saveBansNow()
-		log.Printf("portal: %s banned %s %s, removed %d waiting", portalActor(c), displayKey(key), lasting, dropped)
-		c.JSON(http.StatusOK, gin.H{
-			"client":    displayKey(key),
-			"until":     until,
-			"range":     false,
-			"permanent": body.Permanent,
-			"dropped":   dropped,
-		})
-		return
-	}
-
-	if err := reg.banRange(target.prefix, d, now); err != nil {
-		jsonError(c, http.StatusConflict, err.Error())
-		return
-	}
-	p.history.noteSource(target.scope(), source)
-	dropped := p.a.dropWaiting(target.scope())
-	p.a.saveBansNow()
-	exempt := reg.exemptWithin(target.prefix)
-	log.Printf("portal: %s banned range %s %s, removed %d waiting (exempt within: %v)",
-		portalActor(c), target.prefix, lasting, dropped, exempt)
-	c.JSON(http.StatusOK, gin.H{
-		"client":        target.prefix.String(),
-		"until":         until,
-		"range":         true,
-		"permanent":     body.Permanent,
-		"dropped":       dropped,
-		"exempt_within": exempt,
-	})
-}
-
-func (p *portal) apiUnban(c *gin.Context) {
-	reg := p.a.current().abuse
-	if reg == nil {
-		jsonError(c, http.StatusConflict, errAbuseDisabled.Error())
-		return
-	}
-	target, err := parseBanTarget(c.Query("client"))
-	if err != nil {
-		jsonError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	if !reg.unbanTarget(target) {
-		jsonError(c, http.StatusNotFound, "that client is not tracked")
-		return
-	}
-	p.history.lifted(target.scope(), time.Now(), "the portal ("+portalActor(c)+")")
-	p.a.saveBansNow()
-	log.Printf("portal: %s unbanned %s", portalActor(c), target)
-	c.JSON(http.StatusOK, gin.H{"unbanned": target.String()})
-}
-
-// ─── API: settings ───────────────────────────────────────────────────────────
-
-func (p *portal) settingsView() gin.H {
-	views, file := p.a.settingsViews()
-	return gin.H{
-		"settings":  views,
-		"persisted": file != "",
-		"file":      file,
-		"fixed":     p.a.fixedSettings(),
-	}
-}
-
-func (p *portal) apiSettings(c *gin.Context) {
-	c.JSON(http.StatusOK, p.settingsView())
-}
-
-// apiSettingsSave takes a JSON object of setting keys to new values, for
-// example {"cap": 40, "abuse_cooldown": "10m"}, and applies them at once.
-// Every value is validated before any is saved or applied; see
-// app.changeSettings.
-func (p *portal) apiSettingsSave(c *gin.Context) {
-	var set map[string]json.RawMessage
-	if err := json.NewDecoder(io.LimitReader(c.Request.Body, settingsBodyLimit)).Decode(&set); err != nil || len(set) == 0 {
-		jsonError(c, http.StatusBadRequest, "send a JSON object of the settings to change")
-		return
-	}
-	ip, _ := remoteAddr(c.Request)
-	if err := p.a.changeSettings(set, nil, ip); err != nil {
-		jsonError(c, settingsStatus(err), err.Error())
-		return
-	}
-	log.Printf("portal: %s changed settings: %s", portalActor(c), strings.Join(sortedKeys(set), ", "))
-	c.JSON(http.StatusOK, p.settingsView())
-}
-
-// apiSettingsReset removes ?key=… (repeatable) from settings.json, so those
-// settings follow flags, environment or defaults again, and applies them.
-func (p *portal) apiSettingsReset(c *gin.Context) {
-	keys := c.QueryArray("key")
-	if len(keys) == 0 {
-		jsonError(c, http.StatusBadRequest, "key is required")
-		return
-	}
-	ip, _ := remoteAddr(c.Request)
-	if err := p.a.changeSettings(nil, keys, ip); err != nil {
-		jsonError(c, settingsStatus(err), err.Error())
-		return
-	}
-	log.Printf("portal: %s reset settings: %s", portalActor(c), strings.Join(keys, ", "))
-	c.JSON(http.StatusOK, p.settingsView())
-}
-
-// ─── the main listener: history, kicks and visitor notes ─────────────────────
-
-// wrap records every request on the main listener in the history (see
-// history.go), enforces kicks, and notes the path and browser of each
-// visitor who joins the line. It sits outside the main handler, so it also
-// sees requests from banned clients, which the access log never does.
-func (p *portal) wrap(next http.Handler) http.Handler {
-	if p == nil {
-		return next
-	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		g := p.a.current()
-		hw := p.history.begin(w, r, g)
-		defer hw.finish()
-		p.serveMain(hw, r, g, next)
-	})
-}
-
-// serveMain enforces kicks and notes visitors joining the line. Asset,
-// bypass, stream and ops paths are passed straight through: room never
-// issues tickets there.
+// newApp builds the waiting room, abuse registry, admission signer, priority
+// grants, the IP database and the first generation without binding a port.
+// With -data-dir set it also restores bans.json and the saved queue, and
+// starts the ban writer. Callers must Close the returned app.
 //
-// Everything else about the line comes from room itself. The only thing
-// read from responses is a room_ticket value different from the one the
-// request carried, which is a visitor joining the line; room's refreshes of
-// an existing ticket send the same value and are ignored.
-func (p *portal) serveMain(w http.ResponseWriter, r *http.Request, g *generation, next http.Handler) {
-	reqPath := r.URL.Path
-	for _, rule := range g.untracked {
-		if rule.matches(reqPath) {
-			next.ServeHTTP(w, r)
-			return
+// Order matters for the queue: room's settings (including the ticket TTL
+// and first-poll grace, which judge what is stale) are applied by commit
+// before the saved queue is imported, and nothing is served until newApp
+// returns.
+func newApp(cfg config) (*app, error) {
+	if err := cfg.normalize(); err != nil {
+		return nil, err
+	}
+
+	stats := &counters{}
+	a := &app{
+		cfg:   cfg,
+		stats: stats,
+		admit: newAdmitter(cfg.admitSecret, cfg.admitTTL, cfg.cookiePath, cfg.cookieDomain, cfg.secureCookie),
+		abuse: newAbuseRegistry(cfg, stats),
+		drops: newDropper(),
+		stop:  make(chan struct{}),
+	}
+	a.settings = newSettingsManager(cfg)
+	// Before the first generation: its proxy turns the origin's
+	// Concert-Priority header into grants.
+	a.prio = newPriorityState(cfg.admitSecret, a.admit)
+
+	wr := &room.WaitingRoom{}
+	if err := wr.Init(int32(cfg.capacity)); err != nil {
+		return nil, fmt.Errorf("room init: %w", err)
+	}
+	a.room = wr
+
+	// room keys each queued visitor by the address concert resolved in
+	// identify. gin's own ClientIP would name the TLS terminator: concert
+	// turns gin's proxy trust off and applies -trusted-proxies itself.
+	wr.SetClientKeyFunc(func(c *gin.Context) string {
+		if ip := clientIPFrom(c); ip.IsValid() {
+			return ip.String()
 		}
-	}
-
-	now := time.Now()
-	var token string
-	if ck, err := r.Cookie("room_ticket"); err == nil {
-		token = ck.Value
-	}
-	isStatus := reqPath == "/queue/status"
-	if token != "" && p.kicked.has(token, now) {
-		// A banned visitor is answered by the ban check in the main
-		// handler, which shows the block notice rather than the removal notice.
-		if _, banned := g.abuse.banned(clientIP(r, g.cfg.trusted), now); !banned {
-			p.rejectKicked(w, r, isStatus, g.cfg)
-			return
-		}
-	}
-	if isStatus {
-		next.ServeHTTP(w, r)
-		return
-	}
-
-	tw := &ticketWriter{ResponseWriter: w}
-	next.ServeHTTP(tw, r)
-	tw.inspect()
-	if tw.issued != "" && tw.issued != token {
-		p.notes.add(tw.issued, r.UserAgent(), reqPath)
-	}
-}
-
-// rejectKicked answers a removed visitor. Status polls get ready=true so the
-// waiting room page reloads; the reload gets the removal notice and the
-// ticket cookie is cleared, so returning means rejoining at the back.
-func (p *portal) rejectKicked(w http.ResponseWriter, r *http.Request, isStatus bool, cfg config) {
-	h := w.Header()
-	h.Set("Cache-Control", "no-store")
-	if isStatus {
-		h.Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"ready":true}`))
-		return
-	}
-	http.SetCookie(w, &http.Cookie{
-		Name: "room_ticket", Value: "", Path: cfg.cookiePath, Domain: cfg.cookieDomain,
-		MaxAge: -1, Secure: cfg.secureCookie, HttpOnly: true, SameSite: http.SameSiteLaxMode,
+		return ""
 	})
-	if wantsHTML(r) {
-		h.Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusForbidden)
-		_, _ = w.Write([]byte(kickedPage))
-		return
+	registerRoomEvents(wr, a)
+
+	g, err := a.buildGeneration(cfg, nil)
+	if err != nil {
+		wr.Stop()
+		return nil, err
 	}
-	h.Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(http.StatusForbidden)
-	_, _ = w.Write([]byte(`{"error":"removed from the queue","removed":true}`))
+	if err := a.commit(g, nil); err != nil {
+		g.assets.users.close()
+		wr.Stop()
+		return nil, fmt.Errorf("room config: %w", err)
+	}
+	if cfg.fastlaneFile != "" {
+		fc, err := fastlane.Load(cfg.fastlaneFile)
+		if err == nil && fc.Enabled && cfg.admitSecretGenerated {
+			err = fmt.Errorf("fast lane requires a stable CONCERT_ADMIT_SECRET")
+		}
+		if err == nil {
+			a.fastlane, err = fastlane.New(fc, cfg.dataDir, cfg.admitSecret, os.Getenv("CONCERT_GATEWAY_TOKEN"), os.Getenv("CONCERT_POLICY_TOKEN"))
+		}
+		if err != nil {
+			g.assets.users.close()
+			wr.Stop()
+			return nil, fmt.Errorf("fast lane: %w", err)
+		}
+	}
+	// All startup errors after this point close the fast lane's journal.
+	started := false
+	defer func() {
+		if !started && a.fastlane != nil {
+			a.fastlane.Close()
+		}
+	}()
+	a.handler = http.HandlerFunc(a.serveHTTP)
+
+	if cfg.dataDir != "" {
+		a.bansPath = bansFilePath(cfg.dataDir)
+		n, err := a.abuse.loadBans(a.bansPath, time.Now())
+		if err != nil {
+			g.assets.users.close()
+			wr.Stop()
+			return nil, err
+		}
+		if n > 0 {
+			log.Printf("bans: restored %d ban record(s) from %s", n, a.bansPath)
+		}
+
+		a.queuePath = queueFilePath(cfg.dataDir)
+		if err := a.restoreQueue(); err != nil {
+			g.assets.users.close()
+			wr.Stop()
+			return nil, err
+		}
+	}
+
+	// IP details never stop startup: without a usable NADDR_DATA or
+	// NADDR_ADDR the portal shows bare addresses.
+	a.ipinfo = newIPLookup(ipInfoGetenv)
+
+	// Every new ban drops that network's waiting visitors from room's line.
+	a.abuse.setOnBan(a.queueDrop)
+
+	go a.abuse.janitor(a.stop)
+	go a.prio.janitor(a.room, a.stop)
+	a.wg.Add(1)
+	go func() {
+		defer a.wg.Done()
+		a.dropLoop()
+	}()
+	if a.bansPath != "" {
+		a.wg.Add(1)
+		go func() {
+			defer a.wg.Done()
+			a.abuse.persistLoop(a.bansPath, bansSaveEvery, a.stop)
+		}()
+	}
+	started = true
+	if a.fastlane != nil {
+		a.onClose(a.fastlane.Close)
+	}
+	return a, nil
 }
 
-const kickedPage = `<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>Removed from the line</title></head>
-<body style="font-family:system-ui,sans-serif;max-width:32rem;margin:15vh auto;padding:0 1rem;text-align:center">
-<h1>You were removed from the line</h1>
-<p>An administrator removed your place in the queue. You can rejoin at the back.</p>
-<p><a href="/">Rejoin the line</a></p></body></html>`
+// serveHTTP hands the request to the current generation's engine. A request
+// keeps that engine even if a setting changes while it runs.
+func (a *app) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	a.current().engine.ServeHTTP(w, r)
+}
+
+// onClose registers f to run when the app closes, after the background
+// loops have stopped and before the queue is saved. Closers run newest first.
+func (a *app) onClose(f func()) {
+	a.closeMu.Lock()
+	a.closers = append(a.closers, f)
+	a.closeMu.Unlock()
+}
+
+// attachHistory records the portal's history so the settings view can
+// describe it, and closes it with the app, which flushes the history log.
+func (a *app) attachHistory(h *history) {
+	a.history = h
+	a.onClose(h.close)
+}
+
+// Close stops the janitors and the drop loop, flushes unsaved bans and the
+// history log, saves the queue, and stops the IP database watcher and the
+// waiting room's background workers. run calls it after the listeners have
+// drained, so no new tickets or history arrive while they are being saved.
+func (a *app) Close() {
+	a.stopOnce.Do(func() {
+		close(a.stop)
+		a.wg.Wait()
+
+		a.closeMu.Lock()
+		closers := a.closers
+		a.closers = nil
+		a.closeMu.Unlock()
+		for i := len(closers) - 1; i >= 0; i-- {
+			closers[i]()
+		}
+
+		if a.queuePath != "" {
+			a.saveQueue()
+		}
+		if g := a.current(); g != nil {
+			g.assets.users.close()
+		}
+		a.ipinfo.close()
+		a.room.Stop()
+	})
+}
+
+// saveBansNow writes bans.json immediately when anything changed. Used after
+// administrator actions so a ban is on disk before the API answers.
+func (a *app) saveBansNow() {
+	if a.bansPath != "" {
+		a.abuse.flush(a.bansPath)
+	}
+}
+
+// registerRoomEvents counts room's per-request events, logs its
+// edge-triggered ones, and strikes ticket churn. Registered once; room keeps
+// them across changes. Callbacks run in their own goroutines, so none of
+// them may block. Snapshot.Token is a bearer credential and is never logged.
+func registerRoomEvents(wr *room.WaitingRoom, a *app) {
+	stats := a.stats
+	wr.On(room.EventFull, func(s room.Snapshot) {
+		log.Printf("upstream saturated: %d/%d slots, %d queued (%d live)",
+			s.Occupancy, s.Capacity, s.QueueDepth, wr.LiveQueueDepth())
+	})
+	wr.On(room.EventDrain, func(s room.Snapshot) {
+		log.Printf("draining: %d/%d slots, %d queued (%d live)",
+			s.Occupancy, s.Capacity, s.QueueDepth, wr.LiveQueueDepth())
+	})
+	wr.On(room.EventQueue, func(s room.Snapshot) {
+		stats.queued.Add(1)
+		// A visitor who arrived with no room_ticket at all took a fresh
+		// place in line: a script discarding cookies does this on every
+		// retry. An unrecognised ticket (StaleTicket) is a browser whose old
+		// ticket expired or was removed, and is not struck.
+		if !s.StaleTicket {
+			a.churnStrike(s.ClientKey)
+		}
+	})
+	wr.On(room.EventEvict, func(room.Snapshot) { stats.evicted.Add(1) })
+	wr.On(room.EventTimeout, func(room.Snapshot) { stats.timeouts.Add(1) })
+	wr.On(room.EventPromote, func(room.Snapshot) { stats.promoted.Add(1) })
+	wr.On(room.EventRemove, func(room.Snapshot) { stats.removed.Add(1) })
+}
+
+// churnStrike records a ticket-churn strike against the client room keyed
+// the arrival by. The key is the address concert resolved in identify.
+func (a *app) churnStrike(key string) {
+	reg := a.current().abuse
+	if reg == nil || key == "" {
+		return
+	}
+	ip, err := netip.ParseAddr(key)
+	if err != nil {
+		return
+	}
+	reg.strike(ip, strikeTicketChurn, time.Now())
+}
+
+// run builds the app, starts the admin portal when configured, binds the
+// main listener, and serves until ctx is cancelled. Both listeners are
+// endpoints (see server.go); the deferred Close saves the queue and the
+// history after they have drained.
+func run(ctx context.Context, cfg config) error {
+	a, err := newApp(cfg)
+	if err != nil {
+		return err
+	}
+	defer a.Close()
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel() // stops the portal if the main listener fails
+
+	p, err := newPortal(a)
+	if err != nil {
+		return err
+	}
+	handler := p.wrap(a.handler)
+
+	g := a.current()
+	c := g.cfg
+
+	// Built before binding, so a bad certificate cache fails fast.
+	tlsCfg, err := newACMETLSConfig(c)
+	if err != nil {
+		p.closeListener()
+		return err
+	}
+
+	ln, err := listen(c.listen)
+	if err != nil {
+		p.closeListener()
+		return fmt.Errorf("listen %s: %w", c.listen, err)
+	}
+
+	mainEP := newEndpoint("main", handler, shutdownGrace, newServer)
+	mainEP.setTLS(tlsCfg)
+	portalEP := p.start(ctx)
+	a.attachEndpoints(mainEP, portalEP)
+
+	derived := ""
+	if c.assetCap == 0 {
+		derived = " (derived)"
+	}
+	log.Printf("concert %s -> %s (cap=%d, max-queue=%d, token-ttl=%s, first-poll-grace=%s, asset-cap=%d%s, asset-user-cap=%d h1 / %d h2)",
+		ln.Addr(), c.target, c.capacity, c.maxQueue, a.room.TokenTTL(), a.room.FirstPollGrace(),
+		g.assets.global.Cap(), derived, c.assetUserCapH1, c.assetUserCapH2)
+	if lr := priorityRank(c.priorityLaneRank); lr < rankCount {
+		log.Printf("priority: %s and above use a lane of %d slot(s) while the room is busy; forms from admitted visitors %v",
+			lr, g.lane.Cap(), c.priorityForms)
+	}
+	if rules := parsePaths(c.streamPaths); len(rules) > 0 {
+		log.Printf("streams: %d path(s) outside the waiting room, admission pass required, at most %d at once",
+			len(rules), c.streamCap)
+	}
+	if tlsCfg != nil {
+		directory := "production"
+		if c.tlsStaging {
+			directory = "staging (untrusted certificates)"
+		}
+		log.Printf("tls: Let's Encrypt %s for %s, cache %s",
+			directory, strings.Join(c.tlsHosts, ","), c.tlsCacheDir)
+		if !c.secureCookie {
+			log.Printf("tls: browsers now reach concert over HTTPS; set CONCERT_SECURE_COOKIE=true")
+		}
+	}
+	if a.fastlane != nil {
+		fc := a.fastlane.Config()
+		mode := "live networks"
+		if fc.TestMode {
+			mode = "test networks only"
+		}
+		log.Printf("fast lane: %s, %d payment offer(s), %d NFT rule(s), %ds pass, gateway %s",
+			mode, len(fc.Offers), len(fc.Collections), fc.PassSeconds, fc.GatewayURL)
+	} else if c.fastlaneFile != "" {
+		log.Printf("fast lane: %s has \"enabled\": false; wallet access is off", c.fastlaneFile)
+	}
+	if c.abuseEnabled {
+		log.Printf("abuse registry: %d strikes per %s, cooldown %s doubling to %s, %d ban paths",
+			c.abuseStrikes, c.abuseWindow, c.abuseCooldown, c.abuseMaxCooldown, len(g.banRules))
+	}
+	if c.dataDir != "" {
+		if err := ensureWritableDir(c.dataDir); err != nil {
+			log.Printf("data dir: %v; settings, bans, the queue and the history changed now will not be saved", err)
+		} else {
+			log.Printf("data dir: %s (settings.json overrides flags and environment; bans, the queue and the history survive restarts)", c.dataDir)
+		}
+	}
+	if c.admitSecretGenerated {
+		log.Printf("CONCERT_ADMIT_SECRET not set: using a random secret; admission passes and priority grants reset on restart and are not shared across instances")
+	}
+
+	mainEP.serveOn(ln, c.listen)
+	return awaitShutdown(ctx, mainEP, portalEP)
+}
+
+// setPricing stores the skip-the-line price. It changes at runtime, so it
+// is kept as atomic float64 bits.
+func (a *app) setPricing(rate, surge float64) {
+	a.rateBits.Store(math.Float64bits(rate))
+	a.surgeBits.Store(math.Float64bits(surge))
+}
+
+func (a *app) pricing() (rate, surge float64) {
+	return math.Float64frombits(a.rateBits.Load()), math.Float64frombits(a.surgeBits.Load())
+}
+
+// price is room's RateFunc while paid skip-the-line is configured (-rate or
+// -surge above 0): base + depth × surge per position. See applyRoom.
+func (a *app) price(depth int64) float64 {
+	rate, surge := a.pricing()
+	return rate + float64(depth)*surge
+}
