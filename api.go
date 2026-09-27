@@ -210,6 +210,9 @@ func newProxy(target *url.URL, preserveHost bool, headerTimeout time.Duration, t
 				pr.Out.Header.Set("X-Forwarded-Host", pr.In.Host)
 			}
 			stripCookies(pr.Out, proxyCookies...)
+			for _, name := range []string{"PAYMENT-SIGNATURE", "PAYMENT-REQUIRED", "PAYMENT-RESPONSE", "Concert-Session", "X-Concert-CSRF"} {
+				pr.Out.Header.Del(name)
+			}
 		},
 		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
 			if errors.Is(err, context.Canceled) {
