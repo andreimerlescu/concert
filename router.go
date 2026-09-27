@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"os"
 	"time"
@@ -32,7 +34,11 @@ func buildRouter(g *generation) (engine *gin.Engine, err error) {
 	r.HandleMethodNotAllowed = false
 	_ = r.SetTrustedProxies(nil) // concert resolves client IPs itself
 
-	r.Use(gin.Recovery())
+	r.Use(gin.CustomRecoveryWithWriter(io.Discard, func(c *gin.Context, _ any) {
+		// Never dump payment authorizations, wallet sessions or cookies.
+		log.Printf("request panic on %s", clip(c.Request.URL.Path, 256))
+		c.AbortWithStatus(http.StatusInternalServerError)
+	}))
 	r.Use(g.identify) // before the logger: banned requests are never logged
 	if cfg.accessLogEnabled {
 		out := cfg.accessLog
@@ -47,6 +53,7 @@ func buildRouter(g *generation) (engine *gin.Engine, err error) {
 
 	// ---- Outside the room. ----
 	registerOps(r, g)
+	registerConcertRoutes(r, g)
 	registerPaths(r, parsePaths(cfg.bypass), g.forward)
 	registerPaths(r, parsePaths(cfg.assets), g.assets.private, g.forward)
 	registerPaths(r, parsePaths(cfg.assetPublic), g.assets.public, g.forward)
