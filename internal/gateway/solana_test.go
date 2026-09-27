@@ -86,7 +86,7 @@ func TestNativeSOLThroughGateway(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := newServer(cfg, nets, j, token, nil, true)
+	s, err := newServer(cfg, nets, j, nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -25,6 +25,8 @@ import (
 // in the generation and is replaced when a setting changes.
 type app struct {
 	fastlane *fastlane.Service
+	// gatewayClose stops the in-process chain gateway after the fast lane.
+	gatewayClose func()
 
 	cfg       config // as concert started; the running configuration is current().cfg
 	room      *room.WaitingRoom
@@ -121,8 +123,17 @@ func newApp(cfg config) (*app, error) {
 		if err == nil && fc.Enabled && cfg.admitSecretGenerated {
 			err = fmt.Errorf("fast lane requires a stable CONCERT_ADMIT_SECRET")
 		}
+		var gw fastlane.Gateway
+		if err == nil && fc.Enabled {
+			gw, err = newGateway(fc, &cfg)
+		}
 		if err == nil {
-			a.fastlane, err = fastlane.New(fc, cfg.dataDir, cfg.admitSecret, os.Getenv("CONCERT_GATEWAY_TOKEN"), os.Getenv("CONCERT_POLICY_TOKEN"))
+			a.fastlane, err = fastlane.New(fc, cfg.dataDir, cfg.admitSecret, gw, os.Getenv("CONCERT_POLICY_TOKEN"))
+			if err != nil {
+				closeGateway(gw)
+			} else if gw != nil {
+				a.gatewayClose = func() { closeGateway(gw) }
+			}
 		}
 		if err != nil {
 			g.assets.users.close()
@@ -135,6 +146,7 @@ func newApp(cfg config) (*app, error) {
 	defer func() {
 		if !started && a.fastlane != nil {
 			a.fastlane.Close()
+			a.gatewayClose()
 		}
 	}()
 	a.handler = http.HandlerFunc(a.serveHTTP)
@@ -182,6 +194,9 @@ func newApp(cfg config) (*app, error) {
 	}
 	started = true
 	if a.fastlane != nil {
+		// Closers run newest first: the fast lane stops, then the gateway
+		// lets settlements in flight journal their results.
+		a.onClose(a.gatewayClose)
 		a.onClose(a.fastlane.Close)
 	}
 	return a, nil
@@ -361,8 +376,11 @@ func run(ctx context.Context, cfg config) error {
 		if fc.TestMode {
 			mode = "test networks only"
 		}
-		log.Printf("fast lane: %s, %d payment offer(s), %d NFT rule(s), %ds pass, gateway %s",
-			mode, len(fc.Offers), len(fc.Collections), fc.PassSeconds, fc.GatewayURL)
+		log.Printf("fast lane: %s, %d payment offer(s), %d NFT rule(s), %ds pass, chain endpoints %s, settlement journal %s",
+			mode, len(fc.Offers), len(fc.Collections), fc.PassSeconds, c.networksFile, gatewayDir(c.dataDir))
+		if fc.GatewayURL != "" {
+			log.Printf("fast lane: gateway_url is ignored; the chain gateway runs inside concert")
+		}
 	} else if c.fastlaneFile != "" {
 		log.Printf("fast lane: %s has \"enabled\": false; wallet access is off", c.fastlaneFile)
 	}

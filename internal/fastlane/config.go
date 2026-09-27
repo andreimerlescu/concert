@@ -54,7 +54,7 @@ type Collection struct {
 type Config struct {
 	Enabled        bool         `json:"enabled"`
 	Origin         string       `json:"origin"`
-	GatewayURL     string       `json:"gateway_url"`
+	GatewayURL     string       `json:"gateway_url,omitempty"` // ignored: the gateway runs inside Concert
 	PolicyURL      string       `json:"policy_url,omitempty"`
 	TestMode       bool         `json:"test_mode"`
 	PassSeconds    int          `json:"pass_seconds"`
@@ -133,10 +133,6 @@ func (c *Config) Validate() error {
 		return errors.New("origin cannot contain a path")
 	}
 	c.Origin = strings.TrimRight(c.Origin, "/")
-	if !validURL(c.GatewayURL, true) {
-		return errors.New("gateway_url must be HTTPS or loopback HTTP")
-	}
-	c.GatewayURL = strings.TrimRight(c.GatewayURL, "/")
 	if c.PolicyURL != "" && !validURL(c.PolicyURL, true) {
 		return errors.New("policy_url must be HTTPS or loopback HTTP")
 	}

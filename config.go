@@ -27,6 +27,7 @@ var proxyCookies = []string{"room_ticket", "room_pass", "room_probe", admitCooki
 
 type config struct {
 	fastlaneFile string // immutable startup configuration; see docs/FASTLANE.md
+	networksFile string // chain endpoints for the fast lane's gateway
 
 	listen         string
 	upstream       string

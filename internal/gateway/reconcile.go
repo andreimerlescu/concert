@@ -29,7 +29,7 @@ func Reconcile(ctx context.Context, j *Journal, networks map[string]Network, id,
 func reconcile(ctx context.Context, j *Journal, networks map[string]Network, id, stellarHash string, allowHTTP bool) (x402.SettleResponse, error) {
 	var none x402.SettleResponse
 	if !fingerprintRE.MatchString(id) {
-		return none, errors.New("usage: concert-gateway reconcile <payment fingerprint> [Stellar transaction hash]")
+		return none, errors.New("usage: concert reconcile <payment fingerprint> [Stellar transaction hash]")
 	}
 	rec, ok := j.Get(id)
 	if !ok {

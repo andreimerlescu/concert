@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,7 +22,7 @@ import (
 // keeping the financial network mocked. No transaction is broadcast.
 func TestFastLane_ProxyCapacityAndSession(t *testing.T) {
 	var settlements atomic.Int64
-	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	gateway := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/supported":
@@ -32,16 +35,17 @@ func TestFastLane_ProxyCapacityAndSession(t *testing.T) {
 		default:
 			w.WriteHeader(404)
 		}
-	}))
-	t.Cleanup(gateway.Close)
-	t.Setenv("CONCERT_GATEWAY_TOKEN", strings.Repeat("g", 32))
+	})
+	restore := newGateway
+	newGateway = func(fastlane.Config, *config) (fastlane.Gateway, error) { return handlerGateway{gateway}, nil }
+	t.Cleanup(func() { newGateway = restore })
 	up := newFakeUpstream(t)
 	cfg := testConfig(up.URL())
 	cfg.capacity, cfg.priorityCap, cfg.priorityWait = 1, 1, 10*time.Millisecond
 	cfg.dataDir = t.TempDir()
 	cfg.fastlaneFile = filepath.Join(cfg.dataDir, "fastlane.json")
 	req := fastlane.Requirements{Scheme: "exact", Network: "xrpl:1", Amount: "100", Asset: "XRP", PayTo: "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe", MaxTimeoutSeconds: 60, Extra: map[string]any{"areFeesSponsored": false}}
-	fc := fastlane.Config{Enabled: true, Origin: "http://127.0.0.1:8080", GatewayURL: gateway.URL, TestMode: true, Merchant: "Integration test", TermsURL: "http://127.0.0.1:8080/terms", PrivacyURL: "http://127.0.0.1:8080/privacy", RefundURL: "http://127.0.0.1:8080/refunds", Offers: []fastlane.Offer{{Label: "XRP", Requirements: req}}}
+	fc := fastlane.Config{Enabled: true, Origin: "http://127.0.0.1:8080", TestMode: true, Merchant: "Integration test", TermsURL: "http://127.0.0.1:8080/terms", PrivacyURL: "http://127.0.0.1:8080/privacy", RefundURL: "http://127.0.0.1:8080/refunds", Offers: []fastlane.Offer{{Label: "XRP", Requirements: req}}}
 	b, _ := json.Marshal(fc)
 	if err := os.WriteFile(cfg.fastlaneFile, b, 0600); err != nil {
 		t.Fatal(err)
@@ -118,4 +122,18 @@ func TestFastLane_StripsPaymentCredentialsFromOrigin(t *testing.T) {
 	if response.StatusCode != 200 || leaked.Load() {
 		t.Fatalf("status=%d leaked=%v", response.StatusCode, leaked.Load())
 	}
+}
+
+// handlerGateway runs a fake gateway written as an HTTP handler in-process,
+// the way Concert calls its real gateway.
+type handlerGateway struct{ h http.Handler }
+
+func (g handlerGateway) Handle(ctx context.Context, op string, body []byte) (any, error) {
+	r := httptest.NewRequest(http.MethodPost, op, bytes.NewReader(body)).WithContext(ctx)
+	w := httptest.NewRecorder()
+	g.h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		return nil, fmt.Errorf("gateway returned HTTP %d", w.Code)
+	}
+	return json.RawMessage(w.Body.Bytes()), nil
 }

@@ -1,0 +1,98 @@
+{
+  "enabled": false,
+  "origin": "https://queue.example.com",
+  "policy_url": "",
+  "test_mode": true,
+  "pass_seconds": 300,
+  "nft_pass_seconds": 30,
+  "max_records": 100000,
+  "merchant": "Example Tickets LLC",
+  "terms_url": "https://www.example.com/terms",
+  "privacy_url": "https://www.example.com/privacy",
+  "refund_url": "https://www.example.com/refunds",
+  "offers": [
+    {
+      "label": "XRP · Testnet",
+      "requirements": {
+        "scheme": "exact",
+        "network": "xrpl:1",
+        "amount": "100000",
+        "asset": "XRP",
+        "payTo": "rQLTGGRoGbQZLK2ErVKio1pxViAR8fvMBT",
+        "maxTimeoutSeconds": 60,
+        "extra": {
+          "areFeesSponsored": false,
+          "assetTransferMethod": "sequence"
+        }
+      }
+    },
+    {
+      "label": "XLM · Testnet",
+      "requirements": {
+        "scheme": "exact",
+        "network": "stellar:testnet",
+        "amount": "1000000",
+        "asset": "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+        "payTo": "GAJCHOYDKVA34FOL4NTDILX6T7XIEQXWJZ7ZT4PV2RSUVVXCHW4CC5LA",
+        "maxTimeoutSeconds": 60,
+        "extra": {
+          "areFeesSponsored": true
+        }
+      }
+    },
+    {
+      "label": "HBAR · Testnet",
+      "requirements": {
+        "scheme": "exact",
+        "network": "hedera:testnet",
+        "amount": "10000000",
+        "asset": "0.0.0",
+        "payTo": "0.0.4815162",
+        "maxTimeoutSeconds": 60,
+        "extra": {
+          "feePayer": "0.0.4815342"
+        }
+      }
+    },
+    {
+      "label": "SOL · Devnet",
+      "requirements": {
+        "scheme": "concert-native-sol",
+        "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+        "amount": "1500000",
+        "asset": "SOL",
+        "payTo": "HnsoZ8ePhw43Zf3vSpTt71LGbdRG3NzFepQWxXBosRWo",
+        "maxTimeoutSeconds": 60,
+        "extra": {
+          "areFeesSponsored": false
+        }
+      }
+    }
+  ],
+  "collections": [
+    {
+      "id": "xrpl-founders",
+      "label": "Founders Club (XRPL)",
+      "network": "xrpl:1",
+      "collection": "rN1ZgJLAwHdVCZL3vY5nqudgEsCc5sEyZX:42"
+    },
+    {
+      "id": "stellar-backstage",
+      "label": "Backstage Pass (Stellar)",
+      "network": "stellar:testnet",
+      "collection": "CAR6LMNBSEDJ7EJPZ5GM2STC5ZGN7AVTPA6UALCUCPQQ2L4PHDVJJAXM"
+    },
+    {
+      "id": "hedera-vip",
+      "label": "VIP Lounge (Hedera)",
+      "network": "hedera:testnet",
+      "collection": "0.0.2233445"
+    },
+    {
+      "id": "solana-season",
+      "label": "Season Holders (Solana)",
+      "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+      "collection": "EBiEQxgHYcCBPN8zoUSZxbEsKd46TBPtphdcQQd28Ey"
+    }
+  ]
+}

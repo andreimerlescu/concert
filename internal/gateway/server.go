@@ -3,16 +3,12 @@ package gateway
 import (
 	"bytes"
 	"context"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"io"
 	"log"
-	"net/http"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/andreimerlescu/concert/internal/chain/solana"
@@ -21,41 +17,41 @@ import (
 	"github.com/andreimerlescu/concert/internal/x402"
 )
 
-const (
-	maxBody     = 64 << 10
-	maxInFlight = 32
-)
-
-// Server is the gateway's HTTP API: GET /supported, POST /verify, /settle,
-// /nft/verify and /solana/prepare, all behind a bearer token.
+// Server runs the chain operations inside Concert: "/supported", "/verify",
+// "/settle", "/nft/verify" and "/solana/prepare", each taking and returning
+// JSON (see Handle).
 type Server struct {
 	cfg     fastlane.Config
 	chains  map[string]*chain
 	journal *Journal
-	token   string
 
-	queueMu sync.Mutex
-	queues  map[string]*sync.Mutex
-	active  atomic.Int32
+	queueMu  sync.Mutex
+	queues   map[string]*sync.Mutex
+	settling sync.WaitGroup
 }
 
-// New assembles a gateway. getenv supplies sponsor secrets.
-func New(cfg fastlane.Config, networks map[string]Network, journal *Journal, token string, getenv func(string) string) (*Server, error) {
-	return newServer(cfg, networks, journal, token, getenv, false)
+// New assembles a gateway around an open journal, which Close closes.
+// getenv supplies sponsor secrets.
+func New(cfg fastlane.Config, networks map[string]Network, journal *Journal, getenv func(string) string) (*Server, error) {
+	return newServer(cfg, networks, journal, getenv, false)
 }
 
-func newServer(cfg fastlane.Config, networks map[string]Network, journal *Journal, token string, getenv func(string) string, allowHTTP bool) (*Server, error) {
+func newServer(cfg fastlane.Config, networks map[string]Network, journal *Journal, getenv func(string) string, allowHTTP bool) (*Server, error) {
 	if !cfg.Enabled {
 		return nil, errors.New("enable and complete the fast lane configuration before starting the gateway")
-	}
-	if len(token) < 32 {
-		return nil, errors.New("CONCERT_GATEWAY_TOKEN must be at least 32 characters")
 	}
 	chains, err := build(cfg, networks, getenv, allowHTTP)
 	if err != nil {
 		return nil, err
 	}
-	return &Server{cfg: cfg, chains: chains, journal: journal, token: token, queues: map[string]*sync.Mutex{}}, nil
+	return &Server{cfg: cfg, chains: chains, journal: journal, queues: map[string]*sync.Mutex{}}, nil
+}
+
+// Close waits for settlements in flight to record their results (each is
+// bounded by its offer's timeout plus three minutes), then closes the journal.
+func (s *Server) Close() {
+	s.settling.Wait()
+	s.journal.Close()
 }
 
 type mechanism interface {
@@ -63,50 +59,24 @@ type mechanism interface {
 	Settle(context.Context, x402.Payload, x402.Requirements) (x402.SettleResponse, error)
 }
 
-func reply(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
 var errBadRequest = errors.New("verification_failed")
 
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+s.token)) != 1 {
-		reply(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-		return
+// Handle runs one operation. Errors may carry endpoint URLs or payloads;
+// callers must not show them to visitors.
+func (s *Server) Handle(ctx context.Context, op string, body []byte) (any, error) {
+	switch op {
+	case "/supported":
+		return s.supported(), nil
+	case "/verify":
+		return s.verify(ctx, body)
+	case "/settle":
+		return s.settle(ctx, body)
+	case "/nft/verify":
+		return s.nft(ctx, body)
+	case "/solana/prepare":
+		return s.prepare(ctx, body)
 	}
-	if r.Method == http.MethodGet && r.URL.Path == "/supported" {
-		reply(w, http.StatusOK, s.supported())
-		return
-	}
-	routes := map[string]func(context.Context, []byte) (any, error){
-		"/verify": s.verify, "/settle": s.settle, "/nft/verify": s.nft, "/solana/prepare": s.prepare,
-	}
-	handle, ok := routes[r.URL.Path]
-	if r.Method != http.MethodPost || !ok {
-		reply(w, http.StatusNotFound, map[string]string{"error": "not_found"})
-		return
-	}
-	if s.active.Add(1) > maxInFlight {
-		s.active.Add(-1)
-		reply(w, http.StatusServiceUnavailable, map[string]string{"error": "busy"})
-		return
-	}
-	defer s.active.Add(-1)
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
-	if err != nil || len(body) > maxBody {
-		reply(w, http.StatusBadRequest, map[string]string{"error": "verification_failed"})
-		return
-	}
-	out, err := handle(r.Context(), body)
-	if err != nil {
-		// Chain errors may carry endpoint URLs or payloads; never echo them.
-		reply(w, http.StatusBadRequest, map[string]string{"error": "verification_failed"})
-		return
-	}
-	reply(w, http.StatusOK, out)
+	return nil, errors.New("unknown gateway operation")
 }
 
 func (s *Server) supported() any {
@@ -209,6 +179,8 @@ func (s *Server) settle(ctx context.Context, body []byte) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.settling.Add(1)
+	defer s.settling.Done()
 	q := s.queue(r.Network)
 	q.Lock()
 	defer q.Unlock()

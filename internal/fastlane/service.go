@@ -84,31 +84,42 @@ const (
 	callTimeout    = 45 * time.Second
 )
 
-type Service struct {
-	cfg          Config
-	key          []byte
-	gatewayToken string
-	policyToken  string
-	http         *http.Client
-	ledger       *ledger
-	mu           sync.Mutex
-	active       map[string]bool
-	challenges   map[string]challenge
-	nfts         map[string]nftLease
-	limits       map[string]*rateWindow
-	work         chan struct{}
-	now          func() time.Time
+// Gateway runs the chain operations Concert needs: "/supported",
+// "/verify", "/settle", "/nft/verify" and "/solana/prepare". Each takes a
+// JSON request body and returns a JSON-encodable result. internal/gateway
+// implements it inside the Concert process.
+type Gateway interface {
+	Handle(ctx context.Context, op string, body []byte) (any, error)
 }
 
-func New(c Config, dir string, key []byte, gatewayToken, policyToken string) (*Service, error) {
+type Service struct {
+	cfg         Config
+	key         []byte
+	gateway     Gateway
+	policyToken string
+	http        *http.Client
+	ledger      *ledger
+	mu          sync.Mutex
+	active      map[string]bool
+	challenges  map[string]challenge
+	nfts        map[string]nftLease
+	limits      map[string]*rateWindow
+	work        chan struct{}
+	now         func() time.Time
+}
+
+func New(c Config, dir string, key []byte, gw Gateway, policyToken string) (*Service, error) {
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
 	if !c.Enabled {
 		return nil, nil
 	}
-	if len(key) < 32 || len(gatewayToken) < 32 {
-		return nil, errors.New("stable admission secret and CONCERT_GATEWAY_TOKEN must each be at least 32 bytes")
+	if len(key) < 32 {
+		return nil, errors.New("stable admission secret must be at least 32 bytes")
+	}
+	if gw == nil {
+		return nil, errors.New("no chain gateway")
 	}
 	if c.PolicyURL != "" && len(policyToken) < 32 {
 		return nil, errors.New("CONCERT_POLICY_TOKEN must be at least 32 bytes")
@@ -117,7 +128,7 @@ func New(c Config, dir string, key []byte, gatewayToken, policyToken string) (*S
 	if err != nil {
 		return nil, err
 	}
-	s := &Service{cfg: c, key: key, gatewayToken: gatewayToken, policyToken: policyToken, ledger: l,
+	s := &Service{cfg: c, key: key, gateway: gw, policyToken: policyToken, ledger: l,
 		// Every call sets its own deadline: settlement may legitimately outlast
 		// an ordinary verification request.
 		http:   &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
@@ -129,7 +140,7 @@ func New(c Config, dir string, key []byte, gatewayToken, policyToken string) (*S
 			Network string `json:"network"`
 		} `json:"kinds"`
 	}
-	if err = s.call(context.Background(), 10*time.Second, c.GatewayURL+"/supported", gatewayToken, nil, &capabilities); err != nil {
+	if err = s.gatewayCall(context.Background(), 10*time.Second, "/supported", nil, &capabilities); err != nil {
 		l.close()
 		return nil, fmt.Errorf("gateway discovery: %w", err)
 	}
@@ -255,6 +266,48 @@ func (s *Service) Eligible(r *http.Request) bool {
 	defer s.mu.Unlock()
 	x, ok := s.nfts[id]
 	return ok && s.now().Before(x.Expires)
+}
+
+// gatewayCall runs a gateway operation, waiting at most timeout. A
+// settlement keeps running (and is journaled by the gateway) after the wait
+// ends, exactly as it would behind a network hop.
+func (s *Service) gatewayCall(ctx context.Context, timeout time.Duration, op string, in, out any) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	body := []byte("{}")
+	if in != nil {
+		b, e := json.Marshal(in)
+		if e != nil {
+			return e
+		}
+		body = b
+	}
+	type result struct {
+		v   any
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		v, e := s.gateway.Handle(ctx, op, body)
+		done <- result{v, e}
+	}()
+	select {
+	case <-ctx.Done():
+		return errors.New("verification service unavailable")
+	case r := <-done:
+		if r.err != nil {
+			// Chain errors may carry endpoint URLs or payloads; never pass them on.
+			return errors.New("verification failed")
+		}
+		b, e := json.Marshal(r.v)
+		if e != nil {
+			return errors.New("invalid service response")
+		}
+		if e = json.Unmarshal(b, out); e != nil {
+			return errors.New("invalid service JSON")
+		}
+		return nil
+	}
 }
 
 func (s *Service) call(ctx context.Context, timeout time.Duration, endpoint, token string, in, out any) error {
@@ -486,7 +539,7 @@ func (s *Service) prepareSOL(w http.ResponseWriter, r *http.Request) {
 	var out struct {
 		Transaction string `json:"transaction"`
 	}
-	if err := s.call(r.Context(), callTimeout, s.cfg.GatewayURL+"/solana/prepare", s.gatewayToken, in, &out); err != nil {
+	if err := s.gatewayCall(r.Context(), callTimeout, "/solana/prepare", in, &out); err != nil {
 		failure(w, 503, "wallet_preparation_unavailable")
 		return
 	}
@@ -592,7 +645,7 @@ func (s *Service) payment(w http.ResponseWriter, r *http.Request, id string) {
 	x := prior
 	if !exists || prior.Fingerprint != fp {
 		var v verification
-		if e = s.call(r.Context(), callTimeout, s.cfg.GatewayURL+"/verify", s.gatewayToken, args, &v); e != nil {
+		if e = s.gatewayCall(r.Context(), callTimeout, "/verify", args, &v); e != nil {
 			failure(w, 503, "payment_verification_unavailable")
 			return
 		}
@@ -624,7 +677,7 @@ func (s *Service) payment(w http.ResponseWriter, r *http.Request, id string) {
 	settleCtx := context.WithoutCancel(r.Context())
 	settleWithin := time.Duration(req.MaxTimeoutSeconds)*time.Second + 90*time.Second
 	var settled Settlement
-	e = s.call(settleCtx, settleWithin, s.cfg.GatewayURL+"/settle", s.gatewayToken, args, &settled)
+	e = s.gatewayCall(settleCtx, settleWithin, "/settle", args, &settled)
 	if e != nil || !settled.Success || settled.Transaction == "" || settled.Network != req.Network || settled.Payer != x.Payer {
 		x.State = "unknown"
 		_ = s.ledger.write(x)
@@ -746,7 +799,7 @@ func (s *Service) proveNFT(w http.ResponseWriter, r *http.Request, id string) {
 		Collection string `json:"collection"`
 		Token      string `json:"token_id"`
 	}
-	err := s.call(r.Context(), callTimeout, s.cfg.GatewayURL+"/nft/verify", s.gatewayToken, map[string]any{"network": ch.Rule.Network, "address": ch.Address, "collection": ch.Rule.Collection, "token_id": ch.Token, "message": ch.Message, "signature": in.Signature, "public_key": in.PublicKey}, &proof)
+	err := s.gatewayCall(r.Context(), callTimeout, "/nft/verify", map[string]any{"network": ch.Rule.Network, "address": ch.Address, "collection": ch.Rule.Collection, "token_id": ch.Token, "message": ch.Message, "signature": in.Signature, "public_key": in.PublicKey}, &proof)
 	if err != nil {
 		failure(w, 503, "nft_verification_unavailable")
 		return

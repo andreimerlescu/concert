@@ -1,9 +1,11 @@
 package fastlane
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,7 +20,7 @@ import (
 type harness struct {
 	s        *Service
 	cfg      Config
-	gateway  *httptest.Server
+	gateway  http.Handler
 	settle   atomic.Int64
 	verify   atomic.Int64
 	fail     atomic.Bool
@@ -32,12 +34,7 @@ type harness struct {
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 	h := &harness{dir: t.TempDir(), now: time.Now().UTC()}
-	h.gateway = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer "+strings.Repeat("g", 32) {
-			t.Error("gateway auth missing")
-			w.WriteHeader(401)
-			return
-		}
+	h.gateway = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/supported":
 			reply(w, 200, map[string]any{"kinds": []any{map[string]any{"x402Version": 2, "scheme": "exact", "network": "xrpl:1"}}})
@@ -75,17 +72,32 @@ func newHarness(t *testing.T) *harness {
 		default:
 			w.WriteHeader(404)
 		}
-	}))
-	h.cfg = Config{Enabled: true, Origin: "http://127.0.0.1:8080", GatewayURL: h.gateway.URL, TestMode: true, Merchant: "Test merchant", TermsURL: "http://127.0.0.1:8080/terms", PrivacyURL: "http://127.0.0.1:8080/privacy", RefundURL: "http://127.0.0.1:8080/refunds", PassSeconds: 30, NFTPassSeconds: 5, MaxRecords: 100,
+	})
+	h.cfg = Config{Enabled: true, Origin: "http://127.0.0.1:8080", TestMode: true, Merchant: "Test merchant", TermsURL: "http://127.0.0.1:8080/terms", PrivacyURL: "http://127.0.0.1:8080/privacy", RefundURL: "http://127.0.0.1:8080/refunds", PassSeconds: 30, NFTPassSeconds: 5, MaxRecords: 100,
 		Offers:      []Offer{{Label: "XRP", Requirements: Requirements{Scheme: "exact", Network: "xrpl:1", Amount: "100", Asset: "XRP", PayTo: "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe", MaxTimeoutSeconds: 60, Extra: map[string]any{"areFeesSponsored": false}}}},
 		Collections: []Collection{{ID: "club", Label: "Club", Network: "xrpl:1", Collection: "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh:0"}}}
 	h.open(t)
-	t.Cleanup(func() { h.s.Close(); h.gateway.Close() })
+	t.Cleanup(func() { h.s.Close() })
 	return h
 }
+
+// handlerGateway runs a fake gateway written as an HTTP handler in-process,
+// the way Concert calls its real gateway.
+type handlerGateway struct{ h http.Handler }
+
+func (g handlerGateway) Handle(ctx context.Context, op string, body []byte) (any, error) {
+	r := httptest.NewRequest(http.MethodPost, op, bytes.NewReader(body)).WithContext(ctx)
+	w := httptest.NewRecorder()
+	g.h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		return nil, fmt.Errorf("gateway returned HTTP %d", w.Code)
+	}
+	return json.RawMessage(w.Body.Bytes()), nil
+}
+
 func (h *harness) open(t *testing.T) {
 	t.Helper()
-	s, e := New(h.cfg, h.dir, []byte(strings.Repeat("k", 32)), strings.Repeat("g", 32), strings.Repeat("p", 32))
+	s, e := New(h.cfg, h.dir, []byte(strings.Repeat("k", 32)), handlerGateway{h.gateway}, strings.Repeat("p", 32))
 	if e != nil {
 		t.Fatal(e)
 	}

@@ -46,6 +46,35 @@
 # concert.env when missing; NADDR_DATA or NADDR_ADDR given to this run
 # replace the values there.
 #
+# Wallet access: x402 passes and NFT holders (docs/FASTLANE.md). concert reads
+# /etc/concert/fastlane.json (offers and NFT rules) and
+# /etc/concert/networks.json (chain endpoints); the chain gateway runs inside
+# concert. Under SELinux enforcing both files must be concert_etc_t. A file
+# written in a home directory and moved into /etc/concert keeps user_home_t,
+# concert is denied reading it, and it fails to start. Hand the files to the
+# installer instead: it installs root-owned copies readable by concert,
+# applies the label, checks it, and sets CONCERT_FASTLANE_CONFIG and
+# CONCERT_NETWORKS_CONFIG in concert.env.
+#
+#   sudo CONCERT_FASTLANE_CONFIG=/home/rocky/fastlane.json \
+#        CONCERT_NETWORKS_CONFIG=/home/rocky/networks.json \
+#        bash installer.sh
+#
+# Start from the samples every run writes beside them,
+# /etc/concert/fastlane.example.json and networks.example.json (also printed
+# by "concert example fastlane|networks"); docs/FASTLANE.md explains every
+# key. Files already in /etc/concert are relabeled and checked on every run,
+# so after editing one in place, re-run the installer: it restarts concert
+# because the file changed. A path in concert.env outside /etc/concert is
+# copied in the same way. The chain endpoint ports networks.json names (XRPL
+# JSON-RPC is 51234), 50211 for Hedera consensus nodes, and the policy_url
+# port are labeled so concert may connect to them. Sponsor keys go in
+# concert.env: CONCERT_STELLAR_FEE_SECRET and CONCERT_HEDERA_FEE_SECRET. The
+# settlement journal lives in /var/lib/concert/data/gateway.
+#
+#   CONCERT_FASTLANE_CONFIG=/path     install this file as /etc/concert/fastlane.json
+#   CONCERT_NETWORKS_CONFIG=/path     install this file as /etc/concert/networks.json
+#
 # Ports concert may move to while running. Every setting, including the
 # listen and portal addresses, can be changed live in the admin portal. A new
 # port must be one SELinux lets concert bind, and one below 1024 needs
@@ -76,14 +105,18 @@
 #   5. downloads the IPtoASN database, labels it concert_var_lib_t, and
 #      installs the daily refresh timer
 #   6. writes /etc/concert/concert.env (secrets generated once, kept on upgrade)
-#   7. installs a hardened systemd unit and (re)starts concert only when
+#   7. installs fastlane.json and networks.json as concert_etc_t, labels the
+#      chain endpoint ports they name, and writes the sample configuration
+#   8. installs a hardened systemd unit and (re)starts concert only when
 #      something that needs a restart changed, then verifies the process is
 #      running in concert_t with no AVC denials
 #
 # A restart keeps the waiting queue (saved on shutdown), bans, settings
 # changed in the portal and the request history, all in /var/lib/concert/data.
 # The installer still restarts concert only for a new binary, a changed unit,
-# a changed concert.env, a stopped service, or FORCE_RESTART=1.
+# a changed concert.env, fastlane.json or networks.json, a stopped service, or
+# FORCE_RESTART=1. On stop, concert lets payment settlements in flight record
+# their results first.
 #
 # concert reads every setting from CONCERT_* environment variables, so the
 # unit passes no flags: /etc/concert/concert.env is the configuration, except
@@ -119,6 +152,9 @@ NADDR_UPDATER=/usr/local/libexec/concert-naddr-update
 NADDR_SERVICE=/etc/systemd/system/concert-naddr-data.service
 NADDR_TIMER=/etc/systemd/system/concert-naddr-data.timer
 
+FASTLANE_FILE="$ETC/fastlane.json"
+NETWORKS_FILE="$ETC/networks.json"
+
 # ── Settings ─────────────────────────────────────────────────────────
 
 LISTEN="${CONCERT_LISTEN:-0.0.0.0:8080}"
@@ -143,6 +179,9 @@ NADDR_ADDR_GIVEN="${NADDR_ADDR+1}"
 NADDR_DOWNLOAD="${NADDR_DOWNLOAD:-1}"
 NADDR_REFRESH="${NADDR_REFRESH:-0}"
 
+FASTLANE_SRC="${CONCERT_FASTLANE_CONFIG:-}"
+NETWORKS_SRC="${CONCERT_NETWORKS_CONFIG:-}"
+
 # Remembered in $INSTALLER_ENV. "given" records whether this run set them,
 # so a plain re-run keeps what an earlier run chose.
 EXTRA_PORTS="${CONCERT_EXTRA_PORTS-}"
@@ -154,6 +193,9 @@ ANY_PORT="${SELINUX_ANY_PORT-}"
 # Read from concert.env once it exists.
 NADDR_PATH=""
 NADDR_REMOTE=""
+
+# Set by install_fastlane: off, disabled (file present, "enabled": false) or on.
+FASTLANE_STATE="off"
 
 # ── Output helpers ───────────────────────────────────────────────────
 
@@ -364,7 +406,8 @@ files_type(concert_var_lib_t)
 type concert_port_t;
 corenet_port(concert_port_t)
 
-# Ports concert may connect to: its upstream origin and a naddr service.
+# Ports concert may connect to: its upstream origin, a naddr service, chain
+# endpoints outside the web ports, and a policy service.
 type concert_upstream_port_t;
 corenet_port(concert_upstream_port_t)
 
@@ -392,7 +435,7 @@ allow concert_t self:tcp_socket { accept listen create_stream_socket_perms };
 allow concert_t self:udp_socket create_socket_perms;
 allow concert_t self:netlink_route_socket r_netlink_socket_perms;
 
-# Configuration under /etc/concert
+# Configuration under /etc/concert, including fastlane.json and networks.json
 list_dirs_pattern(concert_t, concert_etc_t, concert_etc_t)
 read_files_pattern(concert_t, concert_etc_t, concert_etc_t)
 
@@ -410,7 +453,8 @@ tunable_policy(`concert_bind_any_port',`
 	corenet_tcp_bind_all_unreserved_ports(concert_t)
 ')
 
-# Upstream origin, a naddr service, and the Let's Encrypt API on 443 (http_port_t)
+# Upstream origin, a naddr service, chain endpoints, a policy service, and
+# HTTPS on 443 (http_port_t): Let's Encrypt and chain RPC
 allow concert_t { concert_upstream_port_t http_port_t http_cache_port_t }:tcp_socket name_connect;
 
 # Name resolution, /etc/hosts, CA roots for Let's Encrypt and https upstreams,
@@ -636,6 +680,21 @@ NADDR_ADDR=$NADDR_ADDR_WANT
 EOF
 }
 
+fastlane_env_block() {
+    cat <<EOF
+
+# Wallet access (docs/FASTLANE.md). installer.sh sets the two paths when it
+# installs fastlane.json and networks.json; empty turns wallet access off.
+# Sponsor keys pay Stellar and Hedera network fees for payers: use dedicated
+# low-balance accounts. CONCERT_POLICY_TOKEN authenticates to policy_url.
+CONCERT_FASTLANE_CONFIG=
+CONCERT_NETWORKS_CONFIG=
+CONCERT_POLICY_TOKEN=
+CONCERT_STELLAR_FEE_SECRET=
+CONCERT_HEDERA_FEE_SECRET=
+EOF
+}
+
 # Existing env files from before IP details get the NADDR_* block; values
 # given to this run replace what is there.
 ensure_naddr_env() {
@@ -700,6 +759,7 @@ CONCERT_ADMIT_SECRET=$secret
 CONCERT_PORTAL_PASS=$PORTAL_PASS
 EOF
           naddr_env_block >> "$ENV_FILE"
+          fastlane_env_block >> "$ENV_FILE"
         )
         chown root:root "$ENV_FILE"
         chmod 0600 "$ENV_FILE"
@@ -735,15 +795,24 @@ settings_override() {
     fi
 }
 
-# concert.env changes only take effect on a restart; compare it with the
-# copy concert was last (re)started with.
+# concert.env, fastlane.json and networks.json only take effect on a
+# restart; compare them with what concert was last (re)started with. Without
+# the fast lane files this is the checksum of concert.env alone, as before.
+config_sum() {
+    local files=("$ENV_FILE") f
+    for f in "$FASTLANE_FILE" "$NETWORKS_FILE"; do
+        [[ -f "$f" ]] && files+=("$f")
+    done
+    cat -- "${files[@]}" | sha256sum | awk '{print $1}'
+}
+
 env_changed() {
     [[ -f "$ENV_SUM" ]] || return 0
-    [[ "$(sha256sum "$ENV_FILE" | awk '{print $1}')" != "$(cat "$ENV_SUM")" ]]
+    [[ "$(config_sum)" != "$(cat "$ENV_SUM")" ]]
 }
 
 record_env() {
-    ( umask 077; sha256sum "$ENV_FILE" | awk '{print $1}' > "$ENV_SUM" )
+    ( umask 077; config_sum > "$ENV_SUM" )
 }
 
 # ── IPtoASN database (NADDR_DATA) ────────────────────────────────────
@@ -886,6 +955,138 @@ install_naddr_data() {
     return 0
 }
 
+# ── Wallet access (fast lane) ────────────────────────────────────────
+
+# install_config SRC DEST — install DEST as a root:concert 0640 file that
+# SELinux labels concert_etc_t. A SRC outside /etc/concert is copied in fresh:
+# its owner, mode and label (user_home_t for a file from a home directory)
+# come from whoever wrote it, and mv would keep that label, so it is never
+# moved into place. An existing DEST is re-owned and relabeled on every run.
+install_config() {
+    local src=$1 dest=$2
+    if [[ -n "$src" && "$src" != "$dest" ]]; then
+        [[ -f "$src" && -r "$src" ]] || die "$src is not a readable file"
+        json_check "$src"
+        if [[ -f "$dest" ]] && cmp -s "$src" "$dest"; then
+            ok "$dest is already a copy of $src"
+        else
+            install -m 0640 -o root -g "$SVC_USER" "$src" "$dest.new"
+            mv -f -- "$dest.new" "$dest"
+            ok "Installed $src as $dest"
+        fi
+    fi
+    [[ -f "$dest" ]] || return 0
+    json_check "$dest"
+    chown root:"$SVC_USER" "$dest"
+    chmod 0640 "$dest"
+    if selinux_active; then
+        restorecon -F "$dest"
+        [[ "$(stat -c %C "$dest")" == *concert_etc_t* ]] \
+            || die "$dest is $(stat -c %C "$dest"), expected concert_etc_t"
+        ok "$dest ($(stat -c %C "$dest"))"
+    fi
+    runuser -u "$SVC_USER" -- test -r "$dest" \
+        || die "user $SVC_USER cannot read $dest (check the modes of $ETC)"
+}
+
+# json_check FILE — refuse a file that is not a JSON object, when a Python
+# interpreter is available to tell (RHEL ships /usr/libexec/platform-python).
+PY=""
+json_check() {
+    if [[ -z "$PY" ]]; then
+        PY=$(command -v python3 || true)
+        [[ -z "$PY" && -x /usr/libexec/platform-python ]] && PY=/usr/libexec/platform-python
+        [[ -n "$PY" ]] || PY=none
+    fi
+    [[ "$PY" == none ]] && return 0
+    "$PY" -c 'import json, sys; d = json.load(open(sys.argv[1])); sys.exit(0 if isinstance(d, dict) else 1)' "$1" 2>/dev/null \
+        || die "$1 is not a valid JSON object (compare it with 'concert example fastlane' or 'concert example networks')"
+}
+
+# fastlane_path VAR FILE SRC_VAR — which file concert.env's VAR names. A path
+# outside /etc/concert becomes the source to copy in, unless this run gave one.
+fastlane_path() {
+    local var=$1 file=$2 srcvar=$3 cur
+    cur=$(env_get "$var")
+    if [[ -n "$cur" && "$cur" != "$file" && -z "${!srcvar}" ]]; then
+        warn "$ENV_FILE names $cur for $var; installing it as $file, which concert reads from now on"
+        printf -v "$srcvar" '%s' "$cur"
+    fi
+}
+
+# Installs fastlane.json and networks.json with the label concert needs and
+# points concert.env at them. Must run after load_policy, when concert_etc_t
+# exists.
+install_fastlane() {
+    grep -q '^CONCERT_FASTLANE_CONFIG=' "$ENV_FILE" || { fastlane_env_block >> "$ENV_FILE"; ok "Added the wallet access settings to $ENV_FILE"; }
+    fastlane_path CONCERT_FASTLANE_CONFIG "$FASTLANE_FILE" FASTLANE_SRC
+    fastlane_path CONCERT_NETWORKS_CONFIG "$NETWORKS_FILE" NETWORKS_SRC
+    install_config "$FASTLANE_SRC" "$FASTLANE_FILE"
+    install_config "$NETWORKS_SRC" "$NETWORKS_FILE"
+
+    if [[ ! -f "$FASTLANE_FILE" ]]; then
+        [[ -z "$(env_get CONCERT_FASTLANE_CONFIG)" ]] \
+            || die "$ENV_FILE names $FASTLANE_FILE, which does not exist: supply it with CONCERT_FASTLANE_CONFIG=/path, or empty CONCERT_FASTLANE_CONFIG"
+        ok "Wallet access is off (no $FASTLANE_FILE; start from $ETC/fastlane.example.json)"
+        return 0
+    fi
+    env_set CONCERT_FASTLANE_CONFIG "$FASTLANE_FILE"
+    FASTLANE_STATE=disabled
+    grep -qE '"enabled"[[:space:]]*:[[:space:]]*true' "$FASTLANE_FILE" && FASTLANE_STATE=on
+
+    if [[ -f "$NETWORKS_FILE" ]]; then
+        env_set CONCERT_NETWORKS_CONFIG "$NETWORKS_FILE"
+    elif [[ "$FASTLANE_STATE" == on ]]; then
+        die "$FASTLANE_FILE is enabled but $NETWORKS_FILE does not exist: supply it with CONCERT_NETWORKS_CONFIG=/path (start from $ETC/networks.example.json)"
+    fi
+    if [[ "$FASTLANE_STATE" == on ]]; then
+        ok "Wallet access is on"
+    else
+        ok "Wallet access is configured but \"enabled\" is false in $FASTLANE_FILE"
+    fi
+}
+
+# Ports concert connects to for wallet access: chain endpoints networks.json
+# names, Hedera consensus nodes (plaintext gRPC on 50211) and policy_url.
+# HTTPS on 443 is already permitted (http_port_t).
+fastlane_ports() {
+    [[ "$FASTLANE_STATE" == on ]] || return 0
+    local url
+    {
+        [[ -f "$NETWORKS_FILE" ]] && grep -oE 'https?://[^"]+' "$NETWORKS_FILE" || true
+        grep -oE '"policy_url"[[:space:]]*:[[:space:]]*"[^"]+"' "$FASTLANE_FILE" | grep -oE 'https?://[^"]+' || true
+    } | while read -r url; do
+        port_of_url "$url"
+    done
+    grep -q '"hedera:' "$FASTLANE_FILE" && echo 50211
+    return 0
+}
+
+label_fastlane_ports() {
+    local p
+    for p in $(fastlane_ports | sort -un); do
+        valid_port "$p" || die "invalid port $p in $NETWORKS_FILE or policy_url"
+        label_port "$p" concert_upstream_port_t http_port_t http_cache_port_t
+    done
+}
+
+# Reference copies of the sample configuration from the installed binary,
+# refreshed every run. concert never reads them.
+write_examples() {
+    local kind dest
+    for kind in fastlane networks; do
+        dest="$ETC/$kind.example.json"
+        if "$BIN" example "$kind" > "$WORK/$kind.example.json" 2>/dev/null; then
+            install -m 0640 -o root -g "$SVC_USER" "$WORK/$kind.example.json" "$dest"
+            selinux_active && restorecon -F "$dest"
+        else
+            warn "$BIN cannot print the $kind example (an older build?); see docs/FASTLANE.md"
+            return 0
+        fi
+    done
+    ok "Sample configuration: $ETC/fastlane.example.json, $ETC/networks.example.json (docs/FASTLANE.md explains every key)"
+}
+
 # ── systemd unit ─────────────────────────────────────────────────────
 
 write_unit() {
@@ -910,6 +1111,9 @@ ExecStart=$BIN
 Restart=on-failure
 RestartSec=2
 LimitNOFILE=65536
+# On stop, payment settlements in flight record their results before concert
+# exits (each is bounded by its offer's maxTimeoutSeconds plus 3 minutes).
+TimeoutStopSec=10min
 
 # Certificate cache, settings.json, bans.json, the saved queue, the history
 # log and the IPtoASN database. ProtectSystem=strict makes the filesystem
@@ -985,7 +1189,7 @@ apply_service() {
         systemctl start concert
         RESTARTED=1
     else
-        env_changed && need_restart "$ENV_FILE changed"
+        env_changed && need_restart "$ENV_FILE or the fast lane configuration changed"
         [[ "$FORCE_RESTART" == "1" ]] && need_restart "FORCE_RESTART=1"
 
         if (( ${#RESTART_REASONS[@]} == 0 )); then
@@ -1018,6 +1222,8 @@ report_avcs() {
         echo "  A denied name_bind means a listen port concert may not use: label it with" >&2
         echo "  semanage port -a -t concert_port_t -p tcp <port>, or SELINUX_ANY_PORT=1" >&2
         echo "  A denied read of NADDR_DATA means its directory lacks concert_var_lib_t: re-run the installer" >&2
+        echo "  A denied read of fastlane.json or networks.json means it lacks concert_etc_t, and a denied" >&2
+        echo "  name_connect means a chain endpoint port nobody labeled: re-run the installer to fix both" >&2
         return 1
     fi
     ok "No audited SELinux denials for concert (semodule -DB reveals dontaudit rules; semodule -B restores)"
@@ -1125,10 +1331,14 @@ do_install() {
         warn "SELINUX_ANY_PORT has no effect while SELinux is disabled"
     fi
 
+    install_fastlane
+    selinux_active && label_fastlane_ports
+
     ensure_state_dir
     install_naddr_data
     install_binary
     preflight_exec
+    write_examples
     write_unit
     open_firewall
 
@@ -1154,9 +1364,14 @@ do_install() {
     echo "  ports:    $(listen_ports | paste -sd, -) may be listened on${EXTRA_PORTS:+ (extra: $EXTRA_PORTS)}"
     echo "  any port: $SEBOOL is $anyport"
     echo "  ip data:  $ipdata"
+    case "$FASTLANE_STATE" in
+        on)       echo "  wallets:  on  ($FASTLANE_FILE, $NETWORKS_FILE; journal $DATA_DIR/gateway)" ;;
+        disabled) echo "  wallets:  configured, \"enabled\": false in $FASTLANE_FILE" ;;
+        *)        echo "  wallets:  off  (samples in $ETC/*.example.json; see docs/FASTLANE.md)" ;;
+    esac
     [[ -n "$IPINFO_LINE" ]] && echo "            concert says: $IPINFO_LINE"
     echo "  config:   $ENV_FILE  (portal changes: $DATA_DIR/settings.json)"
-    echo "  data:     $DATA_DIR  (settings.json, bans.json, queue.snapshot, history.jsonl)"
+    echo "  data:     $DATA_DIR  (settings.json, bans.json, queue.snapshot, history.jsonl, fastlane.jsonl, gateway/)"
     echo "  state:    $STATE_DIR"
     echo "  logs:     journalctl -u concert -f"
     if (( ! RESTARTED )); then

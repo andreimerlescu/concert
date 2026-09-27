@@ -10,7 +10,7 @@ The update arrived as a source archive with its own report: 175 Go tests and 11 
 | --- | --- |
 | `gofmt -l .` | No files. |
 | `go vet ./...` | Passed. |
-| `go build -buildvcs=false ./...` | Passed. `concert`, `concert-gateway` and `concert-client` also cross-compiled with `CGO_ENABLED=0` for Linux arm64, Darwin amd64/arm64 and Windows amd64/arm64 (journal locking has per-platform code). |
+| `go build -buildvcs=false ./...` | Passed. `concert` and `concert-client` also cross-compiled with `CGO_ENABLED=0` for Linux arm64, Darwin amd64/arm64 and Windows amd64/arm64 (journal locking has per-platform code). |
 | `go test -race -count=1 ./...` | Passed: 230 top-level Go tests (272 with subtests). |
 | `go mod verify` | All modules verified. |
 | `govulncheck ./...` | **Not run.** The build environment's egress policy denied `vuln.go.dev` (HTTP 403). Run it before deployment. |
@@ -43,7 +43,7 @@ Ledger responses are mocked; a passing fixture is not evidence of a funded on-ch
 
 ## Browser verification
 
-A local harness ran the real `concert` and `concert-gateway` binaries against a mock Solana JSON-RPC server on loopback HTTPS; the gateway trusted the harness's certificate through `SSL_CERT_FILE`. XRP, XLM and HBAR offers used throwaway, unfunded sponsor keys and were displayed but not settled. A fake origin held the only page slot so visitors queued. A Wallet Standard test wallet registered in the page kept its key in the test process and signed only what the page asked it to sign. NFT ownership went through the gateway's real Metaplex and SPL checks against the mock RPC.
+A local harness ran the real `concert` binary, with its built-in chain gateway, against a mock Solana JSON-RPC server on loopback HTTPS; Concert trusted the harness's certificate through `SSL_CERT_FILE`. No other process ran beside it, and the settlement journal appeared in `<data-dir>/gateway/`. XRP, XLM and HBAR offers used throwaway, unfunded sponsor keys and were displayed but not settled. A fake origin held the only page slot so visitors queued. A Wallet Standard test wallet registered in the page kept its key in the test process and signed only what the page asked it to sign. NFT ownership went through the gateway's real Metaplex and SPL checks against the mock RPC.
 
 All 52 checks passed at 1440×900 and 390×844:
 
@@ -56,7 +56,7 @@ All 52 checks passed at 1440×900 and 390×844:
 - The portal's Fast lane tab showed configuration, journal health and receipt counts.
 - No script, CSP, asset or horizontal-overflow errors. The only filtered console entries were Chrome's log of the expected x402 `402` challenge and the portal's pre-existing missing favicon.
 
-Against the same stack, `concert-client` refused an offer above its budget, paid a SOL pass, and proved NFT ownership, and `concert-gateway reconcile` refused to open the journal while the gateway held it. The previews in this directory are test fixtures, not production receipts.
+Against the same stack, `concert-client` refused an offer above its budget, paid a SOL pass, and proved NFT ownership, and reconciliation refused to open the journal while it was held. The previews in this directory are test fixtures, not production receipts.
 
 ## Dependency review
 

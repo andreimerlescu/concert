@@ -70,7 +70,7 @@
       <div id="fastlane-state" class="alert alert-info" role="status">Loading fast-lane configuration…</div>
       <div class="row g-3 mb-4" id="fastlane-stats"></div>
       <div class="row g-4"><section class="col-lg-6"><h3 class="h5">Accepted payments</h3><div id="fastlane-offers"></div></section><section class="col-lg-6"><h3 class="h5">NFT collection rules</h3><div id="fastlane-collections"></div></section></div>
-      <div class="card mt-4"><div class="card-body"><h3 class="h6">Configure access</h3><p class="small text-body-secondary mb-0">Set CONCERT_FASTLANE_CONFIG in the environment, then edit its payment offers and collection rules and restart Concert and the chain gateway together. Existing receipts retain their expiry. The setup guide describes each chain’s collection identifier and supported wallet proof formats.</p></div></div>
+      <div class="card mt-4"><div class="card-body"><h3 class="h6">Configure access</h3><p class="small text-body-secondary mb-0">Set CONCERT_FASTLANE_CONFIG in the environment, and CONCERT_NETWORKS_CONFIG, then edit the payment offers and collection rules and restart Concert; the chain gateway runs inside it. Existing receipts retain their expiry. The setup guide describes each chain’s collection identifier and supported wallet proof formats.</p></div></div>
     </div>
 
     <!-- Overview -->

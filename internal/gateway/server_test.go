@@ -1,12 +1,10 @@
 package gateway
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,7 +18,6 @@ import (
 )
 
 const (
-	token  = "0123456789abcdef0123456789abcdef"
 	xrp    = "xrpl:1"
 	devnet = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"
 )
@@ -83,7 +80,7 @@ func newHarness(t *testing.T, dir string) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := newServer(config(), networks(), j, token, func(string) string { return "" }, true)
+	s, err := newServer(config(), networks(), j, func(string) string { return "" }, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,28 +93,22 @@ func newHarness(t *testing.T, dir string) *harness {
 	return h
 }
 
-func (h *harness) do(method, path, auth string, body any) (int, map[string]any) {
+// post runs op the way Concert does and reports it HTTP-style: 200 with the
+// result, or 400 with verification_failed for an error.
+func (h *harness) post(op string, body any) (int, map[string]any) {
 	h.t.Helper()
-	var b []byte
-	if body != nil {
-		var err error
-		if b, err = json.Marshal(body); err != nil {
-			h.t.Fatal(err)
-		}
+	b, err := json.Marshal(body)
+	if err != nil {
+		h.t.Fatal(err)
 	}
-	req := httptest.NewRequest(method, path, bytes.NewReader(b))
-	if auth != "" {
-		req.Header.Set("Authorization", auth)
+	res, err := h.s.Handle(context.Background(), op, b)
+	if err != nil {
+		return http.StatusBadRequest, map[string]any{"error": "verification_failed"}
 	}
-	w := httptest.NewRecorder()
-	h.s.ServeHTTP(w, req)
+	raw, _ := json.Marshal(res)
 	var out map[string]any
-	_ = json.Unmarshal(w.Body.Bytes(), &out)
-	return w.Code, out
-}
-
-func (h *harness) post(path string, body any) (int, map[string]any) {
-	return h.do(http.MethodPost, path, "Bearer "+token, body)
+	_ = json.Unmarshal(raw, &out)
+	return http.StatusOK, out
 }
 
 func payment(network, blob string) map[string]any {
@@ -139,23 +130,17 @@ func payment(network, blob string) map[string]any {
 	}
 }
 
-func TestAuthenticationAndRoutes(t *testing.T) {
+func TestOperations(t *testing.T) {
 	h := newHarness(t, t.TempDir())
-	for _, auth := range []string{"", "Bearer wrong", "Bearer " + token + "x", token} {
-		if code, _ := h.do(http.MethodGet, "/supported", auth, nil); code != http.StatusUnauthorized {
-			t.Fatalf("auth %q: got %d", auth, code)
-		}
-	}
-	code, out := h.do(http.MethodGet, "/supported", "Bearer "+token, nil)
+	code, out := h.post("/supported", nil)
 	if code != http.StatusOK || len(out["kinds"].([]any)) != 2 {
 		t.Fatalf("supported: %d %v", code, out)
 	}
-	if code, _ := h.do(http.MethodGet, "/verify", "Bearer "+token, nil); code != http.StatusNotFound {
-		t.Fatalf("GET /verify: %d", code)
+	if code, _ := h.post("/unknown", map[string]any{}); code != http.StatusBadRequest {
+		t.Fatalf("unknown operation: %d", code)
 	}
-	big := map[string]string{"pad": strings.Repeat("a", maxBody)}
-	if code, _ := h.post("/verify", big); code != http.StatusBadRequest {
-		t.Fatalf("oversized body: %d", code)
+	if code, _ := h.post("/verify", []int{1}); code != http.StatusBadRequest {
+		t.Fatalf("malformed request: %d", code)
 	}
 }
 
@@ -334,7 +319,7 @@ func TestNFTChallengeBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer j.Close()
-	s, err := newServer(cfg, networks(), j, token, func(string) string { return "" }, true)
+	s, err := newServer(cfg, networks(), j, func(string) string { return "" }, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,11 +379,8 @@ func TestConfigurationIsValidated(t *testing.T) {
 	}
 	cfg := config()
 	cfg.Enabled = false
-	if _, err := New(cfg, networks(), nil, token, get); err == nil {
+	if _, err := New(cfg, networks(), nil, get); err == nil {
 		t.Error("started with the fast lane disabled")
-	}
-	if _, err := New(config(), networks(), nil, "short", get); err == nil {
-		t.Error("started with a short token")
 	}
 	path := filepath.Join(t.TempDir(), "networks.json")
 	os.WriteFile(path, []byte(`{"xrpl:1":{"rpc":"https://x/","typo":1}}`), 0o600)
@@ -408,5 +390,26 @@ func TestConfigurationIsValidated(t *testing.T) {
 	os.WriteFile(path, []byte(`{"hedera:testnet":{"mirror":"https://m/","max_fee_tinybars":"100000000"}}`), 0o600)
 	if n, err := LoadNetworks(path); err != nil || n["hedera:testnet"].MaxFeeHB != "100000000" {
 		t.Errorf("quoted max fee: %v %v", n, err)
+	}
+}
+
+func TestCloseWaitsForSettlementsInFlight(t *testing.T) {
+	h := newHarness(t, t.TempDir())
+	m := h.mechs[xrp]
+	m.hold, m.started = make(chan struct{}), make(chan struct{}, 1)
+	go h.post("/settle", payment(xrp, "inflight"))
+	<-m.started
+	closed := make(chan struct{})
+	go func() { h.s.Close(); close(closed) }()
+	select {
+	case <-closed:
+		t.Fatal("Close returned while a settlement was in flight")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(m.hold)
+	<-closed
+	id, _ := Fingerprint(toX402(config().Offers[0].Requirements), json.RawMessage(`{"signedTxBlob":"inflight"}`))
+	if rec, ok := h.j.Get(id); !ok || rec.State != "settled" {
+		t.Fatalf("settlement not journaled before close: %+v", rec)
 	}
 }
