@@ -1,0 +1,797 @@
+{
+ "cases": [
+  {
+   "name": "valid secp256k1",
+   "blob": "1200002400000005201B000003F26140000000000186A068400000000000000C73210311E5F6B180237328B7A1CCB378313EDC2ED5996B2BB3900F38953881FE5414117446304402200EB15357D4DB819AD433F118B2CBC4C8B3BBF50FACE01F3BC9429FB5CA90EC70022048022E3A0DC97A6737758F6D271D207BFBA03D4CDC20F6620E7F28B42B085550811465F900BF888A92C261A66B33616FB904070B0B4D831455422069DDA78DD0142FD7D3E623C76EA75E8239",
+   "requirements": {
+    "scheme": "exact",
+    "network": "xrpl:1",
+    "amount": "100000",
+    "asset": "XRP",
+    "payTo": "r3moe1n4xiQBEbJRPpymiK7svnvRwcXDG6",
+    "maxTimeoutSeconds": 60,
+    "extra": {
+     "areFeesSponsored": false
+    }
+   },
+   "state": {
+    "current": 1000,
+    "sequence": 5,
+    "masterDisabled": false,
+    "simulate": "tesSUCCESS",
+    "ticket": true
+   },
+   "valid": true,
+   "reason": "",
+   "payer": "rwJBYQGmggLTa8PMJ9VWgfcUTtCeshL8Gq",
+   "hash": "CBF98EBEEA98E83FEE5E5D0D600D2CA9DBBC15F7A148CFFB75A6002BDE0F72B5"
+  },
+  {
+   "name": "valid ed25519",
+   "blob": "1200002400000005201B000003F26140000000000186A068400000000000000C7321ED167C95FFBC40505011A89B3A535F83278A5C7730BEFC9C81735F79D916FC024C74407FC97846A665321A58D5E350CD8367737FB3AEF19B67E1CCFA81A872E144C948162A132DA68461BA5C8487C049DFAE2A8EACE3C2F659689EA639C9797841B70F8114D7459B462AF545EEFD598C51EC8BAA68F45FB131831455422069DDA78DD0142FD7D3E623C76EA75E8239",
+   "requirements": {
+    "scheme": "exact",
+    "network": "xrpl:1",
+    "amount": "100000",
+    "asset": "XRP",
+    "payTo": "r3moe1n4xiQBEbJRPpymiK7svnvRwcXDG6",
+    "maxTimeoutSeconds": 60,
+    "extra": {
+     "areFeesSponsored": false
+    }
+   },
+   "state": {
+    "current": 1000,
+    "sequence": 5,
+    "masterDisabled": false,
+    "simulate": "tesSUCCESS",
+    "ticket": true
+   },
+   "valid": true,
+   "reason": "",
+   "payer": "rLdECbGnrafJhq1jXPmvLuWTUhFpSfgfo3",
+   "hash": "51116BBD9E7BE60A312DAF9D3D278302F91F2995D49C77649EE52EE125317C08"
+  },
+  {
+   "name": "wrong amount",
+   "blob": "1200002400000005201B000003F261400000000001869F68400000000000000C73210311E5F6B180237328B7A1CCB378313EDC2ED5996B2BB3900F38953881FE5414117446304402203420812DD76EDF32F08678E872471F1E0E6A0FEA56CCED162A4E91F15725D40B022010E1859AEC067D506E92F5F9A8F0F977CCC1027BFC24979324469C848B064671811465F900BF888A92C261A66B33616FB904070B0B4D831455422069DDA78DD0142FD7D3E623C76EA75E8239",
+   "requirements": {
+    "scheme": "exact",
+    "network": "xrpl:1",
+    "amount": "100000",
+    "asset": "XRP",
+    "payTo": "r3moe1n4xiQBEbJRPpymiK7svnvRwcXDG6",
+    "maxTimeoutSeconds": 60,
+    "extra": {
+     "areFeesSponsored": false
+    }
+   },
+   "state": {
+    "current": 1000,
+    "sequence": 5,
+    "masterDisabled": false,
+    "simulate": "tesSUCCESS",
+    "ticket": true
+   },
+   "valid": false,
+   "reason": "invalid_exact_xrpl_payload_amount_mismatch",
+   "payer": "rwJBYQGmggLTa8PMJ9VWgfcUTtCeshL8Gq",
+   "hash": "B92C7985622F756B7B34FB35957CFC379F6CA01F8FCC2179AB383546AB046701"
+  },
+  {
+   "name": "wrong destination",
+   "blob": "1200002400000005201B000003F26140000000000186A068400000000000000C73210311E5F6B180237328B7A1CCB378313EDC2ED5996B2BB3900F38953881FE5414117446304402207980CF927B1DD95DE83253B5EECF4250842A34DC5DDDD157B6B5DAD190AFCF47022039CD44D4FC62625D4BE37E1C69A17500B8D7F0882882C682292697F288B6103B811465F900BF888A92C261A66B33616FB904070B0B4D8314CCDFFEAC2A08012CD4DECEBB5F58073469DB7A42",
+   "requirements": {
+    "scheme": "exact",
+    "network": "xrpl:1",
+    "amount": "100000",
+    "asset": "XRP",
+    "payTo": "r3moe1n4xiQBEbJRPpymiK7svnvRwcXDG6",
+    "maxTimeoutSeconds": 60,
+    "extra": {
+     "areFeesSponsored": false
+    }
+   },
+   "state": {
+    "current": 1000,
+    "sequence": 5,
+    "masterDisabled": false,
+    "simulate": "tesSUCCESS",
+    "ticket": true
+   },
+   "valid": false,
+   "reason": "invalid_exact_xrpl_payload_destination_mismatch",
+   "payer": "rwJBYQGmggLTa8PMJ9VWgfcUTtCeshL8Gq",
+   "hash": "E394C44931F7A514AFA5CDD97AB6A848770AFEAE1D4C8FCEEF12007B944BCE34"
+  },
+  {
+   "name": "partial payment flag",
+   "blob": "12000022000200002400000005201B000003F26140000000000186A068400000000000000C6940000000000186A073210311E5F6B180237328B7A1CCB378313EDC2ED5996B2BB3900F38953881FE54141174473045022100F0B654200354459B584DCEDA285D163BE5DD776FD09B90C6C4A034C63CA93D2E0220718A64E57B044C921B29A670851904934DAE27B7F0DF8228736E143A7D1BD0C0811465F900BF888A92C261A66B33616FB904070B0B4D831455422069DDA78DD0142FD7D3E623C76EA75E8239",
+   "requirements": {
+    "scheme": "exact",
+    "network": "xrpl:1",
+    "amount": "100000",
+    "asset": "XRP",
+    "payTo": "r3moe1n4xiQBEbJRPpymiK7svnvRwcXDG6",
+    "maxTimeoutSeconds": 60,
+    "extra": {
+     "areFeesSponsored": false
+    }
+   },
+   "state": {
+    "current": 1000,
+    "sequence": 5,
+    "masterDisabled": false,
+    "simulate": "tesSUCCESS",
+    "ticket": true
+   },
+   "valid": false,
+   "reason": "invalid_exact_xrpl_payload_sendmax_not_allowed",
+   "payer": "rwJBYQGmggLTa8PMJ9VWgfcUTtCeshL8Gq",
+   "hash": "6466DB6730431F7F9CBDC7C9152429BC4FE479A38BB2C415ABB65386523F9D79"
+  },
+  {
+   "name": "memos",
+   "blob": "1200002400000005201B000003F26140000000000186A068400000000000000C73210311E5F6B180237328B7A1CCB378313EDC2ED5996B2BB3900F38953881FE54141174473045022100BF54931B5D0785B5ED585D6B420D96D8E091708C0803D3ED57B11A7F597F2043022003078E63C9685F1CAA46BE4D011CEF1B54E85D74FD10DE1A602953A6AA7625EA811465F900BF888A92C261A66B33616FB904070B0B4D831455422069DDA78DD0142FD7D3E623C76EA75E8239F9EA7D02ABCDE1F1",
+   "requirements": {
+    "scheme": "exact",
+    "network": "xrpl:1",
+    "amount": "100000",
+    "asset": "XRP",
+    "payTo": "r3moe1n4xiQBEbJRPpymiK7svnvRwcXDG6",
+    "maxTimeoutSeconds": 60,
+    "extra": {
+     "areFeesSponsored": false
+    }
+   },
+   "state": {
+    "current": 1000,
+    "sequence": 5,
+    "masterDisabled": false,
+    "simulate": "tesSUCCESS",
+    "ticket": true
+   },
+   "valid": false,
+   "reason": "invalid_exact_xrpl_payload_memos_not_allowed",
+   "payer": "rwJBYQGmggLTa8PMJ9VWgfcUTtCeshL8Gq",
+   "hash": "92BC7192041799A1DAE4BCEEC493B40A3A4D1776F9942A76AE3A7D78A0E372D8"
+  },
+  {
+   "name": "sendmax for XRP",
+   "blob": "1200002400000005201B000003F26140000000000186A068400000000000000C6940000000000186A073210311E5F6B180237328B7A1CCB378313EDC2ED5996B2BB3900F38953881FE54141174473045022100C834B719FFDD99D05AE06E7BB53FC652F84318AD6756F64127378A606720E299022060F7CAAE3186AC9DAD3E8813C936309A74404CC9708AC8035D728C2E7CE3FEBD811465F900BF888A92C261A66B33616FB904070B0B4D831455422069DDA78DD0142FD7D3E623C76EA75E8239",
+   "requirements": {
+    "scheme": "exact",
+    "network": "xrpl:1",
+    "amount": "100000",
+    "asset": "XRP",
+    "payTo": "r3moe1n4xiQBEbJRPpymiK7svnvRwcXDG6",
+    "maxTimeoutSeconds": 60,
+    "extra": {
+     "areFeesSponsored": false
+    }
+   },
+   "state": {
+    "current": 1000,
+    "sequence": 5,
+    "masterDisabled": false,
+    "simulate": "tesSUCCESS",
+    "ticket": true
+   },
+   "valid": false,
+   "reason": "invalid_exact_xrpl_payload_sendmax_not_allowed",
+   "payer": "rwJBYQGmggLTa8PMJ9VWgfcUTtCeshL8Gq",
+   "hash": "73ECA0C264210BDA8D5510B7C0A593DEF2136C88A6C451380D131A412422877C"
+  },
+  {
+   "name": "delivermin",
+   "blob": "1200002400000005201B000003F26140000000000186A068400000000000000C6A40000000000186A073210311E5F6B180237328B7A1CCB378313EDC2ED5996B2BB3900F38953881FE5414117446304402203F0C423202B70BE2C2AD9186A8CE233431D9A56AD897044E7A7717D809A6FFD90220410080D13A4F33601F3F08328DD4F6BCB074CD0286750AC4EA823491F2F36B07811465F900BF888A92C261A66B33616FB904070B0B4D831455422069DDA78DD0142FD7D3E623C76EA75E8239",
+   "requirements": {
+    "scheme": "exact",
+    "network": "xrpl:1",
+    "amount": "100000",
+    "asset": "XRP",
+    "payTo": "r3moe1n4xiQBEbJRPpymiK7svnvRwcXDG6",
+    "maxTimeoutSeconds": 60,
+    "extra": {
+     "areFeesSponsored": false
+    }
+   },
+   "state": {
+    "current": 1000,
+    "sequence": 5,
+    "masterDisabled": false,
+    "simulate": "tesSUCCESS",
+    "ticket": true
+   },
+   "valid": false,
+   "reason": "invalid_exact_xrpl_payload_delivermin_not_allowed",
+   "payer": "rwJBYQGmggLTa8PMJ9VWgfcUTtCeshL8Gq",
+   "hash": "BF5781E3CF0A5A6E8B1EB7FF4562FE109026DFCDAE23E6A073DBC68B39FA83F2"
+  },
+  {
+   "name": "network id on standard network",
+   "blob": "12000021000000012400000005201B000003F26140000000000186A068400000000000000C73210311E5F6B180237328B7A1CCB378313EDC2ED5996B2BB3900F38953881FE54141174473045022100FE2FDEE30423D1E6552680D3A042EF5A7E551BB75EBB4ACC0B80CE9B50AA369E02207DD0664AD7A1249D976D9FA509642B95315FEE3B54B31373B959982067A0B5B8811465F900BF888A92C261A66B33616FB904070B0B4D831455422069DDA78DD0142FD7D3E623C76EA75E8239",
+   "requirements": {
+    "scheme": "exact",
+    "network": "xrpl:1",
+    "amount": "100000",
+    "asset": "XRP",
+    "payTo": "r3moe1n4xiQBEbJRPpymiK7svnvRwcXDG6",
+    "maxTimeoutSeconds": 60,
+    "extra": {
+     "areFeesSponsored": false
+    }
+   },
+   "state": {
+    "current": 1000,
+    "sequence": 5,
+    "masterDisabled": false,
+    "simulate": "tesSUCCESS",
+    "ticket": true
+   },
+   "valid": false,
+   "reason": "invalid_exact_xrpl_payload_network_id_for_standard_network",
+   "payer": "rwJBYQGmggLTa8PMJ9VWgfcUTtCeshL8Gq",
+   "hash": "1484D2991C123280C35C225F51B1A6203DA013710AC1549C8AE302EC953C3E07"
+  },
+  {
+   "name": "fee too high",
+   "blob": "1200002400000005201B000003F26140000000000186A0684000000000004E2073210311E5F6B180237328B7A1CCB378313EDC2ED5996B2BB3900F38953881FE54141174473045022100AB4F6CD987D0539F397FDF9D8F6EF58EDB45101A294698E528DAD883FB491D7E02203E4072173E00E378ABA44EA70C5C01C83586A684E12AD86539CF8A440D768C2F811465F900BF888A92C261A66B33616FB904070B0B4D831455422069DDA78DD0142FD7D3E623C76EA75E8239",
+   "requirements": {
+    "scheme": "exact",
+    "network": "xrpl:1",
+    "amount": "100000",
+    "asset": "XRP",
+    "payTo": "r3moe1n4xiQBEbJRPpymiK7svnvRwcXDG6",
+    "maxTimeoutSeconds": 60,
+    "extra": {
+     "areFeesSponsored": false
+    }
+   },
+   "state": {
+    "current": 1000,
+    "sequence": 5,
+    "masterDisabled": false,
+    "simulate": "tesSUCCESS",
+    "ticket": true
+   },
+   "valid": false,
+   "reason": "invalid_exact_xrpl_payload_fee_too_high",
+   "payer": "rwJBYQGmggLTa8PMJ9VWgfcUTtCeshL8Gq",
+   "hash": "0548EEFC1CDCFED1205DB8BC4AD8A78C6AE9F230DC67A082FD0EC6A2E31B5785"
+  },
+  {
+   "name": "expired",
+   "blob": "1200002400000005201B000003E86140000000000186A068400000000000000C73210311E5F6B180237328B7A1CCB378313EDC2ED5996B2BB3900F38953881FE54141174463044022065E4E707C4D02336D50CE416C94EC77A2D04B2E278CB54B71CF4F7D24618FF3E02204696F976ABC14432A88E9B597CA9CF0B676EF2EED3BB2E6052AE47015B3C5406811465F900BF888A92C261A66B33616FB904070B0B4D831455422069DDA78DD0142FD7D3E623C76EA75E8239",
+   "requirements": {
+    "scheme": "exact",
+    "network": "xrpl:1",
+    "amount": "100000",
+    "asset": "XRP",
+    "payTo": "r3moe1n4xiQBEbJRPpymiK7svnvRwcXDG6",
+    "maxTimeoutSeconds": 60,
+    "extra": {
+     "areFeesSponsored": false
+    }
+   },
+   "state": {
+    "current": 1000,
+    "sequence": 5,
+    "masterDisabled": false,
+    "simulate": "tesSUCCESS",
+    "ticket": true
+   },
+   "valid": false,
+   "reason": "invalid_exact_xrpl_payload_expired",
+   "payer": "rwJBYQGmggLTa8PMJ9VWgfcUTtCeshL8Gq",
+   "hash": "69888D82DF3138AA0D2EE35CFA85276D5D2CF34B6C21C1E916302BD054F1773A"
+  },
+  {
+   "name": "last ledger too large",
+   "blob": "1200002400000005201B0000044C6140000000000186A068400000000000000C73210311E5F6B180237328B7A1CCB378313EDC2ED5996B2BB3900F38953881FE5414117446304402207785AAD1E7138257C03976D22E77A6914305808BBC10AE0AF60EC32B9EC5561D02200175E660CA507D189B4075E9EB90979C4636AF209AFB7F6BDF6F3040E81485EE811465F900BF888A92C261A66B33616FB904070B0B4D831455422069DDA78DD0142FD7D3E623C76EA75E8239",
+   "requirements": {
+    "scheme": "exact",
+    "network": "xrpl:1",
+    "amount": "100000",
+    "asset": "XRP",
+    "payTo": "r3moe1n4xiQBEbJRPpymiK7svnvRwcXDG6",
+    "maxTimeoutSeconds": 60,
+    "extra": {
+     "areFeesSponsored": false
+    }
+   },
+   "state": {
+    "current": 1000,
+    "sequence": 5,
+    "masterDisabled": false,
+    "simulate": "tesSUCCESS",
+    "ticket": true
+   },
+   "valid": false,
+   "reason": "invalid_exact_xrpl_payload_lastledgersequence_too_large",
+   "payer": "rwJBYQGmggLTa8PMJ9VWgfcUTtCeshL8Gq",
+   "hash": "D5BD1F5F4898E108E844B4DF304D5109D411E5FF4D5249FDFADF2A6AE43C196E"
+  },
+  {
+   "name": "sequence not current",
+   "blob": "1200002400000005201B000003F26140000000000186A068400000000000000C73210311E5F6B180237328B7A1CCB378313EDC2ED5996B2BB3900F38953881FE5414117446304402200EB15357D4DB819AD433F118B2CBC4C8B3BBF50FACE01F3BC9429FB5CA90EC70022048022E3A0DC97A6737758F6D271D207BFBA03D4CDC20F6620E7F28B42B085550811465F900BF888A92C261A66B33616FB904070B0B4D831455422069DDA78DD0142FD7D3E623C76EA75E8239",
+   "requirements": {
+    "scheme": "exact",
+    "network": "xrpl:1",
+    "amount": "100000",
+    "asset": "XRP",
+    "payTo": "r3moe1n4xiQBEbJRPpymiK7svnvRwcXDG6",
+    "maxTimeoutSeconds": 60,
+    "extra": {
+     "areFeesSponsored": false
+    }
+   },
+   "state": {
+    "current": 1000,
+    "sequence": 6,
+    "masterDisabled": false,
+    "simulate": "tesSUCCESS",
+    "ticket": true
+   },
+   "valid": false,
+   "reason": "invalid_exact_xrpl_payload_sequence_not_current",
+   "payer": "rwJBYQGmggLTa8PMJ9VWgfcUTtCeshL8Gq",
+   "hash": "CBF98EBEEA98E83FEE5E5D0D600D2CA9DBBC15F7A148CFFB75A6002BDE0F72B5"
+  },
+  {
+   "name": "regular key authorized",
+   "blob": "1200002400000005201B000003F26140000000000186A068400000000000000C73210377856FB065ED3DE17F9833F3E873D38FA2A176B708DF58431FA5338DBF8C9E547446304402204B60A949244B44D7FA89D64AB78777D4A67CD57316987C7B1AECA72BE0FE9AF602202B3C9F198749C579527C73E782461B33ACF5DE317B14FFE20F507FCD9246739D811465F900BF888A92C261A66B33616FB904070B0B4D831455422069DDA78DD0142FD7D3E623C76EA75E8239",
+   "requirements": {
+    "scheme": "exact",
+    "network": "xrpl:1",
+    "amount": "100000",
+    "asset": "XRP",
+    "payTo": "r3moe1n4xiQBEbJRPpymiK7svnvRwcXDG6",
+    "maxTimeoutSeconds": 60,
+    "extra": {
+     "areFeesSponsored": false
+    }
+   },
+   "state": {
+    "current": 1000,
+    "sequence": 5,
+    "regularKey": "rn5W85Srey74NZyxtLUiusSGtaiK37agos",
+    "masterDisabled": false,
+    "simulate": "tesSUCCESS",
+    "ticket": true
+   },
+   "valid": true,
+   "reason": "",
+   "payer": "rwJBYQGmggLTa8PMJ9VWgfcUTtCeshL8Gq",
+   "hash": "708ED5AC5823A1803C34E6D7CEB12DAF958AA4DAD950E91F85AD1E4E94E641BB"
+  },
+  {
+   "name": "regular key not authorized",
+   "blob": "1200002400000005201B000003F26140000000000186A068400000000000000C73210377856FB065ED3DE17F9833F3E873D38FA2A176B708DF58431FA5338DBF8C9E547446304402204B60A949244B44D7FA89D64AB78777D4A67CD57316987C7B1AECA72BE0FE9AF602202B3C9F198749C579527C73E782461B33ACF5DE317B14FFE20F507FCD9246739D811465F900BF888A92C261A66B33616FB904070B0B4D831455422069DDA78DD0142FD7D3E623C76EA75E8239",
+   "requirements": {
+    "scheme": "exact",
+    "network": "xrpl:1",
+    "amount": "100000",
+    "asset": "XRP",
+    "payTo": "r3moe1n4xiQBEbJRPpymiK7svnvRwcXDG6",
+    "maxTimeoutSeconds": 60,
+    "extra": {
+     "areFeesSponsored": false
+    }
+   },
+   "state": {
+    "current": 1000,
+    "sequence": 5,
+    "masterDisabled": false,
+    "simulate": "tesSUCCESS",
+    "ticket": true
+   },
+   "valid": false,
+   "reason": "invalid_exact_xrpl_payload_signer_not_authorized",
+   "payer": "rwJBYQGmggLTa8PMJ9VWgfcUTtCeshL8Gq",
+   "hash": "708ED5AC5823A1803C34E6D7CEB12DAF958AA4DAD950E91F85AD1E4E94E641BB"
+  },
+  {
+   "name": "master key disabled",
+   "blob": "1200002400000005201B000003F26140000000000186A068400000000000000C73210311E5F6B180237328B7A1CCB378313EDC2ED5996B2BB3900F38953881FE5414117446304402200EB15357D4DB819AD433F118B2CBC4C8B3BBF50FACE01F3BC9429FB5CA90EC70022048022E3A0DC97A6737758F6D271D207BFBA03D4CDC20F6620E7F28B42B085550811465F900BF888A92C261A66B33616FB904070B0B4D831455422069DDA78DD0142FD7D3E623C76EA75E8239",
+   "requirements": {
+    "scheme": "exact",
+    "network": "xrpl:1",
+    "amount": "100000",
+    "asset": "XRP",
+    "payTo": "r3moe1n4xiQBEbJRPpymiK7svnvRwcXDG6",
+    "maxTimeoutSeconds": 60,
+    "extra": {
+     "areFeesSponsored": false
+    }
+   },
+   "state": {
+    "current": 1000,
+    "sequence": 5,
+    "masterDisabled": true,
+    "simulate": "tesSUCCESS",
+    "ticket": true
+   },
+   "valid": false,
+   "reason": "invalid_exact_xrpl_payload_signer_not_authorized",
+   "payer": "rwJBYQGmggLTa8PMJ9VWgfcUTtCeshL8Gq",
+   "hash": "CBF98EBEEA98E83FEE5E5D0D600D2CA9DBBC15F7A148CFFB75A6002BDE0F72B5"
+  },
+  {
+   "name": "simulation failure",
+   "blob": "1200002400000005201B000003F26140000000000186A068400000000000000C73210311E5F6B180237328B7A1CCB378313EDC2ED5996B2BB3900F38953881FE5414117446304402200EB15357D4DB819AD433F118B2CBC4C8B3BBF50FACE01F3BC9429FB5CA90EC70022048022E3A0DC97A6737758F6D271D207BFBA03D4CDC20F6620E7F28B42B085550811465F900BF888A92C261A66B33616FB904070B0B4D831455422069DDA78DD0142FD7D3E623C76EA75E8239",
+   "requirements": {
+    "scheme": "exact",
+    "network": "xrpl:1",
+    "amount": "100000",
+    "asset": "XRP",
+    "payTo": "r3moe1n4xiQBEbJRPpymiK7svnvRwcXDG6",
+    "maxTimeoutSeconds": 60,
+    "extra": {
+     "areFeesSponsored": false
+    }
+   },
+   "state": {
+    "current": 1000,
+    "sequence": 5,
+    "masterDisabled": false,
+    "simulate": "tecUNFUNDED_PAYMENT",
+    "ticket": true
+   },
+   "valid": false,
+   "reason": "invalid_exact_xrpl_payload_simulation_failed: tecUNFUNDED_PAYMENT",
+   "payer": "rwJBYQGmggLTa8PMJ9VWgfcUTtCeshL8Gq",
+   "hash": "CBF98EBEEA98E83FEE5E5D0D600D2CA9DBBC15F7A148CFFB75A6002BDE0F72B5"
+  },
+  {
+   "name": "multisig",
+   "blob": "1200002400000005201B000003F26140000000000186A068400000000000000C7300811465F900BF888A92C261A66B33616FB904070B0B4D831455422069DDA78DD0142FD7D3E623C76EA75E8239F3E01073210377856FB065ED3DE17F9833F3E873D38FA2A176B708DF58431FA5338DBF8C9E5474473045022100F66838051631EC073D24959E654CB6B7E998DE05575DFA207326B9DF9726FB2B022063296855A2CDB49E588A6BE1C8E7263B8F4CEA7F57C7BBDD998F3B0032EC8339811433BA6C69AA7BF17F9496E03D9569C09F0CDA99D0E1F1",
+   "requirements": {
+    "scheme": "exact",
+    "network": "xrpl:1",
+    "amount": "100000",
+    "asset": "XRP",
+    "payTo": "r3moe1n4xiQBEbJRPpymiK7svnvRwcXDG6",
+    "maxTimeoutSeconds": 60,
+    "extra": {
+     "areFeesSponsored": false
+    }
+   },
+   "state": {
+    "current": 1000,
+    "sequence": 5,
+    "masterDisabled": false,
+    "simulate": "tesSUCCESS",
+    "ticket": true
+   },
+   "valid": false,
+   "reason": "invalid_exact_xrpl_payload_signing_pub_key",
+   "payer": "",
+   "hash": "90D961A497B6360F913BE2D86B3AC785383788AEB8915279442439BDAF1D82EB"
+  },
+  {
+   "name": "tampered signature",
+   "blob": "1200002400000005201B000003F26140000000000186A068400000000000000C73210311E5F6B180237328B7A1CCB378313EDC2ED5996B2BB3900F38953881FE5414117446304402200EB15357D4DB819AD433F118B2CBC4C8B3BBF50FACE01F3BC9429FB5CA90EC70022048022E3A0DC97A6737758F6D271D207BFBA03D4CDC20F6620E7F28B42B085550811465F900BF888A92C261A66B33616FB904070B0B4D831455422069DDA78DD0142FD7D3E623C7AEA75E8239",
+   "requirements": {
+    "scheme": "exact",
+    "network": "xrpl:1",
+    "amount": "100000",
+    "asset": "XRP",
+    "payTo": "r3moe1n4xiQBEbJRPpymiK7svnvRwcXDG6",
+    "maxTimeoutSeconds": 60,
+    "extra": {
+     "areFeesSponsored": false
+    }
+   },
+   "state": {
+    "current": 1000,
+    "sequence": 5,
+    "masterDisabled": false,
+    "simulate": "tesSUCCESS",
+    "ticket": true
+   },
+   "valid": false,
+   "reason": "invalid_exact_xrpl_payload_signature",
+   "payer": "",
+   "hash": "3F8BE796A440217931CD3DF979251251729743A500CAC8E1C2B102A15E05CA99"
+  },
+  {
+   "name": "ticket with sequence method",
+   "blob": "1200002400000005201B000003F22029000000096140000000000186A068400000000000000C73210311E5F6B180237328B7A1CCB378313EDC2ED5996B2BB3900F38953881FE541411744730450221009A3A553893A12FF4EB4CD4FC8D37EB6477431327C9D7BB7CE64CAA8E2978CCBC02204670981A35D0EF9DC665764220933024B0DA446F7E5EA06DA6AC729DB24C98C1811465F900BF888A92C261A66B33616FB904070B0B4D831455422069DDA78DD0142FD7D3E623C76EA75E8239",
+   "requirements": {
+    "scheme": "exact",
+    "network": "xrpl:1",
+    "amount": "100000",
+    "asset": "XRP",
+    "payTo": "r3moe1n4xiQBEbJRPpymiK7svnvRwcXDG6",
+    "maxTimeoutSeconds": 60,
+    "extra": {
+     "areFeesSponsored": false
+    }
+   },
+   "state": {
+    "current": 1000,
+    "sequence": 5,
+    "masterDisabled": false,
+    "simulate": "tesSUCCESS",
+    "ticket": true
+   },
+   "valid": false,
+   "reason": "invalid_exact_xrpl_payload_ticket_sequence_not_allowed",
+   "payer": "rwJBYQGmggLTa8PMJ9VWgfcUTtCeshL8Gq",
+   "hash": "2CBF034594456138CE88D1D9F8A63BBF53C161F2BCF6EEA6C520E87AAFCB739F"
+  },
+  {
+   "name": "ticket method valid",
+   "blob": "1200002400000000201B000003F22029000000096140000000000186A068400000000000000C73210311E5F6B180237328B7A1CCB378313EDC2ED5996B2BB3900F38953881FE54141174473045022100D0223B25BF8715CF94B73FFDAC1C28C4FD7CC91B0FBDFDA302F875A4C2BD670002204E976EDC3380E11133E273793EC52175C989818F8FAC4106D4FD578EC4190B44811465F900BF888A92C261A66B33616FB904070B0B4D831455422069DDA78DD0142FD7D3E623C76EA75E8239",
+   "requirements": {
+    "scheme": "exact",
+    "network": "xrpl:1",
+    "amount": "100000",
+    "asset": "XRP",
+    "payTo": "r3moe1n4xiQBEbJRPpymiK7svnvRwcXDG6",
+    "maxTimeoutSeconds": 60,
+    "extra": {
+     "areFeesSponsored": false,
+     "assetTransferMethod": "ticketSequence"
+    }
+   },
+   "state": {
+    "current": 1000,
+    "sequence": 5,
+    "masterDisabled": false,
+    "simulate": "tesSUCCESS",
+    "ticket": true
+   },
+   "valid": true,
+   "reason": "",
+   "payer": "rwJBYQGmggLTa8PMJ9VWgfcUTtCeshL8Gq",
+   "hash": "9A0B74F17FBBEB7E6B7EAC7651CE0DE96ABBFD7A52E8404820AAB62AB51BEB6F"
+  },
+  {
+   "name": "destination tag required and present",
+   "blob": "12000024000000052E0000004D201B000003F26140000000000186A068400000000000000C73210311E5F6B180237328B7A1CCB378313EDC2ED5996B2BB3900F38953881FE5414117446304402203BBC719A400BBBF5448F6E94BFE14F35B790A716B8A0CFF695DDC0730FB05B9202205D730254286D6175A656F9F391BB8BCD5527CAC63CFE59AE2812E78B8011FA90811465F900BF888A92C261A66B33616FB904070B0B4D831455422069DDA78DD0142FD7D3E623C76EA75E8239",
+   "requirements": {
+    "scheme": "exact",
+    "network": "xrpl:1",
+    "amount": "100000",
+    "asset": "XRP",
+    "payTo": "r3moe1n4xiQBEbJRPpymiK7svnvRwcXDG6",
+    "maxTimeoutSeconds": 60,
+    "extra": {
+     "areFeesSponsored": false,
+     "destinationTag": 77
+    }
+   },
+   "state": {
+    "current": 1000,
+    "sequence": 5,
+    "masterDisabled": false,
+    "simulate": "tesSUCCESS",
+    "ticket": true
+   },
+   "valid": true,
+   "reason": "",
+   "payer": "rwJBYQGmggLTa8PMJ9VWgfcUTtCeshL8Gq",
+   "hash": "B761D4F54319E40BF0E75F8A58BD41EA619AA75BA3E366B2C81D5DF7C8AE76B8"
+  },
+  {
+   "name": "destination tag required and wrong",
+   "blob": "12000024000000052E0000004E201B000003F26140000000000186A068400000000000000C73210311E5F6B180237328B7A1CCB378313EDC2ED5996B2BB3900F38953881FE54141174463044022001CC9D521389C521E7108829E8091B6291968932BFEECF1D4771C1E8C0869A8F02207EAA5F014BCF8F99DF6C4A3E1D63B213B740058B4CCF85B406B82B4C6FD7DD2D811465F900BF888A92C261A66B33616FB904070B0B4D831455422069DDA78DD0142FD7D3E623C76EA75E8239",
+   "requirements": {
+    "scheme": "exact",
+    "network": "xrpl:1",
+    "amount": "100000",
+    "asset": "XRP",
+    "payTo": "r3moe1n4xiQBEbJRPpymiK7svnvRwcXDG6",
+    "maxTimeoutSeconds": 60,
+    "extra": {
+     "areFeesSponsored": false,
+     "destinationTag": 77
+    }
+   },
+   "state": {
+    "current": 1000,
+    "sequence": 5,
+    "masterDisabled": false,
+    "simulate": "tesSUCCESS",
+    "ticket": true
+   },
+   "valid": false,
+   "reason": "invalid_exact_xrpl_payload_destination_tag_mismatch",
+   "payer": "rwJBYQGmggLTa8PMJ9VWgfcUTtCeshL8Gq",
+   "hash": "23BE52C119387E1F170366CAA68E25BA656FC4035909D048FFC22C1B2A4F0432"
+  },
+  {
+   "name": "invoice required and bound",
+   "blob": "1200002400000005201B000003F250110BAFE22156D2698C143B86040446D366EAD863BA600D5C924F3D15C786EF40576140000000000186A068400000000000000C73210311E5F6B180237328B7A1CCB378313EDC2ED5996B2BB3900F38953881FE541411744630440220113F3118B77CBF98FBED1FAC5602E926EC18FAE25B26B7089F8C4B88CA85A4C502202A8B333D3F1C086DFFD6BDBB0812D323538BAE7B94858D11D40B356C2E681E00811465F900BF888A92C261A66B33616FB904070B0B4D831455422069DDA78DD0142FD7D3E623C76EA75E8239",
+   "requirements": {
+    "scheme": "exact",
+    "network": "xrpl:1",
+    "amount": "100000",
+    "asset": "XRP",
+    "payTo": "r3moe1n4xiQBEbJRPpymiK7svnvRwcXDG6",
+    "maxTimeoutSeconds": 60,
+    "extra": {
+     "areFeesSponsored": false,
+     "invoiceId": "order-1"
+    }
+   },
+   "state": {
+    "current": 1000,
+    "sequence": 5,
+    "masterDisabled": false,
+    "simulate": "tesSUCCESS",
+    "ticket": true
+   },
+   "valid": true,
+   "reason": "",
+   "payer": "rwJBYQGmggLTa8PMJ9VWgfcUTtCeshL8Gq",
+   "hash": "0B0E86B1223FED9483CD02D4B886820FEF455A313D4969EA6E9588F125F0FC1D"
+  },
+  {
+   "name": "invoice required and missing",
+   "blob": "1200002400000005201B000003F26140000000000186A068400000000000000C73210311E5F6B180237328B7A1CCB378313EDC2ED5996B2BB3900F38953881FE5414117446304402200EB15357D4DB819AD433F118B2CBC4C8B3BBF50FACE01F3BC9429FB5CA90EC70022048022E3A0DC97A6737758F6D271D207BFBA03D4CDC20F6620E7F28B42B085550811465F900BF888A92C261A66B33616FB904070B0B4D831455422069DDA78DD0142FD7D3E623C76EA75E8239",
+   "requirements": {
+    "scheme": "exact",
+    "network": "xrpl:1",
+    "amount": "100000",
+    "asset": "XRP",
+    "payTo": "r3moe1n4xiQBEbJRPpymiK7svnvRwcXDG6",
+    "maxTimeoutSeconds": 60,
+    "extra": {
+     "areFeesSponsored": false,
+     "invoiceId": "order-1"
+    }
+   },
+   "state": {
+    "current": 1000,
+    "sequence": 5,
+    "masterDisabled": false,
+    "simulate": "tesSUCCESS",
+    "ticket": true
+   },
+   "valid": false,
+   "reason": "invalid_exact_xrpl_payload_invoice_missing",
+   "payer": "rwJBYQGmggLTa8PMJ9VWgfcUTtCeshL8Gq",
+   "hash": "CBF98EBEEA98E83FEE5E5D0D600D2CA9DBBC15F7A148CFFB75A6002BDE0F72B5"
+  },
+  {
+   "name": "source tag allowed",
+   "blob": "120000230000002A2400000005201B000003F26140000000000186A068400000000000000C73210311E5F6B180237328B7A1CCB378313EDC2ED5996B2BB3900F38953881FE5414117446304402207DFF92A4386CEE623155B6B6863D8077E6CA435347DFAD05912F335C9A29D486022036761564D47CCCB73FEDED85B03557E4C5E1313872E635A590C0549BA92E75F3811465F900BF888A92C261A66B33616FB904070B0B4D831455422069DDA78DD0142FD7D3E623C76EA75E8239",
+   "requirements": {
+    "scheme": "exact",
+    "network": "xrpl:1",
+    "amount": "100000",
+    "asset": "XRP",
+    "payTo": "r3moe1n4xiQBEbJRPpymiK7svnvRwcXDG6",
+    "maxTimeoutSeconds": 60,
+    "extra": {
+     "areFeesSponsored": false
+    }
+   },
+   "state": {
+    "current": 1000,
+    "sequence": 5,
+    "masterDisabled": false,
+    "simulate": "tesSUCCESS",
+    "ticket": true
+   },
+   "valid": true,
+   "reason": "",
+   "payer": "rwJBYQGmggLTa8PMJ9VWgfcUTtCeshL8Gq",
+   "hash": "0C807BE6C013664DCF3B8004B19010A6F21F2B7603DEE962198F2F0E009948DA"
+  },
+  {
+   "name": "delegate",
+   "blob": "1200002400000005201B000003F26140000000000186A068400000000000000C73210311E5F6B180237328B7A1CCB378313EDC2ED5996B2BB3900F38953881FE54141174463044022020935D34BD47756B3482253FEE12F7976A30D4025150C88709248F06BACD9D9002203F1E6E6A865AFCC4261D41B7FA909329ABC833220D6C3929D68BA263AEABD5C4811465F900BF888A92C261A66B33616FB904070B0B4D831455422069DDA78DD0142FD7D3E623C76EA75E82398C14CCDFFEAC2A08012CD4DECEBB5F58073469DB7A42",
+   "requirements": {
+    "scheme": "exact",
+    "network": "xrpl:1",
+    "amount": "100000",
+    "asset": "XRP",
+    "payTo": "r3moe1n4xiQBEbJRPpymiK7svnvRwcXDG6",
+    "maxTimeoutSeconds": 60,
+    "extra": {
+     "areFeesSponsored": false
+    }
+   },
+   "state": {
+    "current": 1000,
+    "sequence": 5,
+    "masterDisabled": false,
+    "simulate": "tesSUCCESS",
+    "ticket": true
+   },
+   "valid": false,
+   "reason": "invalid_exact_xrpl_payload_delegate_not_allowed",
+   "payer": "rwJBYQGmggLTa8PMJ9VWgfcUTtCeshL8Gq",
+   "hash": "E0555E89C118307F350FB3F55DB82148342EA32866A1E23521BD7534D59CB039"
+  },
+  {
+   "name": "not a payment",
+   "blob": "1200032400000005201B000003F268400000000000000C73210311E5F6B180237328B7A1CCB378313EDC2ED5996B2BB3900F38953881FE5414117447304502210091FE127B8486AF57C18B4F75FC66DF5CCA22633C0BD522E951C619FBF9A4B4C5022043A654BC124177977CE20F40DB5D796AC461EB6ED1A815C26425D841AEE970A6811465F900BF888A92C261A66B33616FB904070B0B4D",
+   "requirements": {
+    "scheme": "exact",
+    "network": "xrpl:1",
+    "amount": "100000",
+    "asset": "XRP",
+    "payTo": "r3moe1n4xiQBEbJRPpymiK7svnvRwcXDG6",
+    "maxTimeoutSeconds": 60,
+    "extra": {
+     "areFeesSponsored": false
+    }
+   },
+   "state": {
+    "current": 1000,
+    "sequence": 5,
+    "masterDisabled": false,
+    "simulate": "tesSUCCESS",
+    "ticket": true
+   },
+   "valid": false,
+   "reason": "invalid_exact_xrpl_payload_transaction_type",
+   "payer": "",
+   "hash": "0CB0CE7383FA6B45108CB60270E137211FEB17D3B60CF36BEB04B33C955B7106"
+  }
+ ],
+ "keys": [
+  {
+   "seed": "sp59tVwt6dzAsmAVBCFLdpL5SoBwA",
+   "address": "rwJBYQGmggLTa8PMJ9VWgfcUTtCeshL8Gq",
+   "publicKey": "0311E5F6B180237328B7A1CCB378313EDC2ED5996B2BB3900F38953881FE541411"
+  },
+  {
+   "seed": "sEdSKAAHAGyTEBEBW24ssNKUWkP7yhC",
+   "address": "rLdECbGnrafJhq1jXPmvLuWTUhFpSfgfo3",
+   "publicKey": "ED167C95FFBC40505011A89B3A535F83278A5C7730BEFC9C81735F79D916FC024C"
+  },
+  {
+   "seed": "spjmzHKga4JFkXbD5n6g3KepLWu8D",
+   "address": "rn5W85Srey74NZyxtLUiusSGtaiK37agos",
+   "publicKey": "0377856FB065ED3DE17F9833F3E873D38FA2A176B708DF58431FA5338DBF8C9E54"
+  }
+ ],
+ "messages": [
+  {
+   "publicKey": "0311E5F6B180237328B7A1CCB378313EDC2ED5996B2BB3900F38953881FE541411",
+   "address": "rwJBYQGmggLTa8PMJ9VWgfcUTtCeshL8Gq",
+   "message": "Concert NFT admission v1\nOrigin: http://127.0.0.1:8080\nNonce: abc",
+   "signature": "MEUCIQCIO6RUaWLzFZhB8u/peFjq2+gmOrtQaRyopl/Cvg80hwIgC1par64Ud6pu0l+r2KXNHHBjies4jqoMEq5C0VpKKq0="
+  },
+  {
+   "publicKey": "ED167C95FFBC40505011A89B3A535F83278A5C7730BEFC9C81735F79D916FC024C",
+   "address": "rLdECbGnrafJhq1jXPmvLuWTUhFpSfgfo3",
+   "message": "Concert NFT admission v1\nOrigin: http://127.0.0.1:8080\nNonce: abc",
+   "signature": "9rSFVL0+U2H0oit72BDhtYD6bcJQgJTIC7hVlRNExcVfUfF+fk5A7/XjQiobXXUc4BBIziwKrTe/ZcR/26BZCA=="
+  }
+ ],
+ "signing": [
+  {
+   "seed": "sp59tVwt6dzAsmAVBCFLdpL5SoBwA",
+   "tx": {
+    "TransactionType": "Payment",
+    "Account": "rwJBYQGmggLTa8PMJ9VWgfcUTtCeshL8Gq",
+    "Destination": "r3moe1n4xiQBEbJRPpymiK7svnvRwcXDG6",
+    "Amount": "100000",
+    "Fee": "12",
+    "Sequence": 5,
+    "LastLedgerSequence": 1010
+   },
+   "blob": "1200002400000005201B000003F26140000000000186A068400000000000000C73210311E5F6B180237328B7A1CCB378313EDC2ED5996B2BB3900F38953881FE5414117446304402200EB15357D4DB819AD433F118B2CBC4C8B3BBF50FACE01F3BC9429FB5CA90EC70022048022E3A0DC97A6737758F6D271D207BFBA03D4CDC20F6620E7F28B42B085550811465F900BF888A92C261A66B33616FB904070B0B4D831455422069DDA78DD0142FD7D3E623C76EA75E8239"
+  },
+  {
+   "seed": "sEdSKAAHAGyTEBEBW24ssNKUWkP7yhC",
+   "tx": {
+    "TransactionType": "Payment",
+    "Account": "rLdECbGnrafJhq1jXPmvLuWTUhFpSfgfo3",
+    "Destination": "r3moe1n4xiQBEbJRPpymiK7svnvRwcXDG6",
+    "Amount": "100000",
+    "Fee": "12",
+    "Sequence": 5,
+    "LastLedgerSequence": 1010
+   },
+   "blob": "1200002400000005201B000003F26140000000000186A068400000000000000C7321ED167C95FFBC40505011A89B3A535F83278A5C7730BEFC9C81735F79D916FC024C74407FC97846A665321A58D5E350CD8367737FB3AEF19B67E1CCFA81A872E144C948162A132DA68461BA5C8487C049DFAE2A8EACE3C2F659689EA639C9797841B70F8114D7459B462AF545EEFD598C51EC8BAA68F45FB131831455422069DDA78DD0142FD7D3E623C76EA75E8239"
+  }
+ ]
+}
