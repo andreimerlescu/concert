@@ -136,6 +136,8 @@ var settingDefs = []settingDef{
 	// ---- Fast lane ----
 	{key: "fastlane_config", flag: "fastlane-config", env: "CONCERT_FASTLANE_CONFIG", group: groupSkip, label: "x402 / NFT configuration file", restart: true,
 		def: "", usage: "fast lane JSON (x402 offers and NFT rules; see docs/FASTLANE.md), empty turns wallet access off (flag or CONCERT_FASTLANE_CONFIG only; takes a restart)", ptr: func(c *config) any { return &c.fastlaneFile }},
+	{key: "networks_config", flag: "networks-config", env: "CONCERT_NETWORKS_CONFIG", group: groupSkip, label: "Chain endpoints file", restart: true,
+		def: "", usage: "chain endpoints JSON for the fast lane's payment networks (see docs/FASTLANE.md); sponsor keys come from CONCERT_STELLAR_FEE_SECRET and CONCERT_HEDERA_FEE_SECRET (flag or CONCERT_NETWORKS_CONFIG only; takes a restart)", ptr: func(c *config) any { return &c.networksFile }},
 	// ---- Skip the line ----
 	{key: "rate", flag: "rate", env: "CONCERT_RATE", group: groupSkip, label: "Price per position",
 		def: 0.0, usage: "base cost per queue position (0 with -surge 0 turns paid skip-the-line off)",
