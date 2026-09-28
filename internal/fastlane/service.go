@@ -105,6 +105,7 @@ type Service struct {
 	nfts         map[string]nftLease
 	limits       map[string]*rateWindow
 	tags         map[string]depositTag
+	marketCache  map[string]marketEntry
 	sold         map[string]string // listing id -> fingerprint of the payment that bought it
 	depositPolls map[string]time.Time
 	work         chan struct{}
@@ -135,7 +136,7 @@ func New(c Config, dir string, key []byte, gw Gateway, policyToken string) (*Ser
 		// Every call sets its own deadline: settlement may legitimately outlast
 		// an ordinary verification request.
 		http:   &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
-		active: map[string]bool{}, challenges: map[string]challenge{}, nfts: map[string]nftLease{}, limits: map[string]*rateWindow{}, tags: map[string]depositTag{}, sold: map[string]string{}, depositPolls: map[string]time.Time{}, work: make(chan struct{}, 32), now: time.Now}
+		active: map[string]bool{}, challenges: map[string]challenge{}, nfts: map[string]nftLease{}, limits: map[string]*rateWindow{}, tags: map[string]depositTag{}, sold: map[string]string{}, marketCache: map[string]marketEntry{}, depositPolls: map[string]time.Time{}, work: make(chan struct{}, 32), now: time.Now}
 	for _, r := range l.withKind("nft_sale") {
 		s.sold[r.Listing] = r.Fingerprint
 	}
@@ -446,6 +447,10 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, Prefix)
 	if r.Method == http.MethodGet && path == "/config" {
 		reply(w, 200, s.PublicConfig())
+		return
+	}
+	if r.Method == http.MethodGet && path == "/market" {
+		s.market(w, r)
 		return
 	}
 	if r.Method == http.MethodGet && path == "/shop" {

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"log"
 	"math/big"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -78,6 +79,8 @@ func (s *Server) Handle(ctx context.Context, op string, body []byte) (any, error
 		return s.prepare(ctx, body)
 	case "/deposit/check":
 		return s.deposit(ctx, body)
+	case "/market/sales":
+		return s.marketSales(ctx, body)
 	}
 	return nil, errors.New("unknown gateway operation")
 }
@@ -373,4 +376,35 @@ func (s *Server) deposit(ctx context.Context, body []byte) (any, error) {
 		}
 	}
 	return map[string]any{"deposits": deposits, "network": in.Network}, nil
+}
+
+// marketSales lists the NFTs of a configured collection rule that are on sale
+// on the XRP Ledger's built-in NFT market.
+func (s *Server) marketSales(ctx context.Context, body []byte) (any, error) {
+	var in struct {
+		Network    string `json:"network"`
+		Collection string `json:"collection"`
+	}
+	if err := json.Unmarshal(body, &in); err != nil {
+		return nil, errBadRequest
+	}
+	configured := false
+	for _, c := range s.cfg.Collections {
+		configured = configured || (c.Network == in.Network && c.Collection == in.Collection)
+	}
+	c := s.chains[in.Network]
+	issuer, taxonText, ok := strings.Cut(in.Collection, ":")
+	taxon, err := strconv.ParseUint(taxonText, 10, 32)
+	if !configured || c == nil || c.xrp == nil || !ok || err != nil {
+		return nil, errors.New("no on-ledger market for this collection")
+	}
+	rpc, isRPC := c.xrp.Ledger.(xrpl.RPC)
+	if !isRPC {
+		return nil, errors.New("no on-ledger market for this collection")
+	}
+	sales, err := rpc.CollectionSales(ctx, issuer, uint32(taxon))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"sales": sales}, nil
 }

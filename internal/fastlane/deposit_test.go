@@ -182,3 +182,43 @@ func TestNFTSaleGrantsPassSellsOnceAndFlagsConflicts(t *testing.T) {
 		t.Error("a restart must remember that the listing sold")
 	}
 }
+
+func TestMarketListsOnLedgerSalesWithBuyLinks(t *testing.T) {
+	h := newHarness(t)
+	calls := 0
+	inner := h.gateway
+	h.gateway = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/market/sales" {
+			inner.ServeHTTP(w, r)
+			return
+		}
+		calls++
+		id := strings.Repeat("AB", 32)
+		reply(w, 200, map[string]any{"sales": []map[string]string{{"token_id": id, "offer": "O", "seller": "rS", "price": "5000000"}, {"token_id": "not-hex", "price": "1"}}})
+	})
+	h.s.Close()
+	h.open(t)
+	get := func() map[string]any {
+		r := httptest.NewRequest("GET", Prefix+"/market?rule=club", nil)
+		w := httptest.NewRecorder()
+		h.s.ServeHTTP(w, r)
+		var out map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+		return out
+	}
+	out := get()
+	sales := out["sales"].([]any)
+	if len(sales) != 1 || sales[0].(map[string]any)["price_display"] != "5.000000" || !strings.HasPrefix(sales[0].(map[string]any)["buy_url"].(string), "https://test.bithomp.com/nft/") {
+		t.Fatalf("%v", out)
+	}
+	get()
+	if calls != 1 {
+		t.Errorf("the market must be cached: %d gateway calls", calls)
+	}
+	r := httptest.NewRequest("GET", Prefix+"/market?rule=nope", nil)
+	w := httptest.NewRecorder()
+	h.s.ServeHTTP(w, r)
+	if w.Code != 404 {
+		t.Errorf("unknown rule: %d", w.Code)
+	}
+}

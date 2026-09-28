@@ -179,6 +179,10 @@ The page also lists the enabled NFT collections and payment options while a visi
 
 Concert never holds NFT keys, so it cannot move the NFT. The portal's Fast lane tab lists each sale with the buyer's address (the account that paid), and you send the NFT there and press **Mark delivered**. Hedera buyers must associate the token first; Solana and XRPL buyers must be able to receive it. An NFT holder can later prove ownership with the ordinary collection flow.
 
+### XRPL market listings
+
+For an XRPL collection rule the NFT card also shows what is for sale on the ledger's own NFT market: `GET /_concert/market?rule=<id>` asks the gateway (`/market/sales`) for the collection's tokens (`nfts_by_issuer`, which needs a Clio server; the public clusters run one) and their open `nft_sell_offers`, keeping the cheapest public XRP offer that has no destination, has not expired and is made by the current owner. The list is cached for a minute. **Buy** opens the token on Bithomp (`test.`/`dev.` hosts for the test networks), where the buyer purchases with their own wallet; they then return and prove ownership to get a pass. Concert does not sign or submit marketplace transactions itself. Stellar, Hedera and Solana have no equivalent built-in market, so their NFTs are sold through `listings`.
+
 ## Collection identifiers and wallet proof
 
 Use the `collections` array in the fast-lane JSON. Each entry needs a unique local `id`, a display `label`, the exact `network`, and its chain-specific `collection`. No collection display name, URL or ticker is treated as proof.

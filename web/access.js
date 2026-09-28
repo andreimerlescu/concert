@@ -70,6 +70,16 @@
         availability();
     }
     for(const t of document.querySelectorAll('.chain-tab'))t.addEventListener('click',()=>selectChain(t.dataset.chain));
+    async function loadMarket(){
+        const c=config.collections[Number($('collection').value)];$('market').hidden=true;
+        if(!c||chainOf(c.network)!=='xrpl')return;
+        try{const r=await fetch('/_concert/market?rule='+encodeURIComponent(c.id),{credentials:'same-origin',cache:'no-store'});if(!r.ok)return;const d=await r.json();
+            const list=$('market-list');list.replaceChildren();
+            for(const x of (d.sales||[]).slice(0,12)){const row=document.createElement('div');row.className='market-row';const id=document.createElement('code');id.textContent=x.token_id.slice(0,10)+'…'+x.token_id.slice(-6);id.title=x.token_id;const price=document.createElement('strong');price.textContent=x.price_display+' XRP';const a=document.createElement('a');a.href=x.buy_url;a.target='_blank';a.rel='noopener noreferrer';a.textContent='Buy ↗';row.append(id,price,a);list.append(row);}
+            if(!list.children.length){const p=document.createElement('p');p.className='help';p.textContent=d.unavailable?'The listing could not be loaded just now.':'Nothing from this collection is listed for sale right now.';list.append(p);}
+            $('market').hidden=false;
+        }catch{}
+    }
     async function loadShop(){
         try{const r=await fetch('/_concert/shop',{credentials:'same-origin',cache:'no-store'});shop=(await r.json()).listings||[];}catch{return;}
         const grid=$('shop-grid');grid.replaceChildren();$('shop').hidden=!shop.length;
@@ -129,7 +139,7 @@
     }
     const adapter=network=>window.concertWallets?.[network]||window.concertWallets?.[network.split(':')[0]];
     async function createChallenge(){const c=config.collections[Number($('collection').value)];if(!c)throw Error('No collection is enabled.');const d=await post('/nft/challenge',{rule:c.id,address:$('wallet-address').value.trim(),token_id:$('token-id').value.trim()});nonce=d.nonce;$('challenge-message').value=d.message;return {d,c};}
-    $('offer').addEventListener('change',price);$('consent').addEventListener('change',availability);
+    $('offer').addEventListener('change',price);$('collection').addEventListener('change',loadMarket);$('consent').addEventListener('change',availability);
     $('refresh').addEventListener('click',()=>run(status));
     $('submit-payment').addEventListener('click',()=>run(()=>settle($('payment-payload').value.trim())));
     $('retry-payment').addEventListener('click',()=>run(()=>settle(pending.header)));
@@ -156,5 +166,5 @@
     window.addEventListener('pagehide',()=>clearInterval(heartbeat));
     run(async()=>{const {data}=await call('/config');if(!data.enabled)throw Error('Wallet access is not enabled. The standard queue remains available.');config=data;renderInfo();const s=await post('/session',{});csrf=s.csrf;session=s.session;$('access-options').hidden=false;for(const t of document.querySelectorAll('.chain-tab'))t.disabled=!data.offers.some(o=>chainOf(o.requirements.network)===t.dataset.chain);$('mode-label').textContent=data.test_mode?'TEST NETWORKS · NO MAINNET PAYMENTS':'WALLET ACCESS';if(data.test_mode)$('mode-label').classList.add('badge-test');$('merchant').textContent='Operated by '+data.merchant;$('pass-description').textContent=data.pass_seconds+' seconds of priority eligibility after settlement. This does not reserve a slot or guarantee service availability.';$('nft-description').textContent='Prove ownership with a signed message. No payment or NFT transfer. Access lasts '+data.nft_pass_seconds+' seconds.';for(const [id,url] of [['terms-link',data.terms_url],['refund-link',data.refund_url],['privacy-link',data.privacy_url],['policy-link',data.refund_url]])$(id).href=url;for(const [id,items] of [['offer',data.offers],['collection',data.collections]])items.forEach((x,i)=>{const el=document.createElement('option');el.value=i;el.textContent=x.label;$(id).append(el);});
         const saved=sessionStorage.getItem('concert.pending-payment');if(saved){pending=JSON.parse(saved);$('payment-payload').value=pending.header;$('retry-payment').hidden=false;const p=JSON.parse(atob(pending.header));const index=config.offers.findIndex(o=>o.requirements.network===p.accepted?.network);if(index>=0)$('offer').value=index;}
-        const first=[...document.querySelectorAll('.chain-tab')].find(t=>!t.disabled);if(first)selectChain(first.dataset.chain);else $('access-options').hidden=false;await loadShop();await status();});
+        const first=[...document.querySelectorAll('.chain-tab')].find(t=>!t.disabled);if(first)selectChain(first.dataset.chain);else $('access-options').hidden=false;await loadShop();loadMarket();await status();});
 })();
