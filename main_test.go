@@ -433,6 +433,8 @@ func TestParseConfig_Invalid(t *testing.T) {
 		"reserved asset":         {"-assets", "/_room/*"},
 		"reserved status":        {"-asset-public", "/queue/status"},
 		"reserved ban path":      {"-ban-paths", "/_room/stats"},
+		"reserved wallet bypass": {"-bypass", "/_concert/*"},
+		"reserved wallet asset":  {"-asset-public", "/_concert/access"},
 		"catch-all ban path":     {"-ban-paths", "/*"},
 		"duplicate path":         {"-bypass", "/x", "-assets", "/x"},
 		"ban overlaps asset":     {"-assets", "/x", "-ban-paths", "/x"},

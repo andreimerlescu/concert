@@ -1,0 +1,21 @@
+{
+  "xrpl:1": {
+    "rpc": "https://s.altnet.rippletest.net:51234/",
+    "max_fee": "1000"
+  },
+  "stellar:testnet": {
+    "rpc": "https://soroban-testnet.stellar.org",
+    "horizon": "https://horizon-testnet.stellar.org",
+    "secret_env": "CONCERT_STELLAR_FEE_SECRET",
+    "max_fee": "50000"
+  },
+  "hedera:testnet": {
+    "mirror": "https://testnet.mirrornode.hedera.com",
+    "fee_payer": "0.0.4815342",
+    "secret_env": "CONCERT_HEDERA_FEE_SECRET",
+    "max_fee_tinybars": "100000000"
+  },
+  "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1": {
+    "rpc": "https://api.devnet.solana.com"
+  }
+}

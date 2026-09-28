@@ -30,7 +30,7 @@ clean:
 	rm -rf $(BIN_DIR)
 
 summary:
-	summarize -s useExpanded,templates/lib,.git,.idea,summaries,lemmings -x useExpanded,jpg,LICENSE
+	summarize -s useExpanded,templates/lib,.git,.idea,summaries,lemmings -x useExpanded,png,jpg,LICENSE
 
 build: $(PLATFORMS)
 

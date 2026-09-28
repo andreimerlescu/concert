@@ -1,30 +1,20 @@
 package main
 
 import (
-	"embed"
+	_ "embed"
 	"strings"
 )
 
-// binaryVersionBytes contains the embedded VERSION file's contents
+// versionFile holds the repository VERSION file, embedded at build time.
 //
 //go:embed VERSION
-var binaryVersionBytes embed.FS
+var versionFile string
 
-// binaryCurrentVersion is defined by BinaryVersion() and contains the contents of
-// the VERSION file
-var binaryCurrentVersion string
-
-const VFN = "VERSION"
-
-// BinaryVersion returns the embedded VERSION file of the repository as a string
-// and cache that value into binaryCurrentVersion once os.ReadFile is complete
+// BinaryVersion returns the embedded VERSION, or v0.0.0 if it is empty.
+// It is a pure function of an immutable string and safe for concurrent use.
 func BinaryVersion() string {
-	if len(binaryCurrentVersion) == 0 {
-		versionBytes, err := binaryVersionBytes.ReadFile(VFN)
-		if err != nil {
-			return "v0.0.0"
-		}
-		binaryCurrentVersion = strings.TrimSpace(string(versionBytes))
+	if v := strings.TrimSpace(versionFile); v != "" {
+		return v
 	}
-	return binaryCurrentVersion
+	return "v0.0.0"
 }

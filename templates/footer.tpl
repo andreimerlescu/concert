@@ -9,6 +9,7 @@
 <div class="toast-container position-fixed bottom-0 end-0 p-3" id="toasts"></div>
 <script src="/assets/{{.BootstrapJS}}"></script>
 <script src="/assets/{{.PortalJS}}"></script>
+<script src="/assets/js/fastlane-portal.js"></script>
 </body>
 </html>
 {{end}}

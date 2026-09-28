@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/andreimerlescu/concert/internal/fastlane"
 	"log"
 	"math"
 	"net/http"
 	"net/netip"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,6 +24,10 @@ import (
 // counters live as long as the process. Everything built from settings lives
 // in the generation and is replaced when a setting changes.
 type app struct {
+	fastlane *fastlane.Service
+	// gatewayClose stops the in-process chain gateway after the fast lane.
+	gatewayClose func()
+
 	cfg       config // as concert started; the running configuration is current().cfg
 	room      *room.WaitingRoom
 	stats     *counters
@@ -112,6 +118,37 @@ func newApp(cfg config) (*app, error) {
 		wr.Stop()
 		return nil, fmt.Errorf("room config: %w", err)
 	}
+	if cfg.fastlaneFile != "" {
+		fc, err := fastlane.Load(cfg.fastlaneFile)
+		if err == nil && fc.Enabled && cfg.admitSecretGenerated {
+			err = fmt.Errorf("fast lane requires a stable CONCERT_ADMIT_SECRET")
+		}
+		var gw fastlane.Gateway
+		if err == nil && fc.Enabled {
+			gw, err = newGateway(fc, &cfg)
+		}
+		if err == nil {
+			a.fastlane, err = fastlane.New(fc, cfg.dataDir, cfg.admitSecret, gw, os.Getenv("CONCERT_POLICY_TOKEN"))
+			if err != nil {
+				closeGateway(gw)
+			} else if gw != nil {
+				a.gatewayClose = func() { closeGateway(gw) }
+			}
+		}
+		if err != nil {
+			g.assets.users.close()
+			wr.Stop()
+			return nil, fmt.Errorf("fast lane: %w", err)
+		}
+	}
+	// All startup errors after this point close the fast lane's journal.
+	started := false
+	defer func() {
+		if !started && a.fastlane != nil {
+			a.fastlane.Close()
+			a.gatewayClose()
+		}
+	}()
 	a.handler = http.HandlerFunc(a.serveHTTP)
 
 	if cfg.dataDir != "" {
@@ -154,6 +191,13 @@ func newApp(cfg config) (*app, error) {
 			defer a.wg.Done()
 			a.abuse.persistLoop(a.bansPath, bansSaveEvery, a.stop)
 		}()
+	}
+	started = true
+	if a.fastlane != nil {
+		// Closers run newest first: the fast lane stops, then the gateway
+		// lets settlements in flight journal their results.
+		a.onClose(a.gatewayClose)
+		a.onClose(a.fastlane.Close)
 	}
 	return a, nil
 }
@@ -325,6 +369,20 @@ func run(ctx context.Context, cfg config) error {
 		if !c.secureCookie {
 			log.Printf("tls: browsers now reach concert over HTTPS; set CONCERT_SECURE_COOKIE=true")
 		}
+	}
+	if a.fastlane != nil {
+		fc := a.fastlane.Config()
+		mode := "live networks"
+		if fc.TestMode {
+			mode = "test networks only"
+		}
+		log.Printf("fast lane: %s, %d payment offer(s), %d NFT rule(s), %ds pass, chain endpoints %s, settlement journal %s",
+			mode, len(fc.Offers), len(fc.Collections), fc.PassSeconds, c.networksFile, gatewayDir(c.dataDir))
+		if fc.GatewayURL != "" {
+			log.Printf("fast lane: gateway_url is ignored; the chain gateway runs inside concert")
+		}
+	} else if c.fastlaneFile != "" {
+		log.Printf("fast lane: %s has \"enabled\": false; wallet access is off", c.fastlaneFile)
 	}
 	if c.abuseEnabled {
 		log.Printf("abuse registry: %d strikes per %s, cooldown %s doubling to %s, %d ban paths",

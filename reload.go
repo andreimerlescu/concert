@@ -150,7 +150,7 @@ func sameUserPools(a, b config) bool {
 
 func readWaitingRoomHTML(cfg config) ([]byte, error) {
 	if cfg.htmlFile == "" {
-		return nil, nil
+		return concertWeb.ReadFile("web/waiting.html")
 	}
 	html, err := os.ReadFile(cfg.htmlFile)
 	if err != nil {
@@ -159,8 +159,9 @@ func readWaitingRoomHTML(cfg config) ([]byte, error) {
 	return html, nil
 }
 
-// applyRoom configures the waiting room from cfg. A nil html restores
-// room's built-in page, and a zero ticket TTL restores room's default.
+// applyRoom configures the waiting room from cfg. html is the -html file or,
+// without one, Concert's built-in page (web/waiting.html); a zero ticket TTL
+// restores room's default.
 // price becomes room's RateFunc only while paid skip-the-line is configured
 // (-rate or -surge above 0); otherwise room has none, and paid promotion is
 // off. The portal's "move to front" uses AdminPromote, which needs no
