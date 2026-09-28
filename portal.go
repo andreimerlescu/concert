@@ -307,6 +307,7 @@ func (p *portal) routes() *gin.Engine {
 	})
 	api.GET("/fastlane/config", p.apiFastlaneConfig)
 	api.POST("/fastlane/config", p.apiFastlaneConfigSave)
+	api.POST("/fastlane/sales/delivered", p.apiFastlaneDelivered)
 	api.GET("/queue", p.apiQueue)
 	api.POST("/queue/promote", p.apiPromote)
 	api.POST("/queue/kick", p.apiKick)

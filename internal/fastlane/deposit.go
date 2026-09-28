@@ -81,10 +81,10 @@ func (s *Service) derive(parts ...string) uint32 {
 // value is derived from the session, so it survives a restart and needs no
 // storage; an amount or tag another live session holds is skipped by counting
 // up, which keeps them unique among concurrent visitors.
-func (s *Service) intentFor(session string, o Offer, exp time.Time) (intent, bool) {
+func (s *Service) intentFor(session string, o Offer, priceAtomic, listing string, exp time.Time) (intent, bool) {
 	now := s.now()
 	r := o.Requirements
-	price, _ := new(big.Int).SetString(r.Amount, 10)
+	price, _ := new(big.Int).SetString(priceAtomic, 10)
 	dustMax := new(big.Int).Div(price, big.NewInt(20))
 	if dustMax.Cmp(big.NewInt(99)) < 0 {
 		dustMax.SetInt64(99)
@@ -111,7 +111,7 @@ func (s *Service) intentFor(session string, o Offer, exp time.Time) (intent, boo
 	var out intent
 	found := false
 	for i := 0; i < 256 && !found; i++ {
-		dust := new(big.Int).Add(new(big.Int).Mod(new(big.Int).SetUint64(uint64(s.derive(r.Network, session, "dust", strconv.Itoa(i)))), dustMax), big.NewInt(1))
+		dust := new(big.Int).Add(new(big.Int).Mod(new(big.Int).SetUint64(uint64(s.derive(r.Network, session, listing, "dust", strconv.Itoa(i)))), dustMax), big.NewInt(1))
 		amount := new(big.Int).Add(price, dust).String()
 		if key := "amount/" + r.Network + "/" + amount; free(key) {
 			s.tags[key] = depositTag{session, exp}
@@ -123,7 +123,7 @@ func (s *Service) intentFor(session string, o Offer, exp time.Time) (intent, boo
 	}
 	if chain(r.Network) == "xrpl" {
 		for i := 0; i < 64 && out.Tag == 0; i++ {
-			tag := s.derive(r.Network, session, "tag", strconv.Itoa(i))
+			tag := s.derive(r.Network, session, listing, "tag", strconv.Itoa(i))
 			if key := "tag/" + r.Network + "/" + strconv.FormatUint(uint64(tag), 10); tag != 0 && free(key) {
 				s.tags[key] = depositTag{session, exp}
 				out.Tag = tag
@@ -133,7 +133,7 @@ func (s *Service) intentFor(session string, o Offer, exp time.Time) (intent, boo
 			return intent{}, false
 		}
 	} else {
-		out.Memo = "CT" + strings.ToUpper(hex.EncodeToString([]byte(s.mac("memo/" + r.Network + "/" + session))[:5]))
+		out.Memo = "CT" + strings.ToUpper(hex.EncodeToString([]byte(s.mac("memo/" + r.Network + "/" + session + "/" + listing))[:5]))
 	}
 	return out, true
 }
@@ -174,6 +174,7 @@ func qrDataURI(content string) (string, error) {
 func (s *Service) depositRequest(w http.ResponseWriter, r *http.Request, id string, exp time.Time) {
 	var in struct {
 		Network string `json:"network"`
+		Listing string `json:"listing"`
 	}
 	if decode(r, &in) != nil {
 		failure(w, 400, "invalid_deposit_request")
@@ -184,7 +185,12 @@ func (s *Service) depositRequest(w http.ResponseWriter, r *http.Request, id stri
 		failure(w, 400, "deposit_not_offered")
 		return
 	}
-	it, ok := s.intentFor(id, o, exp)
+	price, listing, code := s.priceFor(o, in.Network, in.Listing, id)
+	if code != "" {
+		failure(w, 409, code)
+		return
+	}
+	it, ok := s.intentFor(id, o, price, listing.ID, exp)
 	if !ok {
 		failure(w, 503, "deposit_capacity")
 		return
@@ -195,12 +201,13 @@ func (s *Service) depositRequest(w http.ResponseWriter, r *http.Request, id stri
 		failure(w, 503, "qr_unavailable")
 		return
 	}
-	reply(w, 200, map[string]any{"network": in.Network, "address": o.Requirements.PayTo, "amount": it.Amount, "amount_display": shown(in.Network, it.Amount), "price": o.Requirements.Amount, "tag": it.Tag, "memo": it.Memo, "qr_content": content, "qr": qr, "lookback_seconds": int(depositLookback / time.Second)})
+	reply(w, 200, map[string]any{"network": in.Network, "address": o.Requirements.PayTo, "amount": it.Amount, "amount_display": shown(in.Network, it.Amount), "price": price, "listing": listing.ID, "tag": it.Tag, "memo": it.Memo, "qr_content": content, "qr": qr, "lookback_seconds": int(depositLookback / time.Second)})
 }
 
 func (s *Service) depositCheck(w http.ResponseWriter, r *http.Request, id string, exp time.Time) {
 	var in struct {
 		Network string `json:"network"`
+		Listing string `json:"listing"`
 	}
 	if decode(r, &in) != nil {
 		failure(w, 400, "invalid_deposit_request")
@@ -212,11 +219,22 @@ func (s *Service) depositCheck(w http.ResponseWriter, r *http.Request, id string
 		return
 	}
 	req := o.Requirements
-	if prior, exists := s.ledger.get(id); exists && prior.State == "settled" && s.now().Before(prior.Expires) {
+	price, listing, code := s.priceFor(o, in.Network, in.Listing, id)
+	if code == "listing_already_sold" {
+		if sale, mine := s.ledger.fingerprint(s.soldFingerprint(listing.ID)); mine && sale.Session == id {
+			s.receipt(w, sale)
+			return
+		}
+	}
+	if code != "" {
+		failure(w, 409, code)
+		return
+	}
+	if prior, exists := s.ledger.get(id); listing.ID == "" && exists && prior.State == "settled" && s.now().Before(prior.Expires) {
 		s.receipt(w, prior)
 		return
 	}
-	it, ok := s.intentFor(id, o, exp)
+	it, ok := s.intentFor(id, o, price, listing.ID, exp)
 	if !ok {
 		failure(w, 503, "deposit_capacity")
 		return
@@ -243,7 +261,7 @@ func (s *Service) depositCheck(w http.ResponseWriter, r *http.Request, id string
 			Payer       string `json:"payer"`
 		} `json:"deposits"`
 	}
-	err := s.gatewayCall(r.Context(), callTimeout, "/deposit/check", map[string]any{"network": in.Network, "address": req.PayTo, "price": req.Amount, "amount": it.Amount, "tag": it.Tag, "memo": it.Memo, "since": now.Add(-depositLookback).Unix()}, &out)
+	err := s.gatewayCall(r.Context(), callTimeout, "/deposit/check", map[string]any{"network": in.Network, "address": req.PayTo, "price": price, "amount": it.Amount, "tag": it.Tag, "memo": it.Memo, "since": now.Add(-depositLookback).Unix()}, &out)
 	if err != nil {
 		failure(w, 503, "deposit_check_unavailable")
 		return
@@ -267,12 +285,66 @@ func (s *Service) depositCheck(w http.ResponseWriter, r *http.Request, id string
 		}
 		settled := Settlement{Success: true, Transaction: d.Transaction, Network: in.Network, Payer: d.Payer}
 		x := Receipt{Session: id, Fingerprint: fp, State: "settled", Kind: "deposit", Network: in.Network, Payer: d.Payer, Requirements: req, Transaction: d.Transaction, PolicyID: policy, Started: now, Settled: now, Expires: now.Add(time.Duration(s.cfg.PassSeconds) * time.Second), Response: &settled}
+		conflict := false
+		if listing.ID != "" {
+			// The first payment seen for a listing takes it; a later one keeps
+			// its pass and is flagged for the merchant to make right.
+			x.Listing = listing.ID
+			x.Requirements.Amount = price
+			s.mu.Lock()
+			if other, taken := s.sold[listing.ID]; taken && other != fp {
+				x.Kind, conflict = "nft_sale_conflict", true
+			} else {
+				x.Kind = "nft_sale"
+				s.sold[listing.ID] = fp
+			}
+			s.mu.Unlock()
+		}
 		if err = s.ledger.write(x); err != nil {
+			if x.Kind == "nft_sale" {
+				s.mu.Lock()
+				delete(s.sold, listing.ID)
+				s.mu.Unlock()
+			}
 			failure(w, 503, "receipt_not_saved_contact_merchant")
 			return
+		}
+		if conflict {
+			w.Header().Set("Concert-Listing-Conflict", "1")
 		}
 		s.receipt(w, x)
 		return
 	}
 	reply(w, 200, map[string]any{"eligible": false, "waiting": true})
+}
+
+// priceFor resolves what a visitor is paying: the offer's price, or a
+// listing's. It returns a refusal code when the listing is unknown or sold.
+func (s *Service) priceFor(o Offer, network, listingID, session string) (string, Listing, string) {
+	if listingID == "" {
+		return o.Requirements.Amount, Listing{}, ""
+	}
+	for _, l := range s.cfg.Listings {
+		if l.ID != listingID {
+			continue
+		}
+		if l.Network != network {
+			return "", l, "listing_network_mismatch"
+		}
+		s.mu.Lock()
+		_, sold := s.sold[l.ID]
+		s.mu.Unlock()
+		if sold {
+			return l.Price, l, "listing_already_sold"
+		}
+		return l.Price, l, ""
+	}
+	return "", Listing{}, "unknown_listing"
+}
+
+// soldFingerprint is the receipt fingerprint of the payment that bought a listing.
+func (s *Service) soldFingerprint(listing string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sold[listing]
 }

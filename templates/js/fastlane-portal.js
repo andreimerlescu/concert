@@ -1,6 +1,7 @@
 'use strict';
 (()=>{
     const $=id=>document.getElementById(id);if(!$('fastlane-state'))return;
+    const csrf=(document.querySelector('meta[name="csrf-token"]')||{getAttribute:()=>''}).getAttribute('content');
     const el=(tag,text,cls)=>{const x=document.createElement(tag);if(text!==undefined)x.textContent=text;if(cls)x.className=cls;return x;};
     async function load(){
         try{const r=await fetch('/api/fastlane',{credentials:'same-origin',signal:AbortSignal.timeout(8000)});if(!r.ok)throw Error('Sign in again to view fast-lane configuration.');const d=await r.json();$('fastlane-stats').replaceChildren();$('fastlane-offers').replaceChildren();$('fastlane-collections').replaceChildren();
@@ -8,11 +9,14 @@
             $('fastlane-state').textContent=(d.test_mode?'TEST MODE · Test networks only. ':'LIVE CONFIGURATION · ')+(d.healthy?'Receipt journal healthy.':'Receipt journal needs attention; admission suspended.')+' Merchant: '+d.merchant;
             for(const [name,value] of [['Settled sessions',d.states.settled],['Needs reconciliation',d.states.pending+d.states.unknown],['Paid pass',d.pass_seconds+'s'],['NFT lease',d.nft_pass_seconds+'s']]){const col=el('div',undefined,'col-sm-6 col-xl-3'),card=el('div',undefined,'card stat-card'),body=el('div',undefined,'card-body');body.append(el('div',name,'small text-body-secondary'),el('div',String(value),'stat-value'));card.append(body);col.append(card);$('fastlane-stats').append(col);}
             for(const o of d.offers){const c=el('article',undefined,'fastlane-rule');c.append(el('h4',o.label),el('small',o.requirements.network+' · '+o.requirements.scheme),el('code',o.requirements.amount+' atomic units · '+o.requirements.asset),el('small','Recipient'),el('code',o.requirements.payTo));$('fastlane-offers').append(c);}
+            {const rows=$('fastlane-sales');rows.replaceChildren();$('fastlane-sales-section').hidden=!(d.sales&&d.sales.length);
+                for(const x of d.sales||[]){const tr=el('tr');tr.append(el('td',new Date(x.when).toLocaleString()),el('td',x.name+' · '+x.token_id+(x.conflict?' · CONFLICT':'')),el('td',x.network),el('td',x.buyer),el('td',x.paid_display));const td=el('td');
+                    if(x.delivered)td.textContent='Delivered '+new Date(x.delivered).toLocaleString();else{const b=el('button','Mark delivered','btn btn-sm btn-outline-success');b.type='button';b.addEventListener('click',async()=>{b.disabled=true;const r=await fetch('/api/fastlane/sales/delivered',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({fingerprint:x.fingerprint})});if(r.ok)load();else b.disabled=false;});td.append(b);}
+                    tr.append(td);rows.append(tr);}}
             for(const o of d.collections){const c=el('article',undefined,'fastlane-rule');c.append(el('h4',o.label),el('small',o.network+' · rule '+o.id),el('code',o.collection));$('fastlane-collections').append(c);}
         }catch(e){$('fastlane-state').textContent=e.message;}
     }
     // Settings editor: the two JSON files, checked and applied without a restart.
-    const csrf=(document.querySelector('meta[name="csrf-token"]')||{getAttribute:()=>''}).getAttribute('content');
     const msg=(t,ok)=>{const m=$('fastlane-editor-msg');m.textContent=t;m.className='small '+(ok===undefined?'':ok?'text-success':'text-danger');};
     async function loadEditor(){
         try{const r=await fetch('/api/fastlane/config',{credentials:'same-origin'});if(!r.ok)throw Error('Sign in again to edit settings.');const d=await r.json();

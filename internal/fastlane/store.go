@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
@@ -27,6 +28,8 @@ type Receipt struct {
 	Settled      time.Time    `json:"settled,omitempty"`
 	Expires      time.Time    `json:"expires,omitempty"`
 	Response     *Settlement  `json:"response,omitempty"`
+	Listing      string       `json:"listing,omitempty"`   // NFT listing bought, for Kind "nft_sale"
+	Delivered    *time.Time   `json:"delivered,omitempty"` // when the merchant delivered the NFT
 }
 
 type ledger struct {
@@ -198,4 +201,20 @@ func (l *ledger) fingerprint(fp string) (Receipt, bool) {
 	defer l.mu.Unlock()
 	r, ok := l.receipts[fp]
 	return r, ok
+}
+
+// withKind returns the receipts of the given kinds, oldest first.
+func (l *ledger) withKind(kinds ...string) []Receipt {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []Receipt
+	for _, r := range l.receipts {
+		for _, k := range kinds {
+			if r.Kind == k {
+				out = append(out, r)
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Started.Before(out[j].Started) })
+	return out
 }

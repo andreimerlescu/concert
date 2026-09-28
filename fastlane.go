@@ -47,7 +47,7 @@ func registerConcertRoutes(r *gin.Engine, g *generation) {
 			if strings.HasSuffix(file, ".js") {
 				ct = "text/javascript; charset=utf-8"
 			}
-			c.Header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+			c.Header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data: https:; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 			c.Header("Cache-Control", "no-store")
 			c.Header("X-Content-Type-Options", "nosniff")
 			c.Header("Referrer-Policy", "no-referrer")

@@ -166,6 +166,19 @@ Values are derived from the session, so they survive a restart and need no stora
 
 The page also lists the enabled NFT collections and payment options while a visitor waits. If wallet requests are refused with `origin_rejected` (the page was opened from an address other than `origin`), the page says so and links to the configured address.
 
+## Selling NFTs from the access page
+
+`listings` in `fastlane.json` puts specific NFTs on sale:
+
+```json
+{"id": "founder-1", "name": "Founder #1", "description": "Signed by the artist", "image_url": "https://example.com/1.png",
+ "network": "xrpl:1", "token_id": "000800AB…", "price": "5000000", "collection": "xrpl-founders"}
+```
+
+`price` is atomic units of the network's coin. `image_url` must be HTTPS. `collection` optionally names one of the `collections` rules. The network needs a payment offer that takes transfers (any offer except an XLM offer paid to a `C…` contract), because that is how the buyer pays: the same exact-amount transfer as a pass, to that offer's `payTo`. The first payment Concert sees for a listing buys it, grants the buyer a pass of `pass_seconds`, and marks the listing sold (remembered across restarts). A second payment for an already-sold listing still gets its pass but is flagged **conflict** for the merchant to refund or replace.
+
+Concert never holds NFT keys, so it cannot move the NFT. The portal's Fast lane tab lists each sale with the buyer's address (the account that paid), and you send the NFT there and press **Mark delivered**. Hedera buyers must associate the token first; Solana and XRPL buyers must be able to receive it. An NFT holder can later prove ownership with the ordinary collection flow.
+
 ## Collection identifiers and wallet proof
 
 Use the `collections` array in the fast-lane JSON. Each entry needs a unique local `id`, a display `label`, the exact `network`, and its chain-specific `collection`. No collection display name, URL or ticker is treated as proof.

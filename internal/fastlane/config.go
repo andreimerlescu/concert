@@ -55,6 +55,22 @@ type Collection struct {
 	Collection string `json:"collection"`
 }
 
+// Listing is one NFT the merchant sells from the access page. The buyer pays
+// Price in the network's native coin to the network's offer address, using the
+// same tracked transfer as a pass; the payment also grants a pass. Concert
+// never holds the merchant's NFT keys, so delivery to the paying address is
+// the merchant's to do, from the portal's list of sales.
+type Listing struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	ImageURL    string `json:"image_url,omitempty"`
+	Network     string `json:"network"`
+	Token       string `json:"token_id"`
+	Price       string `json:"price"`
+	Collection  string `json:"collection,omitempty"` // a collection rule id, for display
+}
+
 type Config struct {
 	Enabled        bool         `json:"enabled"`
 	Origin         string       `json:"origin"`
@@ -70,6 +86,7 @@ type Config struct {
 	RefundURL      string       `json:"refund_url"`
 	Offers         []Offer      `json:"offers"`
 	Collections    []Collection `json:"collections"`
+	Listings       []Listing    `json:"listings,omitempty"`
 }
 
 func Load(path string) (Config, error) {
@@ -250,6 +267,48 @@ func (c *Config) Validate() error {
 		}
 		if !ok {
 			return fmt.Errorf("invalid collection identifier for %s", r.Network)
+		}
+	}
+	return c.validateListings()
+}
+
+var listingID = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+
+func (c *Config) validateListings() error {
+	if len(c.Listings) > 64 {
+		return errors.New("configure at most 64 NFT listings")
+	}
+	rules := map[string]bool{}
+	for _, r := range c.Collections {
+		rules[r.ID] = true
+	}
+	seen := map[string]bool{}
+	for _, l := range c.Listings {
+		if !listingID.MatchString(l.ID) || seen[l.ID] {
+			return errors.New("listing ids must be unique lowercase slugs (letters, digits, - and _)")
+		}
+		seen[l.ID] = true
+		if strings.TrimSpace(l.Name) == "" || len(l.Name) > 120 || len(l.Description) > 500 || strings.TrimSpace(l.Token) == "" || len(l.Token) > 128 {
+			return fmt.Errorf("listing %s needs a name (up to 120 characters) and a token_id", l.ID)
+		}
+		if l.ImageURL != "" && !validURL(l.ImageURL, false) {
+			return fmt.Errorf("listing %s: image_url must be an HTTPS URL", l.ID)
+		}
+		if l.Collection != "" && !rules[l.Collection] {
+			return fmt.Errorf("listing %s names an unknown collection rule %q", l.ID, l.Collection)
+		}
+		if !atomicAmount.MatchString(l.Price) {
+			return fmt.Errorf("listing %s: price must be a positive integer string in atomic units", l.ID)
+		}
+		if n, _ := new(big.Int).SetString(l.Price, 10); !n.IsInt64() {
+			return fmt.Errorf("listing %s: price is too large", l.ID)
+		}
+		ok := false
+		for _, o := range c.Offers {
+			ok = ok || (o.Requirements.Network == l.Network && DepositEnabled(o))
+		}
+		if !ok {
+			return fmt.Errorf("listing %s: %s has no payment offer that takes transfers, so buyers could not pay for it", l.ID, l.Network)
 		}
 	}
 	return nil

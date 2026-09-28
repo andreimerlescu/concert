@@ -256,3 +256,23 @@ func (p *portal) apiFastlaneConfigSave(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true, "applied": true, "running": p.a.lane.Load() != nil})
 }
+
+func (p *portal) apiFastlaneDelivered(c *gin.Context) {
+	var in struct {
+		Fingerprint string `json:"fingerprint"`
+	}
+	lane := p.a.lane.Load()
+	if lane == nil {
+		jsonError(c, http.StatusConflict, "wallet access is off")
+		return
+	}
+	if err := json.NewDecoder(io.LimitReader(c.Request.Body, 4<<10)).Decode(&in); err != nil || in.Fingerprint == "" {
+		jsonError(c, http.StatusBadRequest, "send the sale's fingerprint")
+		return
+	}
+	if err := lane.MarkDelivered(in.Fingerprint); err != nil {
+		jsonError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}

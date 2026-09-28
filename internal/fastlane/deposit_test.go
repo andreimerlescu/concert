@@ -3,6 +3,7 @@ package fastlane
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync"
@@ -119,5 +120,65 @@ func TestDepositRequiresSessionAndOffer(t *testing.T) {
 	}
 	if got := h.s.PublicConfig()["deposit_networks"].([]string); len(got) != 1 || got[0] != "xrpl:1" {
 		t.Errorf("deposit_networks: %v", got)
+	}
+}
+
+func shopHarness(t *testing.T) (*harness, *sync.Mutex, *[]map[string]string) {
+	t.Helper()
+	h, mu, paid, _ := depositHarness(t)
+	h.s.Close()
+	h.cfg.Listings = []Listing{{ID: "founder-1", Name: "Founder #1", Network: "xrpl:1", Token: "000800AB", Price: "5000", Collection: "club"}}
+	if err := h.cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	h.open(t)
+	return h, mu, paid
+}
+
+func buy(h *harness, session, listing string) (*httptest.ResponseRecorder, string) {
+	w := request(h.s, "/deposit", session, `{"network":"xrpl:1","listing":"`+listing+`"}`, "")
+	var d struct {
+		Amount string `json:"amount"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &d)
+	return w, d.Amount
+}
+
+func TestNFTSaleGrantsPassSellsOnceAndFlagsConflicts(t *testing.T) {
+	h, mu, paid := shopHarness(t)
+	a, b := newSession(t, h.s), newSession(t, h.s)
+	w, amount := buy(h, a, "founder-1")
+	if w.Code != 200 || amount <= "5000" {
+		t.Fatalf("intent: %d %s", w.Code, w.Body.String())
+	}
+	if w, _ := buy(h, a, "nope"); w.Code != 409 {
+		t.Errorf("unknown listing: %d", w.Code)
+	}
+	mu.Lock()
+	*paid = []map[string]string{{"transaction": "SALE1", "payer": "rBuyer", "amount": amount}}
+	mu.Unlock()
+	h.now = h.now.Add(10 * time.Second)
+	w = request(h.s, "/deposit/check", a, `{"network":"xrpl:1","listing":"founder-1"}`, "")
+	if w.Code != 200 || !eligible(h.s, a) {
+		t.Fatalf("sale must grant a pass: %d %s", w.Code, w.Body.String())
+	}
+	if shop := h.s.Shop(); shop[0]["sold"] != true {
+		t.Error("listing must be sold")
+	}
+	if w, _ := buy(h, b, "founder-1"); w.Code != 409 || !strings.Contains(w.Body.String(), "listing_already_sold") {
+		t.Errorf("a sold listing cannot be bought again: %d %s", w.Code, w.Body.String())
+	}
+	sales := h.s.Sales()
+	if len(sales) != 1 || sales[0]["buyer"] != "rBuyer" || sales[0]["token_id"] != "000800AB" || sales[0]["delivered"] != (*time.Time)(nil) {
+		t.Fatalf("sales: %v", sales)
+	}
+	if err := h.s.MarkDelivered(sales[0]["fingerprint"].(string)); err != nil || h.s.Sales()[0]["delivered"] == (*time.Time)(nil) {
+		t.Errorf("mark delivered: %v", err)
+	}
+	// A restart remembers the sale.
+	h.s.Close()
+	h.open(t)
+	if h.s.Shop()[0]["sold"] != true {
+		t.Error("a restart must remember that the listing sold")
 	}
 }

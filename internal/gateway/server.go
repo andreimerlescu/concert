@@ -337,6 +337,11 @@ func (s *Server) deposit(ctx context.Context, body []byte) (any, error) {
 	for _, o := range s.cfg.Offers {
 		r := o.Requirements
 		configured = configured || (r.Network == in.Network && r.PayTo == in.Address && r.Amount == in.Price)
+		if r.Network == in.Network && r.PayTo == in.Address {
+			for _, l := range s.cfg.Listings {
+				configured = configured || (l.Network == in.Network && l.Price == in.Price)
+			}
+		}
 	}
 	c := s.chains[in.Network]
 	if !configured || c == nil || c.recv == nil {

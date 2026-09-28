@@ -40,12 +40,12 @@
     }
     // Tagged deposits: the page shows a QR code for a payment to the merchant's
     // address carrying this session's destination tag, then watches for it.
-    let depositTimer=null,deposit=null,chosen='';
+    let depositTimer=null,deposit=null,chosen='',listing='',shop=[];
     const chainOf=n=>n.split(':')[0];
     function stopWatching(){clearTimeout(depositTimer);depositTimer=null;}
     async function watchDeposit(){
         stopWatching();if(!deposit||hasAccess)return;
-        try{const {r,data}=await send('/deposit/check',{network:deposit.network});
+        try{const {r,data}=await send('/deposit/check',{network:deposit.network,listing});
             if(r.ok&&data.eligible){$('deposit-status').textContent='Payment received. You are in.';await status();return;}
             if(!r.ok&&data.error==='origin_rejected'){originRejected();return;}
             $('deposit-status').textContent=r.ok?'Watching the network for your payment… this page updates by itself.':'Could not check the network just now ('+String(data.error||r.status).replaceAll('_',' ')+'). Retrying.';
@@ -59,20 +59,34 @@
     // A tab picks the chain: its offer, its payment details and (when the
     // offer takes a signed x402 payment) the wallet card.
     function selectChain(f){
-        chosen=f;stopWatching();deposit=null;$('deposit-details').hidden=true;
+        chosen=f;listing='';stopWatching();deposit=null;$('deposit-details').hidden=true;
         for(const t of document.querySelectorAll('.chain-tab'))t.setAttribute('aria-selected',String(t.dataset.chain===f));
         const i=config.offers.findIndex(o=>chainOf(o.requirements.network)===f),o=config.offers[i];
         if(i>=0){$('offer').value=String(i);price();}
         const canDeposit=!!o&&(config.deposit_networks||[]).includes(o.requirements.network);
         $('deposit-start').hidden=!canDeposit;$('deposit-unavailable').hidden=canDeposit;
-        $('deposit-title').textContent=o?'Send '+tickers[f]+', skip ahead':'Not offered';
+        $('deposit-title').textContent=o?'Send '+tickers[f]+', skip ahead':'Not offered';$('deposit-eyebrow').textContent='01 / SCAN & SEND';
         $('wallet-card').hidden=!o||!!o.deposit_only;
         availability();
     }
     for(const t of document.querySelectorAll('.chain-tab'))t.addEventListener('click',()=>selectChain(t.dataset.chain));
+    async function loadShop(){
+        try{const r=await fetch('/_concert/shop',{credentials:'same-origin',cache:'no-store'});shop=(await r.json()).listings||[];}catch{return;}
+        const grid=$('shop-grid');grid.replaceChildren();$('shop').hidden=!shop.length;
+        for(const l of shop){
+            const card=document.createElement('article');card.className='nft-card'+(l.sold?' nft-sold':'');
+            if(l.image_url){const img=document.createElement('img');img.src=l.image_url;img.alt=l.name;img.loading='lazy';img.referrerPolicy='no-referrer';card.append(img);}else{const a=document.createElement('div');a.className='nft-art';a.textContent='NFT';a.setAttribute('aria-hidden','true');card.append(a);}
+            const body=document.createElement('div');body.className='nft-body';
+            const h=document.createElement('h3');h.textContent=l.name;const p=document.createElement('p');p.textContent=l.description||l.network.split(':')[0].toUpperCase()+' · '+l.token_id;
+            const price=document.createElement('div');price.className='nft-price';price.textContent=l.price_display+' '+tickers[chainOf(l.network)];
+            const b=document.createElement('button');b.className='button button-primary';b.type='button';b.textContent=l.sold?'Sold':'Buy & get a pass ↗';b.disabled=l.sold;
+            b.addEventListener('click',()=>{selectChain(chainOf(l.network));listing=l.id;$('deposit-title').textContent='Buy '+l.name;$('deposit-eyebrow').textContent='BUYING AN NFT';$('deposit-card').scrollIntoView({behavior:'smooth',block:'center'});say('Show the payment details, then send the exact amount. The NFT goes to the address you pay from.');});
+            body.append(h,p,price,b);card.append(body);grid.append(card);
+        }
+    }
     $('deposit-start').addEventListener('click',()=>run(async()=>{
         const o=config.offers.find(x=>chainOf(x.requirements.network)===chosen);
-        const d=await post('/deposit',{network:o.requirements.network});
+        const d=await post('/deposit',{network:o.requirements.network,listing});
         deposit=d;$('deposit-qr').src=d.qr;$('deposit-amount').textContent=d.amount_display+' '+tickers[chosen];$('deposit-amount').dataset.plain=d.amount_display;$('deposit-address').textContent=d.address;
         const xrp=chosen==='xrpl';$('deposit-ref-label').textContent=xrp?'Destination tag':'Memo';$('deposit-ref').textContent=xrp?String(d.tag):d.memo;
         $('deposit-warning').textContent='Send exactly '+d.amount_display+' '+tickers[chosen]+'. The last digits of the amount are how we know the payment is yours'+(xrp?', and the destination tag is required by some wallets and exchanges':', and the memo helps if your wallet supports one')+'. A different amount cannot be matched and is not refunded automatically.';
@@ -142,5 +156,5 @@
     window.addEventListener('pagehide',()=>clearInterval(heartbeat));
     run(async()=>{const {data}=await call('/config');if(!data.enabled)throw Error('Wallet access is not enabled. The standard queue remains available.');config=data;renderInfo();const s=await post('/session',{});csrf=s.csrf;session=s.session;$('access-options').hidden=false;for(const t of document.querySelectorAll('.chain-tab'))t.disabled=!data.offers.some(o=>chainOf(o.requirements.network)===t.dataset.chain);$('mode-label').textContent=data.test_mode?'TEST NETWORKS · NO MAINNET PAYMENTS':'WALLET ACCESS';if(data.test_mode)$('mode-label').classList.add('badge-test');$('merchant').textContent='Operated by '+data.merchant;$('pass-description').textContent=data.pass_seconds+' seconds of priority eligibility after settlement. This does not reserve a slot or guarantee service availability.';$('nft-description').textContent='Prove ownership with a signed message. No payment or NFT transfer. Access lasts '+data.nft_pass_seconds+' seconds.';for(const [id,url] of [['terms-link',data.terms_url],['refund-link',data.refund_url],['privacy-link',data.privacy_url],['policy-link',data.refund_url]])$(id).href=url;for(const [id,items] of [['offer',data.offers],['collection',data.collections]])items.forEach((x,i)=>{const el=document.createElement('option');el.value=i;el.textContent=x.label;$(id).append(el);});
         const saved=sessionStorage.getItem('concert.pending-payment');if(saved){pending=JSON.parse(saved);$('payment-payload').value=pending.header;$('retry-payment').hidden=false;const p=JSON.parse(atob(pending.header));const index=config.offers.findIndex(o=>o.requirements.network===p.accepted?.network);if(index>=0)$('offer').value=index;}
-        const first=[...document.querySelectorAll('.chain-tab')].find(t=>!t.disabled);if(first)selectChain(first.dataset.chain);else $('access-options').hidden=false;await status();});
+        const first=[...document.querySelectorAll('.chain-tab')].find(t=>!t.disabled);if(first)selectChain(first.dataset.chain);else $('access-options').hidden=false;await loadShop();await status();});
 })();

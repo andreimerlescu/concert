@@ -105,6 +105,7 @@ type Service struct {
 	nfts         map[string]nftLease
 	limits       map[string]*rateWindow
 	tags         map[string]depositTag
+	sold         map[string]string // listing id -> fingerprint of the payment that bought it
 	depositPolls map[string]time.Time
 	work         chan struct{}
 	now          func() time.Time
@@ -134,7 +135,10 @@ func New(c Config, dir string, key []byte, gw Gateway, policyToken string) (*Ser
 		// Every call sets its own deadline: settlement may legitimately outlast
 		// an ordinary verification request.
 		http:   &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
-		active: map[string]bool{}, challenges: map[string]challenge{}, nfts: map[string]nftLease{}, limits: map[string]*rateWindow{}, tags: map[string]depositTag{}, depositPolls: map[string]time.Time{}, work: make(chan struct{}, 32), now: time.Now}
+		active: map[string]bool{}, challenges: map[string]challenge{}, nfts: map[string]nftLease{}, limits: map[string]*rateWindow{}, tags: map[string]depositTag{}, sold: map[string]string{}, depositPolls: map[string]time.Time{}, work: make(chan struct{}, 32), now: time.Now}
+	for _, r := range l.withKind("nft_sale") {
+		s.sold[r.Listing] = r.Fingerprint
+	}
 	var capabilities struct {
 		Kinds []struct {
 			Version int    `json:"x402Version"`
@@ -165,6 +169,45 @@ func New(c Config, dir string, key []byte, gw Gateway, policyToken string) (*Ser
 }
 func (s *Service) Close()         { s.ledger.close(); s.http.CloseIdleConnections() }
 func (s *Service) Config() Config { return s.cfg }
+
+// Shop lists the NFTs for sale with whether each is still available.
+func (s *Service) Shop() []map[string]any {
+	out := []map[string]any{}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, l := range s.cfg.Listings {
+		_, sold := s.sold[l.ID]
+		out = append(out, map[string]any{"id": l.ID, "name": l.Name, "description": l.Description, "image_url": l.ImageURL, "network": l.Network, "token_id": l.Token, "collection": l.Collection, "price": l.Price, "price_display": shown(l.Network, l.Price), "sold": sold})
+	}
+	return out
+}
+
+// Sales lists NFT purchases for the merchant to deliver, newest first.
+func (s *Service) Sales() []map[string]any {
+	names := map[string]Listing{}
+	for _, l := range s.cfg.Listings {
+		names[l.ID] = l
+	}
+	out := []map[string]any{}
+	rs := s.ledger.withKind("nft_sale", "nft_sale_conflict")
+	for i := len(rs) - 1; i >= 0; i-- {
+		r := rs[i]
+		l := names[r.Listing]
+		out = append(out, map[string]any{"fingerprint": r.Fingerprint, "listing": r.Listing, "name": l.Name, "token_id": l.Token, "network": r.Network, "buyer": r.Payer, "transaction": r.Transaction, "paid": r.Requirements.Amount, "paid_display": shown(r.Network, r.Requirements.Amount), "when": r.Settled, "conflict": r.Kind == "nft_sale_conflict", "delivered": r.Delivered})
+	}
+	return out
+}
+
+// MarkDelivered records that the merchant sent the NFT for a sale.
+func (s *Service) MarkDelivered(fingerprint string) error {
+	r, ok := s.ledger.fingerprint(fingerprint)
+	if !ok || (r.Kind != "nft_sale" && r.Kind != "nft_sale_conflict") {
+		return errors.New("unknown sale")
+	}
+	now := s.now()
+	r.Delivered = &now
+	return s.ledger.write(r)
+}
 func (s *Service) Summary() map[string]any {
 	v := s.ledger.summary()
 	v["enabled"] = true
@@ -174,6 +217,8 @@ func (s *Service) Summary() map[string]any {
 	v["collections"] = s.cfg.Collections
 	v["pass_seconds"] = s.cfg.PassSeconds
 	v["nft_pass_seconds"] = s.cfg.NFTPassSeconds
+	v["listings"] = s.cfg.Listings
+	v["sales"] = s.Sales()
 	return v
 }
 
@@ -401,6 +446,10 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, Prefix)
 	if r.Method == http.MethodGet && path == "/config" {
 		reply(w, 200, s.PublicConfig())
+		return
+	}
+	if r.Method == http.MethodGet && path == "/shop" {
+		reply(w, 200, map[string]any{"listings": s.Shop()})
 		return
 	}
 	if r.Method == http.MethodGet && path == "/status" {
