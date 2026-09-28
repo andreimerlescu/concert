@@ -3,9 +3,12 @@ package fastlane
 import (
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
+	"math/big"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	qrcode "github.com/skip2/go-qrcode"
@@ -34,11 +37,27 @@ type depositTag struct {
 	expires time.Time
 }
 
-// DepositEnabled reports whether the offer accepts tagged deposits.
+// intent is what one visitor must send: their unique amount, and a reference
+// (an XRPL destination tag, or a memo elsewhere) that also identifies them.
+type intent struct {
+	Amount string
+	Tag    uint32
+	Memo   string
+}
+
+// DepositEnabled reports whether the offer can be paid by a plain transfer.
 func DepositEnabled(o Offer) bool {
 	r := o.Requirements
-	_, fixed := r.Extra["destinationTag"]
-	return chain(r.Network) == "xrpl" && !fixed
+	if _, fixed := r.Extra["destinationTag"]; fixed {
+		return false
+	}
+	switch chain(r.Network) {
+	case "xrpl", "hedera", "solana":
+		return true
+	case "stellar":
+		return len(r.PayTo) > 0 && r.PayTo[0] == 'G'
+	}
+	return false
 }
 
 func (s *Service) depositOffer(network string) (Offer, bool) {
@@ -50,48 +69,98 @@ func (s *Service) depositOffer(network string) (Offer, bool) {
 	return Offer{}, false
 }
 
-// tagFor returns the session's destination tag: derived from the session and
-// network, so it survives a restart and needs no storage. A tag another live
-// session already holds is skipped by counting up, which is what makes tags
-// unique among concurrent visitors.
-func (s *Service) tagFor(session, network string, exp time.Time) (uint32, bool) {
+func (s *Service) derive(parts ...string) uint32 {
+	raw, err := base64.RawURLEncoding.DecodeString(s.mac("deposit/" + strings.Join(parts, "/")))
+	if err != nil || len(raw) < 4 {
+		return 0
+	}
+	return binary.BigEndian.Uint32(raw[:4])
+}
+
+// intentFor returns the session's payment instructions for an offer. Every
+// value is derived from the session, so it survives a restart and needs no
+// storage; an amount or tag another live session holds is skipped by counting
+// up, which keeps them unique among concurrent visitors.
+func (s *Service) intentFor(session string, o Offer, exp time.Time) (intent, bool) {
 	now := s.now()
+	r := o.Requirements
+	price, _ := new(big.Int).SetString(r.Amount, 10)
+	dustMax := new(big.Int).Div(price, big.NewInt(20))
+	if dustMax.Cmp(big.NewInt(99)) < 0 {
+		dustMax.SetInt64(99)
+	}
+	if dustMax.Cmp(big.NewInt(9999)) > 0 {
+		dustMax.SetInt64(9999)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.tags) >= maxDepositTags {
-		for t, v := range s.tags {
+		for k, v := range s.tags {
 			if !now.Before(v.expires) {
-				delete(s.tags, t)
+				delete(s.tags, k)
 			}
 		}
 		if len(s.tags) >= maxDepositTags {
-			return 0, false
+			return intent{}, false
 		}
 	}
-	for i := 0; i < 64; i++ {
-		sum := s.mac("deposit-tag/" + network + "/" + session + "/" + strconv.Itoa(i))
-		raw, err := base64.RawURLEncoding.DecodeString(sum)
-		if err != nil || len(raw) < 4 {
-			return 0, false
-		}
-		tag := binary.BigEndian.Uint32(raw[:4])
-		if tag == 0 {
-			continue
-		}
-		if held, ok := s.tags[tag]; ok && held.session != session && now.Before(held.expires) {
-			continue
-		}
-		s.tags[tag] = depositTag{session, exp}
-		return tag, true
+	free := func(key string) bool {
+		held, ok := s.tags[key]
+		return !ok || held.session == session || !now.Before(held.expires)
 	}
-	return 0, false
+	var out intent
+	found := false
+	for i := 0; i < 256 && !found; i++ {
+		dust := new(big.Int).Add(new(big.Int).Mod(new(big.Int).SetUint64(uint64(s.derive(r.Network, session, "dust", strconv.Itoa(i)))), dustMax), big.NewInt(1))
+		amount := new(big.Int).Add(price, dust).String()
+		if key := "amount/" + r.Network + "/" + amount; free(key) {
+			s.tags[key] = depositTag{session, exp}
+			out.Amount, found = amount, true
+		}
+	}
+	if !found {
+		return intent{}, false
+	}
+	if chain(r.Network) == "xrpl" {
+		for i := 0; i < 64 && out.Tag == 0; i++ {
+			tag := s.derive(r.Network, session, "tag", strconv.Itoa(i))
+			if key := "tag/" + r.Network + "/" + strconv.FormatUint(uint64(tag), 10); tag != 0 && free(key) {
+				s.tags[key] = depositTag{session, exp}
+				out.Tag = tag
+			}
+		}
+		if out.Tag == 0 {
+			return intent{}, false
+		}
+	} else {
+		out.Memo = "CT" + strings.ToUpper(hex.EncodeToString([]byte(s.mac("memo/" + r.Network + "/" + session))[:5]))
+	}
+	return out, true
 }
 
-// depositURI is the payment request a scanning wallet reads. Wallets differ in
-// how much of it they honor, so the page also prints the address and tag.
-func depositURI(r Requirements, tag uint32) string {
-	q := url.Values{"dt": {strconv.FormatUint(uint64(tag), 10)}, "amount": {r.Amount}}
-	return "xrpl:" + r.PayTo + "?" + q.Encode()
+// shown formats atomic units as a decimal amount for display.
+func shown(network, amount string) string {
+	d := map[string]int{"xrpl": 6, "stellar": 7, "hedera": 8, "solana": 9}[chain(network)]
+	n, _ := new(big.Int).SetString(amount, 10)
+	if n == nil {
+		return amount
+	}
+	s := n.String()
+	for len(s) <= d {
+		s = "0" + s
+	}
+	return s[:len(s)-d] + "." + s[len(s)-d:]
+}
+
+// qrContent is what the QR code holds: the receiving address at the least.
+// Solana has a standard payment-request URL that wallets read, so it carries
+// the amount and memo as well.
+func qrContent(r Requirements, in intent) string {
+	if chain(r.Network) == "solana" {
+		q := url.Values{"amount": {shown(r.Network, in.Amount)}, "memo": {in.Memo}}
+		return "solana:" + r.PayTo + "?" + q.Encode()
+	}
+	return r.PayTo
 }
 
 func qrDataURI(content string) (string, error) {
@@ -115,18 +184,18 @@ func (s *Service) depositRequest(w http.ResponseWriter, r *http.Request, id stri
 		failure(w, 400, "deposit_not_offered")
 		return
 	}
-	tag, ok := s.tagFor(id, in.Network, exp)
+	it, ok := s.intentFor(id, o, exp)
 	if !ok {
 		failure(w, 503, "deposit_capacity")
 		return
 	}
-	uri := depositURI(o.Requirements, tag)
-	qr, err := qrDataURI(uri)
+	content := qrContent(o.Requirements, it)
+	qr, err := qrDataURI(content)
 	if err != nil {
 		failure(w, 503, "qr_unavailable")
 		return
 	}
-	reply(w, 200, map[string]any{"network": in.Network, "address": o.Requirements.PayTo, "tag": tag, "amount": o.Requirements.Amount, "uri": uri, "qr": qr, "lookback_seconds": int(depositLookback / time.Second)})
+	reply(w, 200, map[string]any{"network": in.Network, "address": o.Requirements.PayTo, "amount": it.Amount, "amount_display": shown(in.Network, it.Amount), "price": o.Requirements.Amount, "tag": it.Tag, "memo": it.Memo, "qr_content": content, "qr": qr, "lookback_seconds": int(depositLookback / time.Second)})
 }
 
 func (s *Service) depositCheck(w http.ResponseWriter, r *http.Request, id string, exp time.Time) {
@@ -147,7 +216,7 @@ func (s *Service) depositCheck(w http.ResponseWriter, r *http.Request, id string
 		s.receipt(w, prior)
 		return
 	}
-	tag, ok := s.tagFor(id, in.Network, exp)
+	it, ok := s.intentFor(id, o, exp)
 	if !ok {
 		failure(w, 503, "deposit_capacity")
 		return
@@ -174,7 +243,7 @@ func (s *Service) depositCheck(w http.ResponseWriter, r *http.Request, id string
 			Payer       string `json:"payer"`
 		} `json:"deposits"`
 	}
-	err := s.gatewayCall(r.Context(), callTimeout, "/deposit/check", map[string]any{"network": in.Network, "address": req.PayTo, "tag": tag, "amount": req.Amount, "since": now.Add(-depositLookback).Unix()}, &out)
+	err := s.gatewayCall(r.Context(), callTimeout, "/deposit/check", map[string]any{"network": in.Network, "address": req.PayTo, "price": req.Amount, "amount": it.Amount, "tag": it.Tag, "memo": it.Memo, "since": now.Add(-depositLookback).Unix()}, &out)
 	if err != nil {
 		failure(w, 503, "deposit_check_unavailable")
 		return

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"math/big"
 	"strings"
 	"sync"
 	"time"
@@ -84,6 +85,9 @@ func (s *Server) Handle(ctx context.Context, op string, body []byte) (any, error
 func (s *Server) supported() any {
 	var kinds []map[string]any
 	for _, o := range s.cfg.Offers {
+		if o.DepositOnly {
+			continue
+		}
 		kinds = append(kinds, map[string]any{"x402Version": 2, "scheme": o.Requirements.Scheme, "network": o.Requirements.Network})
 	}
 	return map[string]any{"kinds": kinds, "extensions": []string{}, "signers": map[string]any{}}
@@ -113,7 +117,7 @@ func (s *Server) validate(body []byte) (paymentInput, mechanism, error) {
 	}
 	configured := false
 	for _, o := range s.cfg.Offers {
-		configured = configured || same(toX402(o.Requirements), r)
+		configured = configured || (!o.DepositOnly && same(toX402(o.Requirements), r))
 	}
 	if !configured {
 		return in, nil, errBadRequest
@@ -307,47 +311,61 @@ func (s *Server) prepare(ctx context.Context, body []byte) (any, error) {
 	return nil, errors.New("network not offered")
 }
 
-// depositInput asks whether a payment tagged for one visitor has arrived.
+// depositInput asks whether a payment meant for one visitor has arrived.
+// Amount is the visitor's own unique amount; Tag (XRPL) or Memo (others) is
+// their reference. Price is the offer's price, the least a referenced payment
+// must carry.
 type depositInput struct {
 	Network string `json:"network"`
 	Address string `json:"address"`
-	Tag     uint32 `json:"tag"`
+	Price   string `json:"price"`
 	Amount  string `json:"amount"`
+	Tag     uint32 `json:"tag"`
+	Memo    string `json:"memo"`
 	Since   int64  `json:"since"`
 }
 
-// deposit looks for a validated payment to a configured offer's receiving
-// account that carries the visitor's destination tag and at least the offer's
-// price. Only XRPL destination tags are matched; other networks are refused so
-// that nobody is told to send funds that could never be recognized.
+// deposit looks for a finalized payment to a configured offer's receiving
+// account that is the visitor's: exactly their unique amount, or their
+// reference with at least the price.
 func (s *Server) deposit(ctx context.Context, body []byte) (any, error) {
 	var in depositInput
-	if err := json.Unmarshal(body, &in); err != nil || in.Tag == 0 {
+	if err := json.Unmarshal(body, &in); err != nil || (in.Tag == 0 && in.Memo == "" && in.Amount == "") {
 		return nil, errBadRequest
 	}
 	configured := false
 	for _, o := range s.cfg.Offers {
 		r := o.Requirements
-		configured = configured || (r.Network == in.Network && r.PayTo == in.Address && r.Amount == in.Amount)
+		configured = configured || (r.Network == in.Network && r.PayTo == in.Address && r.Amount == in.Price)
 	}
 	c := s.chains[in.Network]
-	if !configured || c == nil || c.xrp == nil {
+	if !configured || c == nil || c.recv == nil {
 		return nil, errors.New("deposits are not offered on this network")
+	}
+	price, ok1 := new(big.Int).SetString(in.Price, 10)
+	exact, ok2 := new(big.Int).SetString(in.Amount, 10)
+	if !ok1 || !ok2 {
+		return nil, errBadRequest
 	}
 	since := time.Unix(in.Since, 0)
 	if min := time.Now().Add(-24 * time.Hour); since.Before(min) {
 		since = min
 	}
-	found, err := c.xrp.FindDeposits(ctx, in.Address, in.Tag, in.Amount, since)
-	if err != nil {
+	list, err := c.recv.RecentPayments(ctx, in.Address, since)
+	if err != nil && len(list) == 0 {
 		return nil, err
 	}
-	deposits := make([]map[string]string, 0, len(found))
-	for _, d := range found {
+	deposits := []map[string]string{}
+	for _, d := range list {
+		byAmount := d.Amount.Cmp(exact) == 0
+		byRef := d.Amount.Cmp(price) >= 0 && ((in.Tag != 0 && d.HasTag && d.Tag == in.Tag) || (in.Memo != "" && d.Memo == in.Memo))
+		if !byAmount && !byRef {
+			continue
+		}
+		deposits = append(deposits, map[string]string{"transaction": d.Hash, "payer": d.Payer, "amount": d.Amount.String()})
 		if len(deposits) == 10 {
 			break
 		}
-		deposits = append(deposits, map[string]string{"transaction": d.Hash, "payer": d.Payer, "amount": d.Drops.String()})
 	}
 	return map[string]any{"deposits": deposits, "network": in.Network}, nil
 }

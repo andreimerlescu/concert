@@ -39,6 +39,10 @@ type Requirements struct {
 type Offer struct {
 	Label        string       `json:"label"`
 	Requirements Requirements `json:"requirements"`
+	// DepositOnly sells the pass only for a plain payment to PayTo, matched by
+	// a per-visitor amount, tag or memo. No x402 authorization is accepted, so
+	// no scheme, asset or sponsor is needed.
+	DepositOnly bool `json:"deposit_only,omitempty"`
 }
 
 // Collection IDs are chain-specific, not names/symbols or metadata URLs.
@@ -168,6 +172,17 @@ func (c *Config) Validate() error {
 	seen := map[string]bool{}
 	for _, o := range c.Offers {
 		r := o.Requirements
+		if o.DepositOnly {
+			if err := validDepositOffer(c, o); err != nil {
+				return err
+			}
+			key := "deposit:" + r.Network
+			if seen[key] {
+				return errors.New("duplicate payment offer")
+			}
+			seen[key] = true
+			continue
+		}
 		if !supportedNetwork(r.Network) || (c.TestMode && !isTestNetwork(r.Network)) {
 			return fmt.Errorf("unsupported network or mainnet in test mode: %s", r.Network)
 		}
@@ -230,6 +245,36 @@ func (c *Config) Validate() error {
 		if !ok {
 			return fmt.Errorf("invalid collection identifier for %s", r.Network)
 		}
+	}
+	return nil
+}
+
+// validDepositOffer checks a deposit-only offer: a supported network, a price
+// and a receiving address in that chain's format. Nothing else applies.
+func validDepositOffer(c *Config, o Offer) error {
+	r := o.Requirements
+	if !supportedNetwork(r.Network) || (c.TestMode && !isTestNetwork(r.Network)) {
+		return fmt.Errorf("unsupported network or mainnet in test mode: %s", r.Network)
+	}
+	if !atomicAmount.MatchString(r.Amount) {
+		return errors.New("amount must be a positive integer string in atomic units")
+	}
+	if n, _ := new(big.Int).SetString(r.Amount, 10); !n.IsInt64() {
+		return errors.New("amount is too large")
+	}
+	ok := false
+	switch chain(r.Network) {
+	case "xrpl":
+		ok = xrplAddress.MatchString(r.PayTo)
+	case "stellar":
+		ok = stellarAccount.MatchString(r.PayTo) && r.PayTo[0] == 'G' // Horizon lists a classic account's payments only
+	case "hedera":
+		ok = entityID.MatchString(r.PayTo)
+	case "solana":
+		ok = solAddress.MatchString(r.PayTo)
+	}
+	if !ok {
+		return fmt.Errorf("invalid receiving address for %s", r.Network)
 	}
 	return nil
 }

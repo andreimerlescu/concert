@@ -3,6 +3,7 @@ package fastlane
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -35,7 +36,7 @@ func depositHarness(t *testing.T) (*harness, *sync.Mutex, *[]map[string]string, 
 	return h, &mu, &paid, &seen
 }
 
-func tagOf(t *testing.T, h *harness, session string) uint32 {
+func tagOf(t *testing.T, h *harness, session string) string {
 	t.Helper()
 	w := request(h.s, "/deposit", session, `{"network":"xrpl:1"}`, "")
 	if w.Code != 200 {
@@ -44,14 +45,15 @@ func tagOf(t *testing.T, h *harness, session string) uint32 {
 	var d struct {
 		Tag     uint32 `json:"tag"`
 		Address string `json:"address"`
-		URI     string `json:"uri"`
+		Amount  string `json:"amount"`
+		Content string `json:"qr_content"`
 		QR      string `json:"qr"`
 	}
 	_ = json.Unmarshal(w.Body.Bytes(), &d)
-	if d.Tag == 0 || d.Address != h.cfg.Offers[0].Requirements.PayTo || !strings.Contains(d.URI, "dt=") || !strings.HasPrefix(d.QR, "data:image/png;base64,") {
+	if d.Tag == 0 || d.Address != h.cfg.Offers[0].Requirements.PayTo || d.Content != d.Address || d.Amount <= "100" || !strings.HasPrefix(d.QR, "data:image/png;base64,") {
 		t.Fatalf("bad deposit response: %s", w.Body.String())
 	}
-	return d.Tag
+	return d.Amount + "/" + strconv.FormatUint(uint64(d.Tag), 10)
 }
 
 func TestDepositTagIsStablePerSessionAndUniqueAcrossSessions(t *testing.T) {
@@ -83,7 +85,7 @@ func TestDepositMatchGrantsPassOnceAndReplayFails(t *testing.T) {
 	if check()["eligible"] != false || eligible(h.s, s) {
 		t.Fatal("no payment yet: must not be eligible")
 	}
-	if uint32((*seen)["tag"].(float64)) != tag || (*seen)["amount"] != "100" {
+	if want := strings.Split(tag, "/"); (*seen)["amount"] != want[0] || (*seen)["price"] != "100" {
 		t.Errorf("gateway asked for the wrong tag or amount: %v", *seen)
 	}
 	mu.Lock()

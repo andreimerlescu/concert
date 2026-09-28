@@ -104,7 +104,7 @@ type Service struct {
 	challenges   map[string]challenge
 	nfts         map[string]nftLease
 	limits       map[string]*rateWindow
-	tags         map[uint32]depositTag
+	tags         map[string]depositTag
 	depositPolls map[string]time.Time
 	work         chan struct{}
 	now          func() time.Time
@@ -134,7 +134,7 @@ func New(c Config, dir string, key []byte, gw Gateway, policyToken string) (*Ser
 		// Every call sets its own deadline: settlement may legitimately outlast
 		// an ordinary verification request.
 		http:   &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
-		active: map[string]bool{}, challenges: map[string]challenge{}, nfts: map[string]nftLease{}, limits: map[string]*rateWindow{}, tags: map[uint32]depositTag{}, depositPolls: map[string]time.Time{}, work: make(chan struct{}, 32), now: time.Now}
+		active: map[string]bool{}, challenges: map[string]challenge{}, nfts: map[string]nftLease{}, limits: map[string]*rateWindow{}, tags: map[string]depositTag{}, depositPolls: map[string]time.Time{}, work: make(chan struct{}, 32), now: time.Now}
 	var capabilities struct {
 		Kinds []struct {
 			Version int    `json:"x402Version"`
@@ -147,6 +147,9 @@ func New(c Config, dir string, key []byte, gw Gateway, policyToken string) (*Ser
 		return nil, fmt.Errorf("gateway discovery: %w", err)
 	}
 	for _, o := range c.Offers {
+		if o.DepositOnly {
+			continue
+		}
 		found := false
 		for _, k := range capabilities.Kinds {
 			if k.Version == 2 && k.Scheme == o.Requirements.Scheme && k.Network == o.Requirements.Network {
@@ -569,6 +572,9 @@ func (s *Service) prepareSOL(w http.ResponseWriter, r *http.Request) {
 func (s *Service) required(w http.ResponseWriter) {
 	accepts := make([]Requirements, 0, len(s.cfg.Offers))
 	for _, o := range s.cfg.Offers {
+		if o.DepositOnly {
+			continue
+		}
 		accepts = append(accepts, o.Requirements)
 	}
 	if len(accepts) == 0 {
@@ -618,7 +624,7 @@ func (s *Service) payment(w http.ResponseWriter, r *http.Request, id string) {
 	var req Requirements
 	found := false
 	for _, o := range s.cfg.Offers {
-		if same(p.Accepted, o.Requirements) {
+		if !o.DepositOnly && same(p.Accepted, o.Requirements) {
 			req = o.Requirements
 			found = true
 			break

@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/andreimerlescu/concert/internal/chain/hedera"
+	"github.com/andreimerlescu/concert/internal/chain/inbound"
 	"github.com/andreimerlescu/concert/internal/chain/solana"
 	"github.com/andreimerlescu/concert/internal/chain/stellar"
 	"github.com/andreimerlescu/concert/internal/chain/xrpl"
@@ -42,7 +43,8 @@ type chain struct {
 	xrp    *xrpl.Scheme
 	xlm    *stellar.Scheme
 	hbar   *hedera.Scheme
-	pay    mechanism // the payment scheme, for networks with an offer
+	pay    mechanism      // the payment scheme, for networks with an offer
+	recv   inbound.Lister // lists payments received, for tagged deposits
 }
 
 func family(network string) string { f, _, _ := strings.Cut(network, ":"); return f }
@@ -118,6 +120,13 @@ func build(cfg fastlane.Config, networks map[string]Network, getenv func(string)
 		c, n, err := need(r.Network)
 		if err != nil {
 			return nil, err
+		}
+		c.recv = receiver(c.family, n)
+		if o.DepositOnly {
+			if c.recv == nil {
+				return nil, fmt.Errorf("%s: the endpoint needed to watch deposits is not set (rpc, horizon or mirror)", r.Network)
+			}
+			continue
 		}
 		maxFee, err := number(n.MaxFee)
 		if err != nil {
@@ -214,6 +223,22 @@ func build(cfg fastlane.Config, networks map[string]Network, getenv func(string)
 		}
 	}
 	return chains, nil
+}
+
+// receiver builds the payment lister for a network from its endpoints, or nil
+// when the endpoint it needs is missing.
+func receiver(family string, n Network) inbound.Lister {
+	switch {
+	case family == "xrpl" && n.RPC != "":
+		return xrpl.RPC{URL: n.RPC}
+	case family == "stellar" && n.Horizon != "":
+		return stellar.Horizon{URL: n.Horizon}
+	case family == "hedera" && n.Mirror != "":
+		return hedera.Mirror{URL: n.Mirror}
+	case family == "solana" && n.RPC != "":
+		return solana.RPC{URL: n.RPC}
+	}
+	return nil
 }
 
 func or(a, b string) string {

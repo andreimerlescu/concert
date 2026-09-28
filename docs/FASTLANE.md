@@ -143,16 +143,22 @@ One entry per network that an offer or collection uses, keyed by the same networ
 | `CONCERT_HEDERA_FEE_SECRET` | empty | The Hedera sponsor account's DER-encoded private key (hex starting `302e…` for Ed25519 or `3030…` for ECDSA), from the [Hedera portal](https://portal.hedera.com/) for testnet or your wallet's key export. Needed only with an HBAR offer. |
 | `CONCERT_POLICY_TOKEN` | empty | The bearer token for `policy_url`, at least 32 characters. |
 
-## Tagged deposits (scan and send)
+## Transfer payments (scan and send)
 
-An XRP offer also accepts a plain payment matched by destination tag, for wallets that cannot sign an x402 authorization. The access page shows a QR code (`xrpl:<address>?dt=<tag>&amount=<drops>`), the receiving address and the visitor's destination tag, then polls `POST /_concert/deposit/check` every five seconds. Concert asks the gateway (`/deposit/check`) for validated `tesSUCCESS` payments to the offer's `payTo` that carry the tag and deliver at least the offer's `amount` (the delivered amount counts, so partial payments are not over-credited; issued currencies are ignored). A match goes through the same policy screening as other payments, is journaled as a `deposit` receipt, and grants a pass of `pass_seconds`.
+Every network can also sell the pass for a plain transfer to the merchant's address, with no x402 support in the wallet. Set `"deposit_only": true` on an offer to sell it *only* that way: it then needs just `network`, `amount` (the price, atomic units) and `payTo`, with no scheme, asset or sponsor key.
 
-- The tag is derived from the session, so it is stable across restarts and needs no storage; a tag held by another live session is skipped.
-- Each transaction hash buys one pass. Sending again buys another; overpaying is not refunded.
-- Payments are searched up to two hours back. A payment sent without the tag cannot be matched and is not refunded automatically.
-- Only XRPL offers without a fixed `extra.destinationTag` take deposits. Stellar, Hedera and Solana do not, because Concert cannot yet match their memos, and it will not tell a visitor to send funds it cannot recognize. The list is `deposit_networks` in `/_concert/config`.
+The access page has a tab per chain (XRP, XLM, HBAR, SOL). A visitor shows their payment details: the address (the QR code holds the address; Solana's holds a Solana Pay URL with amount and memo), an **exact amount** and a reference. The exact amount is the price plus a small per-visitor "dust" (at most 9,999 atomic units, and never more than a twentieth of the price beyond 99), unique among visitors who are waiting. The reference is an XRPL destination tag, or a memo (Stellar, Hedera, Solana). Every 5 seconds the page asks Concert (`POST /_concert/deposit/check`), which asks the chain (through the in-process gateway, `/deposit/check`) for finalized native-coin payments to `payTo` and matches either the exact amount, or the reference with at least the price. A match is screened by the policy service, journaled as a `deposit` receipt and grants `pass_seconds`.
 
-The page also lists the enabled NFT collections and payment options while a visitor waits. If wallet requests are refused with `origin_rejected` (the page was opened from an address other than `origin` in `fastlane.json`), the page says so and links to the configured address instead of showing only a dead end.
+| Chain | Lookup | Notes |
+| --- | --- | --- |
+| XRPL | `account_tx`, validated `tesSUCCESS` payments | delivered amount counts, issued currencies ignored |
+| Stellar | Horizon `/accounts/{payTo}/payments`, latest 200 | needs `horizon` in networks.json; `payTo` must be a `G…` account |
+| Hedera | mirror node `/api/v1/transactions` | needs `mirror`; the payer is the account debited most |
+| Solana | `getSignaturesForAddress` + `getTransaction`, latest 40, finalized | each transaction is read once |
+
+Values are derived from the session, so they survive a restart and need no storage. Each transaction buys one pass; paying again buys another; overpaying is not refunded. Payments are searched up to two hours back. A payment that matches neither the exact amount nor the reference cannot be attributed and is not refunded automatically.
+
+The page also lists the enabled NFT collections and payment options while a visitor waits. If wallet requests are refused with `origin_rejected` (the page was opened from an address other than `origin`), the page says so and links to the configured address.
 
 ## Collection identifiers and wallet proof
 

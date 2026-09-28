@@ -20,7 +20,7 @@
     }
     async function post(path,body,headers={}){const {r,data}=await send(path,body,headers);if(!r.ok){if(data.error==='origin_rejected'){originRejected();throw Error('Wallet actions are unavailable from this address.');}throw Error(data.error||'Request could not be completed');}return data;}
     async function run(fn){if(busy)return;busy=true;for(const b of document.querySelectorAll('button'))b.disabled=true;try{await fn();}catch(e){say(e.message.replaceAll('_',' '));}finally{busy=false;for(const b of document.querySelectorAll('button'))b.disabled=false;availability();}}
-    function availability(){if(!config)return;$('pay').disabled=!$('consent').checked||!config.offers.length||!!pending||hasAccess;$('submit-payment').disabled=!$('consent').checked||!config.offers.length||hasAccess;$('retry-payment').disabled=!$('consent').checked||!pending;$('prove').disabled=!config.collections.length;$('challenge').disabled=!config.collections.length;}
+    function availability(){if(!config)return;for(const t of document.querySelectorAll('.chain-tab'))t.disabled=!config.offers.some(o=>o.requirements.network.split(':')[0]===t.dataset.chain);$('pay').disabled=!$('consent').checked||!config.offers.length||!!pending||hasAccess;$('submit-payment').disabled=!$('consent').checked||!config.offers.length||hasAccess;$('retry-payment').disabled=!$('consent').checked||!pending;$('prove').disabled=!config.collections.length;$('challenge').disabled=!config.collections.length;}
     function forgetPending(){sessionStorage.removeItem('concert.pending-payment');pending=null;$('retry-payment').hidden=true;}
     const digits={xrpl:6,stellar:7,hedera:8,solana:9},tickers={xrpl:'XRP',stellar:'XLM',hedera:'HBAR',solana:'SOL'};
     function fmt(r){const f=r.network.split(':')[0],d=digits[f],s=r.amount.padStart(d+1,'0');return s.slice(0,-d)+'.'+s.slice(-d).replace(/0+$/,'').padEnd(1,'0')+' '+tickers[f];}
@@ -40,24 +40,44 @@
     }
     // Tagged deposits: the page shows a QR code for a payment to the merchant's
     // address carrying this session's destination tag, then watches for it.
-    let depositTimer=null,deposit=null;
+    let depositTimer=null,deposit=null,chosen='';
+    const chainOf=n=>n.split(':')[0];
     function stopWatching(){clearTimeout(depositTimer);depositTimer=null;}
     async function watchDeposit(){
         stopWatching();if(!deposit||hasAccess)return;
         try{const {r,data}=await send('/deposit/check',{network:deposit.network});
-            if(r.ok&&data.eligible){$('deposit-status').textContent='Payment matched. You are in.';await status();return;}
+            if(r.ok&&data.eligible){$('deposit-status').textContent='Payment received. You are in.';await status();return;}
             if(!r.ok&&data.error==='origin_rejected'){originRejected();return;}
-            $('deposit-status').textContent=r.ok?'Watching the ledger for your payment… this page updates by itself.':'Could not check the ledger just now ('+String(data.error||r.status).replaceAll('_',' ')+'). Retrying.';
+            $('deposit-status').textContent=r.ok?'Watching the network for your payment… this page updates by itself.':'Could not check the network just now ('+String(data.error||r.status).replaceAll('_',' ')+'). Retrying.';
         }catch{$('deposit-status').textContent='Connection interrupted. Retrying.';}
         depositTimer=setTimeout(watchDeposit,5000);
     }
     const copy=(id,btn)=>{navigator.clipboard?.writeText($(id).textContent).then(()=>{btn.textContent='Copied';setTimeout(()=>btn.textContent='Copy',1500);}).catch(()=>{});};
     $('copy-address').addEventListener('click',e=>copy('deposit-address',e.currentTarget));
-    $('copy-tag').addEventListener('click',e=>copy('deposit-tag',e.currentTarget));
+    $('copy-ref').addEventListener('click',e=>copy('deposit-ref',e.currentTarget));
+    $('copy-amount').addEventListener('click',e=>{navigator.clipboard?.writeText($('deposit-amount').dataset.plain).then(()=>{e.currentTarget.textContent='Copied';setTimeout(()=>{e.currentTarget.textContent='Copy';},1500);}).catch(()=>{});});
+    // A tab picks the chain: its offer, its payment details and (when the
+    // offer takes a signed x402 payment) the wallet card.
+    function selectChain(f){
+        chosen=f;stopWatching();deposit=null;$('deposit-details').hidden=true;
+        for(const t of document.querySelectorAll('.chain-tab'))t.setAttribute('aria-selected',String(t.dataset.chain===f));
+        const i=config.offers.findIndex(o=>chainOf(o.requirements.network)===f),o=config.offers[i];
+        if(i>=0){$('offer').value=String(i);price();}
+        const canDeposit=!!o&&(config.deposit_networks||[]).includes(o.requirements.network);
+        $('deposit-start').hidden=!canDeposit;$('deposit-unavailable').hidden=canDeposit;
+        $('deposit-title').textContent=o?'Send '+tickers[f]+', skip ahead':'Not offered';
+        $('wallet-card').hidden=!o||!!o.deposit_only;
+        availability();
+    }
+    for(const t of document.querySelectorAll('.chain-tab'))t.addEventListener('click',()=>selectChain(t.dataset.chain));
     $('deposit-start').addEventListener('click',()=>run(async()=>{
-        const d=await post('/deposit',{network:$('deposit-network').value}),o=config.offers.find(x=>x.requirements.network===d.network);
-        deposit=d;$('deposit-qr').src=d.qr;$('deposit-amount').textContent=fmt(o.requirements);$('deposit-address').textContent=d.address;$('deposit-tag').textContent=String(d.tag);$('deposit-details').hidden=false;
-        say('Send the payment with the destination tag. Do not close this page until you are let in.');watchDeposit();
+        const o=config.offers.find(x=>chainOf(x.requirements.network)===chosen);
+        const d=await post('/deposit',{network:o.requirements.network});
+        deposit=d;$('deposit-qr').src=d.qr;$('deposit-amount').textContent=d.amount_display+' '+tickers[chosen];$('deposit-amount').dataset.plain=d.amount_display;$('deposit-address').textContent=d.address;
+        const xrp=chosen==='xrpl';$('deposit-ref-label').textContent=xrp?'Destination tag':'Memo';$('deposit-ref').textContent=xrp?String(d.tag):d.memo;
+        $('deposit-warning').textContent='Send exactly '+d.amount_display+' '+tickers[chosen]+'. The last digits of the amount are how we know the payment is yours'+(xrp?', and the destination tag is required by some wallets and exchanges':', and the memo helps if your wallet supports one')+'. A different amount cannot be matched and is not refunded automatically.';
+        $('deposit-details').hidden=false;$('deposit-status').textContent='Watching the network for your payment…';
+        say('Send the exact amount to the address. Keep this page open until you are let in.');watchDeposit();
     }));
     window.addEventListener('pagehide',stopWatching);
     async function status(){const {data}=await call('/status');hasAccess=!!data.eligible;if(data.eligible){stopWatching();if(data.kind==='payment')forgetPending();say('Access is ready. Your pass is valid until '+new Date(data.expires).toLocaleTimeString()+'.');$('enter').hidden=false;}else if(['pending','unknown'].includes(data.state)){say('Payment is awaiting reconciliation. Do not make another payment. Retry the identical signed payload or contact the merchant.');$('enter').hidden=true;}else{say(pending?'A signed payment is saved in this tab. Review the terms, then retry that payment. Do not authorize a second payment.':'No active fast-lane pass. You can continue in the standard queue.');$('enter').hidden=true;}}
@@ -120,7 +140,7 @@
     // auto-redirect from this page during an approval or settlement operation.
     const heartbeat=setInterval(()=>{if(document.cookie.split(';').some(x=>x.trim().startsWith('room_probe=')))fetch('/queue/status',{credentials:'same-origin',cache:'no-store',signal:AbortSignal.timeout(5000)}).then(r=>r.ok?r.json():null).then(d=>{if(d?.ready===true&&!busy&&!hasAccess){$('return').classList.add('button-primary');$('return').textContent='Your turn in the standard queue · continue ↗';}}).catch(()=>{});},5000);
     window.addEventListener('pagehide',()=>clearInterval(heartbeat));
-    run(async()=>{const {data}=await call('/config');if(!data.enabled)throw Error('Wallet access is not enabled. The standard queue remains available.');config=data;renderInfo();const s=await post('/session',{});csrf=s.csrf;session=s.session;$('access-options').hidden=false;const nets=(data.deposit_networks||[]).filter(n=>data.offers.some(o=>o.requirements.network===n));for(const n of nets){const el=document.createElement('option');el.value=n;el.textContent=data.offers.find(o=>o.requirements.network===n).label;$('deposit-network').append(el);}$('deposit-card').hidden=!nets.length;$('mode-label').textContent=data.test_mode?'TEST NETWORKS · NO MAINNET PAYMENTS':'WALLET ACCESS';if(data.test_mode)$('mode-label').classList.add('badge-test');$('merchant').textContent='Operated by '+data.merchant;$('pass-description').textContent=data.pass_seconds+' seconds of priority eligibility after settlement. This does not reserve a slot or guarantee service availability.';$('nft-description').textContent='Prove ownership with a signed message. No payment or NFT transfer. Access lasts '+data.nft_pass_seconds+' seconds.';for(const [id,url] of [['terms-link',data.terms_url],['refund-link',data.refund_url],['privacy-link',data.privacy_url],['policy-link',data.refund_url]])$(id).href=url;for(const [id,items] of [['offer',data.offers],['collection',data.collections]])items.forEach((x,i)=>{const el=document.createElement('option');el.value=i;el.textContent=x.label;$(id).append(el);});
+    run(async()=>{const {data}=await call('/config');if(!data.enabled)throw Error('Wallet access is not enabled. The standard queue remains available.');config=data;renderInfo();const s=await post('/session',{});csrf=s.csrf;session=s.session;$('access-options').hidden=false;for(const t of document.querySelectorAll('.chain-tab'))t.disabled=!data.offers.some(o=>chainOf(o.requirements.network)===t.dataset.chain);$('mode-label').textContent=data.test_mode?'TEST NETWORKS · NO MAINNET PAYMENTS':'WALLET ACCESS';if(data.test_mode)$('mode-label').classList.add('badge-test');$('merchant').textContent='Operated by '+data.merchant;$('pass-description').textContent=data.pass_seconds+' seconds of priority eligibility after settlement. This does not reserve a slot or guarantee service availability.';$('nft-description').textContent='Prove ownership with a signed message. No payment or NFT transfer. Access lasts '+data.nft_pass_seconds+' seconds.';for(const [id,url] of [['terms-link',data.terms_url],['refund-link',data.refund_url],['privacy-link',data.privacy_url],['policy-link',data.refund_url]])$(id).href=url;for(const [id,items] of [['offer',data.offers],['collection',data.collections]])items.forEach((x,i)=>{const el=document.createElement('option');el.value=i;el.textContent=x.label;$(id).append(el);});
         const saved=sessionStorage.getItem('concert.pending-payment');if(saved){pending=JSON.parse(saved);$('payment-payload').value=pending.header;$('retry-payment').hidden=false;const p=JSON.parse(atob(pending.header));const index=config.offers.findIndex(o=>o.requirements.network===p.accepted?.network);if(index>=0)$('offer').value=index;}
-        price();await status();});
+        const first=[...document.querySelectorAll('.chain-tab')].find(t=>!t.disabled);if(first)selectChain(first.dataset.chain);else $('access-options').hidden=false;await status();});
 })();
