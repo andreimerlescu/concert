@@ -143,6 +143,17 @@ One entry per network that an offer or collection uses, keyed by the same networ
 | `CONCERT_HEDERA_FEE_SECRET` | empty | The Hedera sponsor account's DER-encoded private key (hex starting `302e…` for Ed25519 or `3030…` for ECDSA), from the [Hedera portal](https://portal.hedera.com/) for testnet or your wallet's key export. Needed only with an HBAR offer. |
 | `CONCERT_POLICY_TOKEN` | empty | The bearer token for `policy_url`, at least 32 characters. |
 
+## Tagged deposits (scan and send)
+
+An XRP offer also accepts a plain payment matched by destination tag, for wallets that cannot sign an x402 authorization. The access page shows a QR code (`xrpl:<address>?dt=<tag>&amount=<drops>`), the receiving address and the visitor's destination tag, then polls `POST /_concert/deposit/check` every five seconds. Concert asks the gateway (`/deposit/check`) for validated `tesSUCCESS` payments to the offer's `payTo` that carry the tag and deliver at least the offer's `amount` (the delivered amount counts, so partial payments are not over-credited; issued currencies are ignored). A match goes through the same policy screening as other payments, is journaled as a `deposit` receipt, and grants a pass of `pass_seconds`.
+
+- The tag is derived from the session, so it is stable across restarts and needs no storage; a tag held by another live session is skipped.
+- Each transaction hash buys one pass. Sending again buys another; overpaying is not refunded.
+- Payments are searched up to two hours back. A payment sent without the tag cannot be matched and is not refunded automatically.
+- Only XRPL offers without a fixed `extra.destinationTag` take deposits. Stellar, Hedera and Solana do not, because Concert cannot yet match their memos, and it will not tell a visitor to send funds it cannot recognize. The list is `deposit_networks` in `/_concert/config`.
+
+The page also lists the enabled NFT collections and payment options while a visitor waits. If wallet requests are refused with `origin_rejected` (the page was opened from an address other than `origin` in `fastlane.json`), the page says so and links to the configured address instead of showing only a dead end.
+
 ## Collection identifiers and wallet proof
 
 Use the `collections` array in the fast-lane JSON. Each entry needs a unique local `id`, a display `label`, the exact `network`, and its chain-specific `collection`. No collection display name, URL or ticker is treated as proof.

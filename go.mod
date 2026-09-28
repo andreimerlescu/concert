@@ -11,6 +11,7 @@ require (
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1
 	github.com/gin-gonic/gin v1.12.0
 	github.com/hiero-ledger/hiero-sdk-go/v2 v2.84.0
+	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/stellar/go-stellar-sdk v0.7.3
 	golang.org/x/crypto v0.57.0
 	golang.org/x/sys v0.48.0

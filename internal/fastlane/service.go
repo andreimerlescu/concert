@@ -93,19 +93,21 @@ type Gateway interface {
 }
 
 type Service struct {
-	cfg         Config
-	key         []byte
-	gateway     Gateway
-	policyToken string
-	http        *http.Client
-	ledger      *ledger
-	mu          sync.Mutex
-	active      map[string]bool
-	challenges  map[string]challenge
-	nfts        map[string]nftLease
-	limits      map[string]*rateWindow
-	work        chan struct{}
-	now         func() time.Time
+	cfg          Config
+	key          []byte
+	gateway      Gateway
+	policyToken  string
+	http         *http.Client
+	ledger       *ledger
+	mu           sync.Mutex
+	active       map[string]bool
+	challenges   map[string]challenge
+	nfts         map[string]nftLease
+	limits       map[string]*rateWindow
+	tags         map[uint32]depositTag
+	depositPolls map[string]time.Time
+	work         chan struct{}
+	now          func() time.Time
 }
 
 func New(c Config, dir string, key []byte, gw Gateway, policyToken string) (*Service, error) {
@@ -132,7 +134,7 @@ func New(c Config, dir string, key []byte, gw Gateway, policyToken string) (*Ser
 		// Every call sets its own deadline: settlement may legitimately outlast
 		// an ordinary verification request.
 		http:   &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
-		active: map[string]bool{}, challenges: map[string]challenge{}, nfts: map[string]nftLease{}, limits: map[string]*rateWindow{}, work: make(chan struct{}, 32), now: time.Now}
+		active: map[string]bool{}, challenges: map[string]challenge{}, nfts: map[string]nftLease{}, limits: map[string]*rateWindow{}, tags: map[uint32]depositTag{}, depositPolls: map[string]time.Time{}, work: make(chan struct{}, 32), now: time.Now}
 	var capabilities struct {
 		Kinds []struct {
 			Version int    `json:"x402Version"`
@@ -456,6 +458,10 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.payment(w, r, id)
 	case "/solana/prepare":
 		s.prepareSOL(w, r)
+	case "/deposit":
+		s.depositRequest(w, r, id, exp)
+	case "/deposit/check":
+		s.depositCheck(w, r, id, exp)
 	case "/nft/challenge":
 		s.makeChallenge(w, r, id)
 	case "/nft/verify":
@@ -514,7 +520,17 @@ func (s *Service) status(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) PublicConfig() map[string]any {
-	return map[string]any{"enabled": true, "test_mode": s.cfg.TestMode, "merchant": s.cfg.Merchant, "offers": s.cfg.Offers, "collections": s.cfg.Collections, "pass_seconds": s.cfg.PassSeconds, "nft_pass_seconds": s.cfg.NFTPassSeconds, "terms_url": s.cfg.TermsURL, "privacy_url": s.cfg.PrivacyURL, "refund_url": s.cfg.RefundURL}
+	return map[string]any{"enabled": true, "origin": s.cfg.Origin, "test_mode": s.cfg.TestMode, "merchant": s.cfg.Merchant, "offers": s.cfg.Offers, "collections": s.cfg.Collections, "pass_seconds": s.cfg.PassSeconds, "nft_pass_seconds": s.cfg.NFTPassSeconds, "terms_url": s.cfg.TermsURL, "privacy_url": s.cfg.PrivacyURL, "refund_url": s.cfg.RefundURL, "deposit_networks": s.depositNetworks()}
+}
+
+func (s *Service) depositNetworks() []string {
+	out := []string{}
+	for _, o := range s.cfg.Offers {
+		if DepositEnabled(o) {
+			out = append(out, o.Requirements.Network)
+		}
+	}
+	return out
 }
 
 func (s *Service) prepareSOL(w http.ResponseWriter, r *http.Request) {

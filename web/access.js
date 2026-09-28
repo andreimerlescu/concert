@@ -13,12 +13,54 @@
     async function renew(){const s=await post('/session',{});csrf=s.csrf;session=s.session;}
     // Renewal keeps the session ID, so repeating the request is always safe.
     async function send(path,body,headers){let x=await call(path,body,headers);if(x.r.status===409&&x.data.error==='session_renewal_required'){await renew();x=await call(path,body,headers);}return x;}
-    async function post(path,body,headers={}){const {r,data}=await send(path,body,headers);if(!r.ok)throw Error(data.error||'Request could not be completed');return data;}
+    function originRejected(){
+        const here=location.origin,right=config?.origin;$('origin-help').hidden=false;
+        $('origin-text').textContent=right&&right!==here?'This page was opened from '+here+', but wallet actions only work from '+right+'. Your browser sends that address with every wallet request and Concert refuses any other. You can still read the options below.':'Concert refused this wallet request because its origin did not match the configured one. Reload the page from the site’s public address. You can still read the options below.';
+        if(right&&right!==here){$('origin-link').href=right+location.pathname+location.search;$('origin-link').hidden=false;}
+    }
+    async function post(path,body,headers={}){const {r,data}=await send(path,body,headers);if(!r.ok){if(data.error==='origin_rejected'){originRejected();throw Error('Wallet actions are unavailable from this address.');}throw Error(data.error||'Request could not be completed');}return data;}
     async function run(fn){if(busy)return;busy=true;for(const b of document.querySelectorAll('button'))b.disabled=true;try{await fn();}catch(e){say(e.message.replaceAll('_',' '));}finally{busy=false;for(const b of document.querySelectorAll('button'))b.disabled=false;availability();}}
     function availability(){if(!config)return;$('pay').disabled=!$('consent').checked||!config.offers.length||!!pending||hasAccess;$('submit-payment').disabled=!$('consent').checked||!config.offers.length||hasAccess;$('retry-payment').disabled=!$('consent').checked||!pending;$('prove').disabled=!config.collections.length;$('challenge').disabled=!config.collections.length;}
     function forgetPending(){sessionStorage.removeItem('concert.pending-payment');pending=null;$('retry-payment').hidden=true;}
-    function price(){const o=config.offers[Number($('offer').value)];if(!o){$('price').textContent='Not offered';return;}const r=o.requirements,d={xrpl:6,stellar:7,hedera:8,solana:9}[r.network.split(':')[0]],ticker={xrpl:'XRP',stellar:'XLM',hedera:'HBAR',solana:'SOL'}[r.network.split(':')[0]],s=r.amount.padStart(d+1,'0');$('price').textContent=s.slice(0,-d)+'.'+s.slice(-d).replace(/0+$/,'').padEnd(1,'0')+' '+ticker;$('recipient').textContent='Pay to '+r.payTo;}
-    async function status(){const {data}=await call('/status');hasAccess=!!data.eligible;if(data.eligible){if(data.kind==='payment')forgetPending();say('Access is ready. Your pass is valid until '+new Date(data.expires).toLocaleTimeString()+'.');$('enter').hidden=false;}else if(['pending','unknown'].includes(data.state)){say('Payment is awaiting reconciliation. Do not make another payment. Retry the identical signed payload or contact the merchant.');$('enter').hidden=true;}else{say(pending?'A signed payment is saved in this tab. Review the terms, then retry that payment. Do not authorize a second payment.':'No active fast-lane pass. You can continue in the standard queue.');$('enter').hidden=true;}}
+    const digits={xrpl:6,stellar:7,hedera:8,solana:9},tickers={xrpl:'XRP',stellar:'XLM',hedera:'HBAR',solana:'SOL'};
+    function fmt(r){const f=r.network.split(':')[0],d=digits[f],s=r.amount.padStart(d+1,'0');return s.slice(0,-d)+'.'+s.slice(-d).replace(/0+$/,'').padEnd(1,'0')+' '+tickers[f];}
+    function price(){const o=config.offers[Number($('offer').value)];if(!o){$('price').textContent='Not offered';return;}$('price').textContent=fmt(o.requirements);$('recipient').textContent='Pay to '+o.requirements.payTo;}
+    const row=(title,lines)=>{const d=document.createElement('div');d.className='info-row';const t=document.createElement('strong');t.textContent=title;d.append(t);for(const [text,code] of lines){const x=document.createElement(code?'code':'span');x.textContent=text;d.append(x,document.createElement('br'));}return d;};
+    // Read-only summary of what a visitor can do, shown even when wallet
+    // requests are refused (for example when the page is opened from the wrong
+    // address), so a waiting visitor can always see what to bring.
+    function renderInfo(){
+        const cols=$('info-collections'),offers=$('info-offers');cols.replaceChildren();offers.replaceChildren();
+        if(!config.collections.length)cols.textContent='No NFT collections are configured.';
+        for(const c of config.collections)cols.append(row(c.label,[[c.network+' · rule '+c.id],[c.collection,true]]));
+        if(!config.offers.length)offers.textContent='No payment options are configured.';
+        for(const o of config.offers){const r=o.requirements;offers.append(row(o.label,[['Price: '+fmt(r)],['Pay to',false],[r.payTo,true]]));}
+        $('info-pass').textContent='A paid pass grants priority for '+config.pass_seconds+' seconds. An NFT proof grants it for '+config.nft_pass_seconds+' seconds. Neither reserves a slot.';
+        $('access-info').hidden=false;
+    }
+    // Tagged deposits: the page shows a QR code for a payment to the merchant's
+    // address carrying this session's destination tag, then watches for it.
+    let depositTimer=null,deposit=null;
+    function stopWatching(){clearTimeout(depositTimer);depositTimer=null;}
+    async function watchDeposit(){
+        stopWatching();if(!deposit||hasAccess)return;
+        try{const {r,data}=await send('/deposit/check',{network:deposit.network});
+            if(r.ok&&data.eligible){$('deposit-status').textContent='Payment matched. You are in.';await status();return;}
+            if(!r.ok&&data.error==='origin_rejected'){originRejected();return;}
+            $('deposit-status').textContent=r.ok?'Watching the ledger for your payment… this page updates by itself.':'Could not check the ledger just now ('+String(data.error||r.status).replaceAll('_',' ')+'). Retrying.';
+        }catch{$('deposit-status').textContent='Connection interrupted. Retrying.';}
+        depositTimer=setTimeout(watchDeposit,5000);
+    }
+    const copy=(id,btn)=>{navigator.clipboard?.writeText($(id).textContent).then(()=>{btn.textContent='Copied';setTimeout(()=>btn.textContent='Copy',1500);}).catch(()=>{});};
+    $('copy-address').addEventListener('click',e=>copy('deposit-address',e.currentTarget));
+    $('copy-tag').addEventListener('click',e=>copy('deposit-tag',e.currentTarget));
+    $('deposit-start').addEventListener('click',()=>run(async()=>{
+        const d=await post('/deposit',{network:$('deposit-network').value}),o=config.offers.find(x=>x.requirements.network===d.network);
+        deposit=d;$('deposit-qr').src=d.qr;$('deposit-amount').textContent=fmt(o.requirements);$('deposit-address').textContent=d.address;$('deposit-tag').textContent=String(d.tag);$('deposit-details').hidden=false;
+        say('Send the payment with the destination tag. Do not close this page until you are let in.');watchDeposit();
+    }));
+    window.addEventListener('pagehide',stopWatching);
+    async function status(){const {data}=await call('/status');hasAccess=!!data.eligible;if(data.eligible){stopWatching();if(data.kind==='payment')forgetPending();say('Access is ready. Your pass is valid until '+new Date(data.expires).toLocaleTimeString()+'.');$('enter').hidden=false;}else if(['pending','unknown'].includes(data.state)){say('Payment is awaiting reconciliation. Do not make another payment. Retry the identical signed payload or contact the merchant.');$('enter').hidden=true;}else{say(pending?'A signed payment is saved in this tab. Review the terms, then retry that payment. Do not authorize a second payment.':'No active fast-lane pass. You can continue in the standard queue.');$('enter').hidden=true;}}
     async function settle(header){
         let signed;try{signed=JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(header),x=>x.charCodeAt(0))));}catch{throw Error('The payment header is not valid base64 JSON.');}
         const chosen=config.offers[Number($('offer').value)]?.requirements;
@@ -78,7 +120,7 @@
     // auto-redirect from this page during an approval or settlement operation.
     const heartbeat=setInterval(()=>{if(document.cookie.split(';').some(x=>x.trim().startsWith('room_probe=')))fetch('/queue/status',{credentials:'same-origin',cache:'no-store',signal:AbortSignal.timeout(5000)}).then(r=>r.ok?r.json():null).then(d=>{if(d?.ready===true&&!busy&&!hasAccess){$('return').classList.add('button-primary');$('return').textContent='Your turn in the standard queue · continue ↗';}}).catch(()=>{});},5000);
     window.addEventListener('pagehide',()=>clearInterval(heartbeat));
-    run(async()=>{const {data}=await call('/config');if(!data.enabled)throw Error('Wallet access is not enabled. The standard queue remains available.');config=data;const s=await post('/session',{});csrf=s.csrf;session=s.session;$('access-options').hidden=false;$('mode-label').textContent=data.test_mode?'TEST NETWORKS · NO MAINNET PAYMENTS':'WALLET ACCESS';if(data.test_mode)$('mode-label').classList.add('badge-test');$('merchant').textContent='Operated by '+data.merchant;$('pass-description').textContent=data.pass_seconds+' seconds of priority eligibility after settlement. This does not reserve a slot or guarantee service availability.';$('nft-description').textContent='Prove ownership with a signed message. No payment or NFT transfer. Access lasts '+data.nft_pass_seconds+' seconds.';for(const [id,url] of [['terms-link',data.terms_url],['refund-link',data.refund_url],['privacy-link',data.privacy_url],['policy-link',data.refund_url]])$(id).href=url;for(const [id,items] of [['offer',data.offers],['collection',data.collections]])items.forEach((x,i)=>{const el=document.createElement('option');el.value=i;el.textContent=x.label;$(id).append(el);});
+    run(async()=>{const {data}=await call('/config');if(!data.enabled)throw Error('Wallet access is not enabled. The standard queue remains available.');config=data;renderInfo();const s=await post('/session',{});csrf=s.csrf;session=s.session;$('access-options').hidden=false;const nets=(data.deposit_networks||[]).filter(n=>data.offers.some(o=>o.requirements.network===n));for(const n of nets){const el=document.createElement('option');el.value=n;el.textContent=data.offers.find(o=>o.requirements.network===n).label;$('deposit-network').append(el);}$('deposit-card').hidden=!nets.length;$('mode-label').textContent=data.test_mode?'TEST NETWORKS · NO MAINNET PAYMENTS':'WALLET ACCESS';if(data.test_mode)$('mode-label').classList.add('badge-test');$('merchant').textContent='Operated by '+data.merchant;$('pass-description').textContent=data.pass_seconds+' seconds of priority eligibility after settlement. This does not reserve a slot or guarantee service availability.';$('nft-description').textContent='Prove ownership with a signed message. No payment or NFT transfer. Access lasts '+data.nft_pass_seconds+' seconds.';for(const [id,url] of [['terms-link',data.terms_url],['refund-link',data.refund_url],['privacy-link',data.privacy_url],['policy-link',data.refund_url]])$(id).href=url;for(const [id,items] of [['offer',data.offers],['collection',data.collections]])items.forEach((x,i)=>{const el=document.createElement('option');el.value=i;el.textContent=x.label;$(id).append(el);});
         const saved=sessionStorage.getItem('concert.pending-payment');if(saved){pending=JSON.parse(saved);$('payment-payload').value=pending.header;$('retry-payment').hidden=false;const p=JSON.parse(atob(pending.header));const index=config.offers.findIndex(o=>o.requirements.network===p.accepted?.network);if(index>=0)$('offer').value=index;}
         price();await status();});
 })();

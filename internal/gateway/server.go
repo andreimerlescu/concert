@@ -75,6 +75,8 @@ func (s *Server) Handle(ctx context.Context, op string, body []byte) (any, error
 		return s.nft(ctx, body)
 	case "/solana/prepare":
 		return s.prepare(ctx, body)
+	case "/deposit/check":
+		return s.deposit(ctx, body)
 	}
 	return nil, errors.New("unknown gateway operation")
 }
@@ -303,4 +305,49 @@ func (s *Server) prepare(ctx context.Context, body []byte) (any, error) {
 		return map[string]string{"transaction": base64.StdEncoding.EncodeToString(tx)}, nil
 	}
 	return nil, errors.New("network not offered")
+}
+
+// depositInput asks whether a payment tagged for one visitor has arrived.
+type depositInput struct {
+	Network string `json:"network"`
+	Address string `json:"address"`
+	Tag     uint32 `json:"tag"`
+	Amount  string `json:"amount"`
+	Since   int64  `json:"since"`
+}
+
+// deposit looks for a validated payment to a configured offer's receiving
+// account that carries the visitor's destination tag and at least the offer's
+// price. Only XRPL destination tags are matched; other networks are refused so
+// that nobody is told to send funds that could never be recognized.
+func (s *Server) deposit(ctx context.Context, body []byte) (any, error) {
+	var in depositInput
+	if err := json.Unmarshal(body, &in); err != nil || in.Tag == 0 {
+		return nil, errBadRequest
+	}
+	configured := false
+	for _, o := range s.cfg.Offers {
+		r := o.Requirements
+		configured = configured || (r.Network == in.Network && r.PayTo == in.Address && r.Amount == in.Amount)
+	}
+	c := s.chains[in.Network]
+	if !configured || c == nil || c.xrp == nil {
+		return nil, errors.New("deposits are not offered on this network")
+	}
+	since := time.Unix(in.Since, 0)
+	if min := time.Now().Add(-24 * time.Hour); since.Before(min) {
+		since = min
+	}
+	found, err := c.xrp.FindDeposits(ctx, in.Address, in.Tag, in.Amount, since)
+	if err != nil {
+		return nil, err
+	}
+	deposits := make([]map[string]string, 0, len(found))
+	for _, d := range found {
+		if len(deposits) == 10 {
+			break
+		}
+		deposits = append(deposits, map[string]string{"transaction": d.Hash, "payer": d.Payer, "amount": d.Drops.String()})
+	}
+	return map[string]any{"deposits": deposits, "network": in.Network}, nil
 }
