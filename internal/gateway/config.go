@@ -78,7 +78,12 @@ func LoadNetworks(path string) (map[string]Network, error) {
 		return nil, err
 	}
 	defer f.Close()
-	d := json.NewDecoder(io.LimitReader(f, 1<<20))
+	return ParseNetworks(f)
+}
+
+// ParseNetworks reads a networks file's contents.
+func ParseNetworks(r io.Reader) (map[string]Network, error) {
+	d := json.NewDecoder(io.LimitReader(r, 1<<20))
 	d.DisallowUnknownFields()
 	d.UseNumber()
 	var n map[string]Network
@@ -246,4 +251,12 @@ func or(a, b string) string {
 		return a
 	}
 	return b
+}
+
+// Check reports whether cfg and networks would build a working gateway,
+// without opening any journal or contacting a chain. getenv supplies sponsor
+// secrets.
+func Check(cfg fastlane.Config, networks map[string]Network, getenv func(string) string) error {
+	_, err := build(cfg, networks, getenv, false)
+	return err
 }

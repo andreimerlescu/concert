@@ -73,18 +73,24 @@ type Config struct {
 }
 
 func Load(path string) (Config, error) {
-	var c Config
 	f, err := os.Open(path)
 	if err != nil {
-		return c, err
+		return Config{}, err
 	}
 	defer f.Close()
-	d := json.NewDecoder(io.LimitReader(f, 1<<20))
+	return Parse(f)
+}
+
+// Parse reads and validates a configuration. Unknown keys and trailing data
+// are errors.
+func Parse(r io.Reader) (Config, error) {
+	var c Config
+	d := json.NewDecoder(io.LimitReader(r, 1<<20))
 	d.DisallowUnknownFields()
-	if err = d.Decode(&c); err != nil {
+	if err := d.Decode(&c); err != nil {
 		return c, err
 	}
-	if err = d.Decode(new(any)); err != io.EOF {
+	if err := d.Decode(new(any)); err != io.EOF {
 		return c, errors.New("unexpected trailing configuration data")
 	}
 	return c, c.Validate()

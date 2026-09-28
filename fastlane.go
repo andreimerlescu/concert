@@ -56,15 +56,21 @@ func registerConcertRoutes(r *gin.Engine, g *generation) {
 		}
 		if path == "/config" && c.Request.Method == http.MethodGet {
 			conf := map[string]any{"enabled": false}
-			if g.a.fastlane != nil {
-				conf = g.a.fastlane.PublicConfig()
+			if lane := g.a.lane.Load(); lane != nil {
+				conf = lane.PublicConfig()
 			}
 			conf["legacy_skip_url"] = g.cfg.skipURL
 			c.Header("Cache-Control", "no-store")
 			c.JSON(200, conf)
 			return
 		}
-		if g.a.fastlane == nil {
+		lane := g.a.lane.Load()
+		if lane == nil {
+			if g.a.laneReloading.Load() {
+				c.Header("Retry-After", "5")
+				c.JSON(503, gin.H{"error": "fast_lane_reloading"})
+				return
+			}
 			if path == "/config" {
 				c.JSON(200, gin.H{"enabled": false})
 				return
@@ -74,6 +80,6 @@ func registerConcertRoutes(r *gin.Engine, g *generation) {
 		}
 		req := c.Request.Clone(c.Request.Context())
 		req.RemoteAddr = clientIPFrom(c).String() // canonical IP; ignore user headers
-		g.a.fastlane.ServeHTTP(c.Writer, req)
+		lane.ServeHTTP(c.Writer, req)
 	})
 }

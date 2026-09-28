@@ -581,7 +581,8 @@ func (g *generation) priorityGate(c *gin.Context) {
 	now := time.Now()
 	rank := ps.grants.rankOf(r, now)
 
-	fast := g.a.fastlane != nil && g.a.fastlane.Eligible(r)
+	lane := g.a.lane.Load()
+	fast := lane != nil && lane.Eligible(r)
 	if fast && rank < rankCustomer {
 		rank = rankCustomer
 	}

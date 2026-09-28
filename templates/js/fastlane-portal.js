@@ -11,5 +11,24 @@
             for(const o of d.collections){const c=el('article',undefined,'fastlane-rule');c.append(el('h4',o.label),el('small',o.network+' · rule '+o.id),el('code',o.collection));$('fastlane-collections').append(c);}
         }catch(e){$('fastlane-state').textContent=e.message;}
     }
-    $('fastlane-refresh').addEventListener('click',load);$('tab-fastlane-btn').addEventListener('shown.bs.tab',load);load();
+    // Settings editor: the two JSON files, checked and applied without a restart.
+    const csrf=(document.querySelector('meta[name="csrf-token"]')||{getAttribute:()=>''}).getAttribute('content');
+    const msg=(t,ok)=>{const m=$('fastlane-editor-msg');m.textContent=t;m.className='small '+(ok===undefined?'':ok?'text-success':'text-danger');};
+    async function loadEditor(){
+        try{const r=await fetch('/api/fastlane/config',{credentials:'same-origin'});if(!r.ok)throw Error('Sign in again to edit settings.');const d=await r.json();
+            $('fastlane-json').value=d.fastlane;$('networks-json').value=d.networks;
+            $('fastlane-editor-badge').textContent=d.saved?(d.running?'running':'saved · wallet access off'):'not configured yet · showing the sample';
+            $('fastlane-apply').disabled=!d.writable;if(!d.writable)msg('Set CONCERT_DATA_DIR so settings can be saved.',false);else msg('');
+        }catch(e){msg(e.message,false);}
+    }
+    async function save(dry){
+        msg(dry?'Checking…':'Applying…');
+        try{const r=await fetch('/api/fastlane/config',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({fastlane:$('fastlane-json').value,networks:$('networks-json').value,dry_run:dry}),signal:AbortSignal.timeout(300000)});
+            const d=await r.json();if(!r.ok)throw Error(d.error||'Request failed');
+            msg(dry?'These settings are valid.':'Applied. '+(d.running?'Wallet access is running with the new settings.':'Wallet access is off.'),true);
+            if(!dry){await loadEditor();await load();}
+        }catch(e){msg(e.message,false);}
+    }
+    $('fastlane-check').addEventListener('click',()=>save(true));$('fastlane-apply').addEventListener('click',()=>save(false));$('fastlane-reload-editor').addEventListener('click',loadEditor);
+    $('fastlane-refresh').addEventListener('click',()=>{load();});$('tab-fastlane-btn').addEventListener('shown.bs.tab',()=>{load();loadEditor();});load();loadEditor();
 })();

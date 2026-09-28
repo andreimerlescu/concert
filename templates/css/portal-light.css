@@ -575,3 +575,4 @@ body {
         scroll-behavior: auto !important
     }
 }
+.fastlane-json{font-size:12px;line-height:1.45;white-space:pre;overflow:auto;tab-size:2}

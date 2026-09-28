@@ -66,7 +66,16 @@
       <div id="fastlane-state" class="alert alert-info" role="status">Loading fast-lane configuration…</div>
       <div class="row g-3 mb-4" id="fastlane-stats"></div>
       <div class="row g-4"><section class="col-lg-6"><h3 class="h5">Accepted payments</h3><div id="fastlane-offers"></div></section><section class="col-lg-6"><h3 class="h5">NFT collection rules</h3><div id="fastlane-collections"></div></section></div>
-      <div class="card mt-4"><div class="card-body"><h3 class="h6">Configure access</h3><p class="small text-body-secondary mb-0">Set CONCERT_FASTLANE_CONFIG in the environment, and CONCERT_NETWORKS_CONFIG, then edit the payment offers and collection rules and restart Concert; the chain gateway runs inside it. Existing receipts retain their expiry. The setup guide describes each chain’s collection identifier and supported wallet proof formats.</p></div></div>
+      <div class="card mt-4"><div class="card-body" id="fastlane-editor">
+        <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-2"><div><h3 class="h6 mb-1">Configure access</h3><p class="small text-body-secondary mb-0">Edit the fast-lane and network settings here. <strong>Save &amp; apply</strong> checks them, saves the files and switches over without restarting Concert; wallet requests get a brief “reloading” answer while it happens, and if the new settings will not start, the old ones are restored. Sponsor keys, the policy token and the admission secret are environment variables and are never shown here.</p></div><span class="badge text-bg-secondary" id="fastlane-editor-badge">loading…</span></div>
+        <div class="alert alert-warning small py-2" role="note"><i aria-hidden="true" class="bi bi-exclamation-triangle"></i> Receiving addresses (<code>payTo</code>) decide where customers’ money goes. Changes to them are written to Concert’s log.</div>
+        <div class="row g-3">
+          <div class="col-lg-7"><label class="form-label small" for="fastlane-json">Fast lane settings <span class="text-body-secondary">(fastlane.json · offers, NFT collections, passes, origin)</span></label><textarea class="form-control font-monospace fastlane-json" id="fastlane-json" rows="22" spellcheck="false" autocomplete="off"></textarea></div>
+          <div class="col-lg-5"><label class="form-label small" for="networks-json">Network settings <span class="text-body-secondary">(networks.json · chain endpoints)</span></label><textarea class="form-control font-monospace fastlane-json" id="networks-json" rows="22" spellcheck="false" autocomplete="off"></textarea></div>
+        </div>
+        <div class="d-flex gap-2 flex-wrap align-items-center mt-3"><button class="btn btn-outline-info" id="fastlane-check" type="button"><i aria-hidden="true" class="bi bi-check2-circle"></i> Check</button><button class="btn btn-primary" id="fastlane-apply" type="button"><i aria-hidden="true" class="bi bi-lightning-charge"></i> Save &amp; apply</button><button class="btn btn-outline-secondary" id="fastlane-reload-editor" type="button">Discard edits</button><span class="small" id="fastlane-editor-msg" role="status" aria-live="polite"></span></div>
+        <p class="small text-body-secondary mt-3 mb-0">Every key is described in <code>docs/FASTLANE.md</code>. An offer with <code>"deposit_only": true</code> is paid by a plain transfer to its address and needs only <code>network</code>, <code>amount</code> and <code>payTo</code>.</p>
+      </div></div>
     </div>
 
     <!-- Overview -->

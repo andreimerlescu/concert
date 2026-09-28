@@ -137,3 +137,65 @@ func (g handlerGateway) Handle(ctx context.Context, op string, body []byte) (any
 	}
 	return json.RawMessage(w.Body.Bytes()), nil
 }
+
+// Settings saved in the portal take effect without a restart, a bad document
+// changes nothing, and the files on disk are what a restart would load.
+func TestFastLane_PortalSettingsApplyWithoutRestart(t *testing.T) {
+	restore := newGateway
+	newGateway = func(fastlane.Config, *config) (fastlane.Gateway, error) {
+		return handlerGateway{http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"kinds": []any{}})
+		})}, nil
+	}
+	t.Cleanup(func() { newGateway = restore })
+	up := newFakeUpstream(t)
+	cfg := testConfig(up.URL())
+	cfg.dataDir = t.TempDir()
+	a, front := newTestApp(t, cfg, up)
+	if a.lane.Load() != nil {
+		t.Fatal("no settings yet: wallet access must be off")
+	}
+	networks := `{"xrpl:1":{"rpc":"https://s.altnet.rippletest.net:51234/"}}`
+	doc := func(price string) string {
+		return `{"enabled":true,"origin":"http://127.0.0.1:8080","test_mode":true,"merchant":"Test","terms_url":"http://127.0.0.1:8080/t","privacy_url":"http://127.0.0.1:8080/p","refund_url":"http://127.0.0.1:8080/r","offers":[{"label":"XRP","deposit_only":true,"requirements":{"network":"xrpl:1","amount":"` + price + `","payTo":"rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe"}}]}`
+	}
+	if err := a.applyLaneConfig([]byte(doc("100000")), []byte(networks)); err != nil {
+		t.Fatal(err)
+	}
+	if a.lane.Load() == nil {
+		t.Fatal("settings must start wallet access")
+	}
+	_, body := get(t, front.URL+"/_concert/config", nil)
+	if !strings.Contains(string(body), `"amount":"100000"`) || !strings.Contains(string(body), `"deposit_networks":["xrpl:1"]`) {
+		t.Fatalf("config after apply: %s", body)
+	}
+	if err := a.applyLaneConfig([]byte(doc("250000")), []byte(networks)); err != nil {
+		t.Fatal(err)
+	}
+	_, body = get(t, front.URL+"/_concert/config", nil)
+	if !strings.Contains(string(body), `"amount":"250000"`) {
+		t.Fatalf("a second apply must replace the first: %s", body)
+	}
+	bad := strings.Replace(doc("1"), `"amount":"1"`, `"amount":"-4"`, 1)
+	if err := a.applyLaneConfig([]byte(bad), []byte(networks)); err == nil {
+		t.Fatal("an invalid document must be refused")
+	}
+	if err := a.applyLaneConfig([]byte(doc("300000")), []byte(`{"xrpl:1":{"rpc":"http://insecure.example"}}`)); err == nil {
+		t.Fatal("a plain-HTTP chain endpoint must be refused")
+	}
+	_, body = get(t, front.URL+"/_concert/config", nil)
+	if !strings.Contains(string(body), `"amount":"250000"`) {
+		t.Fatalf("a refused change must leave the running settings alone: %s", body)
+	}
+	saved, _ := os.ReadFile(filepath.Join(cfg.dataDir, "fastlane.json"))
+	if !strings.Contains(string(saved), `"250000"`) {
+		t.Fatalf("saved file: %s", saved)
+	}
+	if err := a.applyLaneConfig([]byte(`{"enabled":false}`), []byte(networks)); err != nil {
+		t.Fatal(err)
+	}
+	if a.lane.Load() != nil {
+		t.Fatal("disabling must turn wallet access off")
+	}
+}
