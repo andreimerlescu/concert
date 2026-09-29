@@ -14,14 +14,13 @@ import (
 	qrcode "github.com/skip2/go-qrcode"
 )
 
-// Deposit access: a visitor sends the offer's price to the merchant's
-// receiving account with a destination tag that belongs to their session, and
-// Concert matches the tag against validated ledger payments. It suits wallets
-// that can send a plain payment but cannot sign an x402 authorization.
-//
-// Only XRPL has a destination tag the ledger itself records, so only XRPL
-// offers take deposits. Offering it elsewhere would tell people to send funds
-// that could never be recognized.
+// Transfer payments: a visitor sends an exact amount to the merchant's
+// receiving account and Concert finds that payment on the chain. The amount is
+// the price plus a small per-visitor dust that is unique among visitors who
+// are waiting, so it identifies them; an XRPL destination tag or a memo (on
+// chains that carry one) is a second way to attribute the payment. It suits
+// wallets that can send a plain payment but cannot sign an x402 authorization.
+// Matching lives in the gateway (/deposit/check); see internal/chain/inbound.
 
 const (
 	// Payments are searched this far back, so a deposit sent just before the
@@ -221,10 +220,15 @@ func (s *Service) depositCheck(w http.ResponseWriter, r *http.Request, id string
 	req := o.Requirements
 	price, listing, code := s.priceFor(o, in.Network, in.Listing, id)
 	if code == "listing_already_sold" {
+		// Someone may have paid for this listing after it sold, from an intent
+		// shown before the sale. Their money must still be found and flagged,
+		// so a sold listing is refused only for new intents (depositRequest),
+		// never here.
 		if sale, mine := s.ledger.fingerprint(s.soldFingerprint(listing.ID)); mine && sale.Session == id {
 			s.receipt(w, sale)
 			return
 		}
+		code = ""
 	}
 	if code != "" {
 		failure(w, 409, code)
@@ -271,12 +275,8 @@ func (s *Service) depositCheck(w http.ResponseWriter, r *http.Request, id string
 			continue
 		}
 		fp := digest([]byte("deposit/" + in.Network + "/" + d.Transaction))
-		if used, redeemed := s.ledger.fingerprint(fp); redeemed {
-			if used.Session != id {
-				failure(w, 409, "payment_already_redeemed")
-				return
-			}
-			continue // this payment already bought a pass
+		if _, redeemed := s.ledger.fingerprint(fp); redeemed {
+			continue // already bought a pass, for this session or another
 		}
 		policy, err := s.screen(r.Context(), r, in.Network, d.Payer, "deposit", req)
 		if err != nil {

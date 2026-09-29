@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func TestFindDepositsMatchesTagAmountAndSkipsNoise(t *testing.T) {
+func TestRecentPaymentsKeepsOnlyValidatedXRPPaymentsToTheAccount(t *testing.T) {
 	now := time.Now()
 	stamp := func(d time.Duration) int64 { return now.Add(d).Unix() - rippleEpoch }
 	const acct = "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe"
@@ -23,13 +23,21 @@ func TestFindDepositsMatchesTagAmountAndSkipsNoise(t *testing.T) {
 	]}}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(body)) }))
 	defer srv.Close()
-	s := New("xrpl:1", srv.URL, 0)
-	got, err := s.FindDeposits(context.Background(), acct, 42, "100", now.Add(-2*time.Hour))
+	got, err := RPC{URL: srv.URL}.RecentPayments(context.Background(), acct, now.Add(-2*time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0].Hash != "GOOD" || got[0].Payer != "rA" {
-		t.Fatalf("got %+v", got)
+	var hashes []string
+	for _, d := range got {
+		hashes = append(hashes, d.Hash)
+	}
+	// Failed, issued-currency and too-old payments are dropped; the rest keep
+	// their tag and delivered amount for the gateway to match.
+	if len(got) != 3 || hashes[0] != "GOOD" || hashes[1] != "SHORT" || hashes[2] != "OTHERTAG" {
+		t.Fatalf("got %v", hashes)
+	}
+	if !got[0].HasTag || got[0].Tag != 42 || got[0].Amount.String() != "150" || got[0].Payer != "rA" {
+		t.Fatalf("%+v", got[0])
 	}
 }
 

@@ -363,7 +363,7 @@ func (s *Service) admitUntil(id string, open bool) (until time.Time, ok bool) {
 			has = true
 		}
 	}
-	if has && now.Before(w.until) && (granted || w.grant != "") {
+	if has && now.Before(w.until) {
 		if granted && expires.After(w.until) {
 			return expires, true
 		}

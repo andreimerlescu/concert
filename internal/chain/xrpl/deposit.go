@@ -4,16 +4,10 @@ import (
 	"context"
 	"errors"
 	"math/big"
-	"strconv"
 	"time"
 
 	"github.com/andreimerlescu/concert/internal/chain/inbound"
 )
-
-// DepositLedger is the optional Ledger capability that lists recent payments
-// received by an account. RPC implements it; a Ledger that does not is treated
-// as unable to match deposits.
-type DepositLedger = inbound.Lister
 
 // rippleEpoch is 2000-01-01T00:00:00Z, the origin of rippled's close times.
 const rippleEpoch = 946684800
@@ -81,29 +75,4 @@ func (c RPC) RecentPayments(ctx context.Context, account string, since time.Time
 		marker = out.Marker
 	}
 	return found, errors.New("deposit search incomplete")
-}
-
-// FindDeposits returns the deposits to account that carry tag and whose
-// delivered amount is at least drops, newest first. A lookup that failed after
-// returning some pages still reports what it found.
-func (s *Scheme) FindDeposits(ctx context.Context, account string, tag uint32, drops string, since time.Time) ([]inbound.Payment, error) {
-	l, ok := s.Ledger.(DepositLedger)
-	if !ok {
-		return nil, errors.New("ledger cannot list deposits")
-	}
-	want, ok := new(big.Int).SetString(drops, 10)
-	if !ok {
-		return nil, errors.New("invalid amount " + strconv.Quote(drops))
-	}
-	list, err := l.RecentPayments(ctx, account, since)
-	if err != nil && len(list) == 0 {
-		return nil, err
-	}
-	var match []inbound.Payment
-	for _, d := range list {
-		if d.HasTag && d.Tag == tag && d.Amount.Cmp(want) >= 0 {
-			match = append(match, d)
-		}
-	}
-	return match, nil
 }

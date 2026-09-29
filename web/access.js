@@ -38,15 +38,15 @@
         $('info-pass').textContent='A paid pass grants priority for '+config.pass_seconds+' seconds. An NFT proof grants it for '+config.nft_pass_seconds+' seconds. Neither reserves a slot.';
         $('access-info').hidden=false;
     }
-    // Tagged deposits: the page shows a QR code for a payment to the merchant's
-    // address carrying this session's destination tag, then watches for it.
+    // Transfer payments: the page shows a QR code for the merchant's address and
+    // the exact amount that identifies this visitor, then watches for it.
     let depositTimer=null,deposit=null,chosen='',listing='',shop=[];
     const chainOf=n=>n.split(':')[0];
     function stopWatching(){clearTimeout(depositTimer);depositTimer=null;}
     async function watchDeposit(){
         stopWatching();if(!deposit||hasAccess)return;
         try{const {r,data}=await send('/deposit/check',{network:deposit.network,listing});
-            if(r.ok&&data.eligible){$('deposit-status').textContent='Payment received. You are in.';await status();return;}
+            if(r.ok&&data.eligible){$('deposit-status').textContent=r.headers.get('Concert-Listing-Conflict')?'Payment received, but this NFT sold to someone else just before it arrived. You have your pass, and the merchant will contact you about a refund or a replacement.':'Payment received. You are in.';await status();return;}
             if(!r.ok&&data.error==='origin_rejected'){originRejected();return;}
             $('deposit-status').textContent=r.ok?'Watching the network for your payment… this page updates by itself.':'Could not check the network just now ('+String(data.error||r.status).replaceAll('_',' ')+'). Retrying.';
         }catch{$('deposit-status').textContent='Connection interrupted. Retrying.';}
@@ -60,7 +60,7 @@
     // offer takes a signed x402 payment) the wallet card.
     function selectChain(f){
         chosen=f;listing='';stopWatching();deposit=null;$('deposit-details').hidden=true;
-        for(const t of document.querySelectorAll('.chain-tab'))t.setAttribute('aria-selected',String(t.dataset.chain===f));
+        for(const t of document.querySelectorAll('.chain-tab'))t.setAttribute('aria-pressed',String(t.dataset.chain===f));
         const i=config.offers.findIndex(o=>chainOf(o.requirements.network)===f),o=config.offers[i];
         if(i>=0){$('offer').value=String(i);price();}
         const canDeposit=!!o&&(config.deposit_networks||[]).includes(o.requirements.network);

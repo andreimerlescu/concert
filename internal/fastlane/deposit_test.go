@@ -99,8 +99,8 @@ func TestDepositMatchGrantsPassOnceAndReplayFails(t *testing.T) {
 	other := newSession(t, h.s)
 	tagOf(t, h, other)
 	h.now = h.now.Add(10 * time.Second)
-	if w := request(h.s, "/deposit/check", other, `{"network":"xrpl:1"}`, ""); w.Code != 409 || eligible(h.s, other) {
-		t.Fatalf("replay must be refused: %d %s", w.Code, w.Body.String())
+	if w := request(h.s, "/deposit/check", other, `{"network":"xrpl:1"}`, ""); w.Code != 200 || eligible(h.s, other) {
+		t.Fatalf("a transaction another session redeemed must not grant a pass: %d %s", w.Code, w.Body.String())
 	}
 	// After the pass lapses the same transaction never buys another.
 	h.now = h.now.Add(time.Hour)
@@ -148,6 +148,7 @@ func TestNFTSaleGrantsPassSellsOnceAndFlagsConflicts(t *testing.T) {
 	h, mu, paid := shopHarness(t)
 	a, b := newSession(t, h.s), newSession(t, h.s)
 	w, amount := buy(h, a, "founder-1")
+	_, lateAmount := buy(h, b, "founder-1") // b is shown its QR code before the sale
 	if w.Code != 200 || amount <= "5000" {
 		t.Fatalf("intent: %d %s", w.Code, w.Body.String())
 	}
@@ -165,15 +166,34 @@ func TestNFTSaleGrantsPassSellsOnceAndFlagsConflicts(t *testing.T) {
 	if shop := h.s.Shop(); shop[0]["sold"] != true {
 		t.Error("listing must be sold")
 	}
-	if w, _ := buy(h, b, "founder-1"); w.Code != 409 || !strings.Contains(w.Body.String(), "listing_already_sold") {
-		t.Errorf("a sold listing cannot be bought again: %d %s", w.Code, w.Body.String())
+	if w, _ := buy(h, newSession(t, h.s), "founder-1"); w.Code != 409 || !strings.Contains(w.Body.String(), "listing_already_sold") {
+		t.Errorf("no new payment details for a sold listing: %d %s", w.Code, w.Body.String())
+	}
+	// b pays from the QR code shown before the sale: the money is found, b gets
+	// a pass, and the sale is flagged for the merchant instead of vanishing.
+	mu.Lock()
+	*paid = []map[string]string{{"transaction": "SALE2", "payer": "rLate", "amount": lateAmount}}
+	mu.Unlock()
+	h.now = h.now.Add(10 * time.Second)
+	if w := request(h.s, "/deposit/check", b, `{"network":"xrpl:1","listing":"founder-1"}`, ""); w.Code != 200 || !eligible(h.s, b) || w.Header().Get("Concert-Listing-Conflict") != "1" {
+		t.Fatalf("a payment for a sold listing must be found and flagged: %d %s", w.Code, w.Body.String())
+	}
+	if n := len(h.s.Sales()); n != 2 || h.s.Sales()[0]["conflict"] != true {
+		t.Fatalf("the conflict must be listed for the merchant: %v", h.s.Sales())
 	}
 	sales := h.s.Sales()
-	if len(sales) != 1 || sales[0]["buyer"] != "rBuyer" || sales[0]["token_id"] != "000800AB" || sales[0]["delivered"] != (*time.Time)(nil) {
+	sales = sales[len(sales)-1:] // oldest is the real sale
+	if sales[0]["buyer"] != "rBuyer" || sales[0]["token_id"] != "000800AB" || sales[0]["delivered"] != (*time.Time)(nil) {
 		t.Fatalf("sales: %v", sales)
 	}
-	if err := h.s.MarkDelivered(sales[0]["fingerprint"].(string)); err != nil || h.s.Sales()[0]["delivered"] == (*time.Time)(nil) {
+	fp := sales[0]["fingerprint"].(string)
+	if err := h.s.MarkDelivered(fp); err != nil {
 		t.Errorf("mark delivered: %v", err)
+	}
+	for _, x := range h.s.Sales() {
+		if x["fingerprint"] == fp && x["delivered"] == (*time.Time)(nil) {
+			t.Error("the sale must show as delivered")
+		}
 	}
 	// A restart remembers the sale.
 	h.s.Close()
