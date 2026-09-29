@@ -185,7 +185,7 @@ They are skipped unless `CONCERT_TESTNET=1`, and then a network or faucet failur
 | XRP (`xrpl:1`) | exact amount; plain price + destination tag | outbound HTTPS to `s.altnet.rippletest.net:51234` and `faucet.altnet.rippletest.net` (two funded accounts come from the faucet) |
 | XLM (`stellar:testnet`) | exact amount; plain price + memo | `horizon-testnet.stellar.org` and `friendbot.stellar.org` |
 | SOL (`solana:EtWTRAB…`, Devnet) | exact amount | `api.devnet.solana.com`; the public airdrop is rate limited, so set `CONCERT_TESTNET_SOLANA_KEY` (base64 of a funded 64-byte keypair) if it refuses |
-| HBAR (`hedera:testnet`) | exact amount; plain price + memo | `testnet.mirrornode.hedera.com`, the Hedera Testnet consensus nodes (gRPC, port 50211), and your own funded Testnet account from portal.hedera.com in `CONCERT_TESTNET_HEDERA_ACCOUNT` and `CONCERT_TESTNET_HEDERA_KEY` (DER). Skipped without them, because Hedera has no anonymous faucet |
+| HBAR (`hedera:testnet`) | exact amount; plain price + memo | `testnet.mirrornode.hedera.com`, the Hedera Testnet consensus nodes (gRPC, port 50211), and funding: set `CONCERT_TESTNET_HEDERA_PAT` to a free Personal Access Token from portal.hedera.com and the test funds a fresh account through the Hedera faucet API (`POST https://portal.hedera.com/api/disbursement/cli`, 20 HBAR per run; the API allows 100 HBAR per 24 hours per portal account). Or set `CONCERT_TESTNET_HEDERA_ACCOUNT` and `CONCERT_TESTNET_HEDERA_KEY` (DER) for an account you already have. Skipped with neither |
 
 ## Selling NFTs from the access page
 
