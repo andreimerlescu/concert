@@ -9,12 +9,18 @@ os   = $(word 1,$(subst /, ,$1))
 arch = $(word 2,$(subst /, ,$1))
 ext  = $(if $(filter windows,$(call os,$1)),.exe,)
 
-.PHONY: all test test-race lint clean bench build $(PLATFORMS)
+.PHONY: all test test-testnet test-race lint clean bench build $(PLATFORMS)
 
 all: lint clean test test-race bench summary build
 
 test:
 	go test -count=1 -v ./...
+
+# Live testnet tests: real payments on the XRPL/Stellar/Solana/Hedera test
+# networks, found by Concert through its real gateway. Needs outbound access to
+# the testnets and their faucets; see docs/FASTLANE.md.
+test-testnet:
+	CONCERT_TESTNET=1 go test -count=1 -v -timeout 30m ./internal/testnet
 
 test-race:
 	go test -race -count=1 -v ./...

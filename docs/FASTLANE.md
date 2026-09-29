@@ -170,6 +170,23 @@ Values are derived from the session, so they survive a restart and need no stora
 
 The page also lists the enabled NFT collections and payment options while a visitor waits. If wallet requests are refused with `origin_rejected` (the page was opened from an address other than `origin`), the page says so and links to the configured address.
 
+## Testnet tests
+
+The chain lookups behind transfer payments are unit-tested against recorded-shape responses, which proves the parsing but not that the real networks answer as expected. `internal/testnet` holds the live tests: each builds Concert's real gateway and fast-lane service in test mode, asks for payment details, sends a **real testnet payment**, and waits for Concert to find it on the chain and grant the pass. They also check that the visitor is not admitted before paying and that one payment never admits a second visitor.
+
+```sh
+make test-testnet        # or: CONCERT_TESTNET=1 go test -count=1 -v -timeout 30m ./internal/testnet
+```
+
+They are skipped unless `CONCERT_TESTNET=1`, and then a network or faucet failure fails the test rather than skipping it.
+
+| Chain | Tests | What it needs |
+| --- | --- | --- |
+| XRP (`xrpl:1`) | exact amount; plain price + destination tag | outbound HTTPS to `s.altnet.rippletest.net:51234` and `faucet.altnet.rippletest.net` (two funded accounts come from the faucet) |
+| XLM (`stellar:testnet`) | exact amount; plain price + memo | `horizon-testnet.stellar.org` and `friendbot.stellar.org` |
+| SOL (`solana:EtWTRAB…`, Devnet) | exact amount | `api.devnet.solana.com`; the public airdrop is rate limited, so set `CONCERT_TESTNET_SOLANA_KEY` (base64 of a funded 64-byte keypair) if it refuses |
+| HBAR (`hedera:testnet`) | exact amount; plain price + memo | `testnet.mirrornode.hedera.com`, the Hedera Testnet consensus nodes (gRPC, port 50211), and your own funded Testnet account from portal.hedera.com in `CONCERT_TESTNET_HEDERA_ACCOUNT` and `CONCERT_TESTNET_HEDERA_KEY` (DER). Skipped without them, because Hedera has no anonymous faucet |
+
 ## Selling NFTs from the access page
 
 `listings` in `fastlane.json` puts specific NFTs on sale:
