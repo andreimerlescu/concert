@@ -50,6 +50,9 @@
       <button class="nav-link" id="tab-fastlane-btn" data-bs-toggle="tab" data-bs-target="#tab-fastlane" type="button" role="tab" aria-controls="tab-fastlane" aria-selected="false"><i aria-hidden="true" class="bi bi-lightning-charge"></i> Fast lane</button>
     </li>
     <li class="nav-item" role="presentation">
+      <button class="nav-link" id="tab-monitor-btn" data-bs-toggle="tab" data-bs-target="#tab-monitor" type="button" role="tab" aria-controls="tab-monitor" aria-selected="false"><i aria-hidden="true" class="bi bi-activity"></i> Monitor</button>
+    </li>
+    <li class="nav-item" role="presentation">
       <button class="nav-link" id="tab-settings-btn" data-bs-toggle="tab" data-bs-target="#tab-settings" type="button" role="tab" aria-controls="tab-settings" aria-selected="false">
         <i aria-hidden="true" class="bi bi-sliders"></i> Settings
       </button>
@@ -77,6 +80,19 @@
         <div class="d-flex gap-2 flex-wrap align-items-center mt-3"><button class="btn btn-outline-info" id="fastlane-check" type="button"><i aria-hidden="true" class="bi bi-check2-circle"></i> Check</button><button class="btn btn-primary" id="fastlane-apply" type="button"><i aria-hidden="true" class="bi bi-lightning-charge"></i> Save &amp; apply</button><button class="btn btn-outline-secondary" id="fastlane-reload-editor" type="button">Discard edits</button><span class="small" id="fastlane-editor-msg" role="status" aria-live="polite"></span></div>
         <p class="small text-body-secondary mt-3 mb-0">Every key is described in <code>docs/FASTLANE.md</code>. An offer with <code>"deposit_only": true</code> is paid by a plain transfer to its address and needs only <code>network</code>, <code>amount</code> and <code>payTo</code>.</p>
       </div></div>
+    </div>
+
+    <div class="tab-pane fade" id="tab-monitor" role="tabpanel" aria-labelledby="tab-monitor-btn" tabindex="0">
+      <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2"><div><p class="concert-eyebrow">RUNTIME PERFORMANCE</p><h2 class="h3">How Concert is running.</h2></div><div class="small text-body-secondary"><span id="mon-updated">waiting for the first sample…</span> · <span id="mon-uptime"></span></div></div>
+      <div class="d-flex flex-wrap gap-2 mb-3" id="mon-health" role="status"></div>
+      <div class="row g-3 mb-3" id="mon-cards"></div>
+      <div class="row g-3 mb-3" id="mon-charts"></div>
+      <div class="row g-3">
+        <section class="col-lg-6"><div class="card h-100"><div class="card-body"><h3 class="h6">Response time distribution <span class="text-body-secondary fw-normal">(since start)</span></h3><div id="mon-histogram" class="mon-histogram" role="img" aria-label="Response time histogram"></div></div></div></section>
+        <section class="col-lg-3"><div class="card h-100"><div class="card-body"><h3 class="h6">Responses</h3><dl class="mon-dl mb-0" id="mon-status"></dl></div></div></section>
+        <section class="col-lg-3"><div class="card h-100"><div class="card-body"><h3 class="h6">Process</h3><dl class="mon-dl mb-0" id="mon-process"></dl></div></div></section>
+      </div>
+      <p class="small text-body-secondary mt-3 mb-0">Measured on the main listener, from the moment a request arrives until its response is done, so a proxied request includes the origin’s time. History covers the last ten minutes and is kept in memory; it restarts with the process. Latencies are bucketed, so p50/p95/p99 are the upper edge of the bucket they fall in.</p>
     </div>
 
     <!-- Overview -->

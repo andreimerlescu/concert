@@ -11,6 +11,7 @@
 ## Experience
 
 - Replaced the default waiting page with a responsive synthwave queue experience, live FIFO status and optional wallet access.
+- Added a portal **Monitor** tab: request rate, response-time percentiles and errors through the proxy, plus Go runtime CPU, memory, GC and goroutines, with ten minutes of in-memory history (`GET /api/monitor`).
 - Restyled the portal around #660099 and #116699, retained its existing controls, and added an authenticated fast-lane status tab.
 - Added a consent-based payment/ownership page, Wallet Standard Solana support, adapter hooks and signed-payload recovery after interruption.
 - Preserved custom waiting templates and the legacy skip URL. Restored local Bootstrap assets and icon fonts from their upstream packages.

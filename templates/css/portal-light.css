@@ -576,3 +576,19 @@ body {
     }
 }
 .fastlane-json{font-size:12px;line-height:1.45;white-space:pre;overflow:auto;tab-size:2}
+
+.mon-chart svg{width:100%;height:84px;display:block;overflow:visible}
+.mon-chart .mon-grid{stroke:var(--bs-border-color);stroke-width:1;vector-effect:non-scaling-stroke}
+.mon-chart .mon-line{fill:none;stroke-width:2;vector-effect:non-scaling-stroke;stroke-linejoin:round;stroke-linecap:round}
+.mon-chart .mon-a{stroke:var(--bs-primary)}
+.mon-chart .mon-b{stroke:var(--bs-warning)}
+.mon-chart .mon-area{fill:var(--bs-primary);opacity:.12}
+.mon-key{display:inline-block;width:10px;height:3px;border-radius:2px;margin:0 4px 2px 10px;vertical-align:middle}
+.mon-key.mon-a{background:var(--bs-primary)}.mon-key.mon-b{background:var(--bs-warning)}
+.mon-histogram{display:flex;align-items:flex-end;gap:6px;height:150px;padding-top:8px}
+.mon-histogram .mon-bar{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%;font-size:10px;color:var(--bs-secondary-color)}
+.mon-histogram .mon-fill{width:100%;background:linear-gradient(180deg,#116699,#660099);border-radius:3px 3px 0 0;min-height:1px}
+.mon-dl{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:12px}
+.mon-dl dt{font-weight:400;color:var(--bs-secondary-color)}.mon-dl dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
+.mon-badge{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--bs-border-color);border-radius:99px;padding:4px 12px;font-size:12px}
+.mon-badge i{font-size:9px}

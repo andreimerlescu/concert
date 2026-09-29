@@ -35,6 +35,7 @@ type app struct {
 	cfg       config // as concert started; the running configuration is current().cfg
 	room      *room.WaitingRoom
 	stats     *counters
+	mon       *monitor // request and runtime performance; see monitor.go
 	admit     *admitter
 	abuse     *abuseRegistry // always present; current().abuse is nil while -abuse=false
 	prio      *priorityState // rank grants, the ranked line and counters; see priority.go
@@ -85,6 +86,7 @@ func newApp(cfg config) (*app, error) {
 	a := &app{
 		cfg:   cfg,
 		stats: stats,
+		mon:   newMonitor(),
 		admit: newAdmitter(cfg.admitSecret, cfg.admitTTL, cfg.cookiePath, cfg.cookieDomain, cfg.secureCookie),
 		abuse: newAbuseRegistry(cfg, stats),
 		drops: newDropper(),
@@ -169,6 +171,7 @@ func newApp(cfg config) (*app, error) {
 	// Every new ban drops that network's waiting visitors from room's line.
 	a.abuse.setOnBan(a.queueDrop)
 
+	go a.mon.run(a, a.stop)
 	go a.abuse.janitor(a.stop)
 	go a.prio.janitor(a.room, a.stop)
 	a.wg.Add(1)

@@ -305,6 +305,7 @@ func (p *portal) routes() *gin.Engine {
 		}
 		c.JSON(200, lane.Summary())
 	})
+	api.GET("/monitor", p.apiMonitor)
 	api.GET("/fastlane/config", p.apiFastlaneConfig)
 	api.POST("/fastlane/config", p.apiFastlaneConfigSave)
 	api.POST("/fastlane/sales/delivered", p.apiFastlaneDelivered)

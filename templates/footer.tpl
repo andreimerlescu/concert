@@ -10,6 +10,7 @@
 <script src="/assets/{{.BootstrapJS}}"></script>
 <script src="/assets/{{.PortalJS}}"></script>
 <script src="/assets/js/fastlane-portal.js"></script>
+<script src="/assets/js/monitor-portal.js"></script>
 </body>
 </html>
 {{end}}

@@ -39,6 +39,7 @@ func buildRouter(g *generation) (engine *gin.Engine, err error) {
 		log.Printf("request panic on %s", clip(c.Request.URL.Path, 256))
 		c.AbortWithStatus(http.StatusInternalServerError)
 	}))
+	r.Use(g.a.mon.middleware)
 	r.Use(g.identify) // before the logger: banned requests are never logged
 	if cfg.accessLogEnabled {
 		out := cfg.accessLog

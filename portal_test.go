@@ -580,3 +580,52 @@ func TestNoteStore_BoundedAndPruned(t *testing.T) {
 		t.Errorf("prune: removed %d, left %d", n, s.count())
 	}
 }
+
+func TestPortal_MonitorReportsRequestsAndRuntime(t *testing.T) {
+	up := newFakeUpstream(t)
+	a, p, front := newTestPortal(t, portalTestConfig(up.URL()), up)
+	for i := 0; i < 3; i++ {
+		if r, _ := get(t, front.URL+"/_concert/config", nil); r.StatusCode != 200 {
+			t.Fatal(r.StatusCode)
+		}
+	}
+	a.mon.sample(a)
+	if rec := portalDo(p, http.MethodGet, "/api/monitor", "", nil, "", false); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("monitor without a session: %d", rec.Code)
+	}
+	ck, _ := portalLogin(t, p)
+	rec := portalDo(p, http.MethodGet, "/api/monitor", "", ck, "", false)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("monitor: %d %s", rec.Code, rec.Body.String())
+	}
+	d := decodeJSON(t, rec)
+	traffic := d["traffic"].(map[string]any)
+	if traffic["requests_total"].(float64) < 3 || traffic["status"].(map[string]any)["2xx"].(float64) < 3 {
+		t.Errorf("requests must be counted: %v", traffic)
+	}
+	if d["process"].(map[string]any)["goroutines"].(float64) < 1 || d["memory"].(map[string]any)["heap_alloc_mb"].(float64) <= 0 {
+		t.Errorf("runtime numbers missing: %v", d)
+	}
+	if len(d["history"].([]any)) < 1 || len(d["health"].([]any)) < 1 {
+		t.Errorf("history and health must be present: %v", d)
+	}
+}
+
+func TestMonitor_QuantileUsesBucketEdges(t *testing.T) {
+	var c [len(latencyBoundsMS) + 1]int64
+	c[bucketFor(3)] = 90  // ≤5 ms
+	c[bucketFor(800)] = 9 // ≤1000 ms
+	c[bucketFor(99999)] = 1
+	if got := quantile(c[:], 0.5); got != 5 {
+		t.Errorf("p50 = %v, want 5", got)
+	}
+	if got := quantile(c[:], 0.95); got != 1000 {
+		t.Errorf("p95 = %v, want 1000", got)
+	}
+	if got := quantile(c[:], 0.999); got != 10000 {
+		t.Errorf("p99.9 = %v, want the top bound 10000", got)
+	}
+	if quantile(nil, 0.5) != 0 {
+		t.Error("no samples must report 0")
+	}
+}
