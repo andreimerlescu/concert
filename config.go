@@ -29,6 +29,10 @@ type config struct {
 	fastlaneFile string // immutable startup configuration; see docs/FASTLANE.md
 	networksFile string // chain endpoints for the fast lane's gateway
 
+	// fastlaneEntryTTL is how long a pass holder stays in the site once they
+	// first present the pass; see fastlane.Service.Eligible. 0 turns it off.
+	fastlaneEntryTTL time.Duration
+
 	listen         string
 	upstream       string
 	capacity       int

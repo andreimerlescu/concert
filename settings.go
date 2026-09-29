@@ -140,6 +140,9 @@ var settingDefs = []settingDef{
 		def: "", usage: "fast lane JSON (x402 offers and NFT rules; see docs/FASTLANE.md), empty turns wallet access off (flag or CONCERT_FASTLANE_CONFIG; the file itself is edited in the Fast lane tab and applies without a restart)", ptr: func(c *config) any { return &c.fastlaneFile }},
 	{key: "networks_config", flag: "networks-config", env: "CONCERT_NETWORKS_CONFIG", group: groupSkip, label: "Chain endpoints file", restart: true,
 		def: "", usage: "chain endpoints JSON for the fast lane's payment networks (see docs/FASTLANE.md); sponsor keys come from CONCERT_STELLAR_FEE_SECRET and CONCERT_HEDERA_FEE_SECRET (flag or CONCERT_NETWORKS_CONFIG; the file itself is edited in the Fast lane tab and applies without a restart)", ptr: func(c *config) any { return &c.networksFile }},
+	{key: "fastlane_entry_ttl", flag: "fastlane-entry-ttl", env: "CONCERT_FASTLANE_ENTRY_TTL", group: groupSkip, label: "Fast lane entry window",
+		def: 5 * time.Minute, usage: "how long a visitor with a paid or NFT pass stays in the site once they first present it, 30s-24h (0 = the pass's own length only). Runs from that first request, so a pass that lapses mid-visit does not send them back to the end of the line",
+		ptr: func(c *config) any { return &c.fastlaneEntryTTL }, check: durationZeroOrBetween(30*time.Second, 24*time.Hour)},
 	// ---- Skip the line ----
 	{key: "rate", flag: "rate", env: "CONCERT_RATE", group: groupSkip, label: "Price per position",
 		def: 0.0, usage: "base cost per queue position (0 with -surge 0 turns paid skip-the-line off)",

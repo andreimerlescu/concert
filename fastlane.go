@@ -4,6 +4,7 @@ import (
 	"embed"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/andreimerlescu/concert/internal/fastlane"
 	"github.com/gin-gonic/gin"
@@ -60,6 +61,7 @@ func registerConcertRoutes(r *gin.Engine, g *generation) {
 				conf = lane.PublicConfig()
 			}
 			conf["legacy_skip_url"] = g.cfg.skipURL
+			conf["entry_seconds"] = int(g.cfg.fastlaneEntryTTL / time.Second)
 			c.Header("Cache-Control", "no-store")
 			c.JSON(200, conf)
 			return

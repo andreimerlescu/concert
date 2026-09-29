@@ -132,8 +132,7 @@ func newApp(cfg config) (*app, error) {
 			wr.Stop()
 			return nil, fmt.Errorf("fast lane: %w", err)
 		}
-		a.lane.Store(svc)
-		a.laneGW = gw
+		a.setLane(svc, gw)
 	}
 	// All startup errors after this point close the fast lane's journal.
 	started := false

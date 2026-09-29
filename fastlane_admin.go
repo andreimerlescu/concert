@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/andreimerlescu/concert/internal/fastlane"
 	"github.com/andreimerlescu/concert/internal/gateway"
@@ -63,6 +64,16 @@ func openLane(c *config, flPath, nwPath string) (*fastlane.Service, fastlane.Gat
 		return nil, nil, err
 	}
 	return svc, gw, nil
+}
+
+// setLane installs a fast lane and its gateway, wiring in the entry window's
+// length from the live settings so a change applies without a reload.
+func (a *app) setLane(svc *fastlane.Service, gw fastlane.Gateway) {
+	if svc != nil {
+		svc.SetEntryTTL(func() time.Duration { return a.current().cfg.fastlaneEntryTTL })
+	}
+	a.lane.Store(svc)
+	a.laneGW = gw
 }
 
 // closeLane stops the fast lane, then its gateway, which first lets
@@ -211,15 +222,13 @@ func (a *app) applyLaneConfig(flJSON, nwJSON []byte) error {
 	if err != nil {
 		restore()
 		if oldSvc, oldGW, e2 := openLane(&cfg, fl, nw); e2 == nil {
-			a.lane.Store(oldSvc)
-			a.laneGW = oldGW
+			a.setLane(oldSvc, oldGW)
 		} else {
 			log.Printf("fast lane: reload failed (%v) and the previous configuration would not restart either (%v); wallet access is off", err, e2)
 		}
 		return fmt.Errorf("the new settings would not start: %w", err)
 	}
-	a.lane.Store(svc)
-	a.laneGW = gw
+	a.setLane(svc, gw)
 	log.Printf("fast lane: settings applied from the portal: enabled=%t, %d offer(s), %d collection(s)", newCfg.Enabled, len(newCfg.Offers), len(newCfg.Collections))
 	if before, after := strings.Join(payTos(oldCfg), " "), strings.Join(payTos(newCfg), " "); before != after {
 		log.Printf("fast lane: RECEIVING ADDRESSES CHANGED from the portal: was [%s] now [%s]", before, after)

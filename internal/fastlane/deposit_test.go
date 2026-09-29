@@ -222,3 +222,59 @@ func TestMarketListsOnLedgerSalesWithBuyLinks(t *testing.T) {
 		t.Errorf("unknown rule: %d", w.Code)
 	}
 }
+
+func TestEntryWindowKeepsPassHolderInAfterThePassLapses(t *testing.T) {
+	h := newHarness(t) // 30 s pass
+	ttl := 5 * time.Minute
+	h.s.SetEntryTTL(func() time.Duration { return ttl })
+	pay := func(session, tx string) {
+		if w := request(h.s, "/payment", session, "{}", signed(h, tx)); w.Code != 200 {
+			t.Fatalf("pay: %d %s", w.Code, w.Body.String())
+		}
+	}
+	entered, never := newSession(t, h.s), newSession(t, h.s)
+	pay(entered, "tx-entered")
+	pay(never, "tx-never")
+	if !eligible(h.s, entered) {
+		t.Fatal("a fresh pass must be eligible")
+	}
+	// Asking for status must not open a window for the visitor who never entered.
+	sr := httptest.NewRequest("GET", Prefix+"/status", nil)
+	sr.Header.Set(SessionHeader, never)
+	sw := httptest.NewRecorder()
+	h.s.ServeHTTP(sw, sr)
+	if sw.Code != 200 || !strings.Contains(sw.Body.String(), `"eligible":true`) {
+		t.Fatalf("status while the pass lasts: %d %s", sw.Code, sw.Body.String())
+	}
+	h.now = h.now.Add(2 * time.Minute) // the 30 s pass has lapsed
+	if !eligible(h.s, entered) {
+		t.Error("a visitor who presented the pass must stay in for the entry window")
+	}
+	if eligible(h.s, never) {
+		t.Error("a pass that lapsed before it was ever presented must not open a window")
+	}
+	h.now = h.now.Add(4 * time.Minute) // past 5 minutes from entry
+	if eligible(h.s, entered) {
+		t.Error("the entry window must end")
+	}
+	// Buying again opens a fresh window.
+	pay(entered, "tx-again")
+	if !eligible(h.s, entered) {
+		t.Error("a new payment must be eligible")
+	}
+	h.now = h.now.Add(time.Minute)
+	if !eligible(h.s, entered) {
+		t.Error("a new grant opens its own window")
+	}
+	// Off means the pass's own length only.
+	ttl = 0
+	other := newSession(t, h.s)
+	pay(other, "tx-other")
+	if !eligible(h.s, other) {
+		t.Fatal("eligible while the pass lasts")
+	}
+	h.now = h.now.Add(time.Minute)
+	if eligible(h.s, other) {
+		t.Error("with the window off, the pass's own length applies")
+	}
+}

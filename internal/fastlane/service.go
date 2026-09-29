@@ -106,6 +106,8 @@ type Service struct {
 	limits       map[string]*rateWindow
 	tags         map[string]depositTag
 	marketCache  map[string]marketEntry
+	entries      map[string]entryWindow
+	entryTTL     func() time.Duration
 	sold         map[string]string // listing id -> fingerprint of the payment that bought it
 	depositPolls map[string]time.Time
 	work         chan struct{}
@@ -136,7 +138,7 @@ func New(c Config, dir string, key []byte, gw Gateway, policyToken string) (*Ser
 		// Every call sets its own deadline: settlement may legitimately outlast
 		// an ordinary verification request.
 		http:   &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
-		active: map[string]bool{}, challenges: map[string]challenge{}, nfts: map[string]nftLease{}, limits: map[string]*rateWindow{}, tags: map[string]depositTag{}, sold: map[string]string{}, marketCache: map[string]marketEntry{}, depositPolls: map[string]time.Time{}, work: make(chan struct{}, 32), now: time.Now}
+		active: map[string]bool{}, challenges: map[string]challenge{}, nfts: map[string]nftLease{}, limits: map[string]*rateWindow{}, tags: map[string]depositTag{}, sold: map[string]string{}, entries: map[string]entryWindow{}, marketCache: map[string]marketEntry{}, depositPolls: map[string]time.Time{}, work: make(chan struct{}, 32), now: time.Now}
 	for _, r := range l.withKind("nft_sale") {
 		s.sold[r.Listing] = r.Fingerprint
 	}
@@ -300,8 +302,82 @@ func (s *Service) allow(remote string, now time.Time) bool {
 	return w.n <= postsPerMinute
 }
 
-// Eligible reads a durable, unexpired grant. Bans and the bounded priority pool
-// still run in Concert. A receipt never authorizes an unbounded proxy bypass.
+// entryWindow is the stay a pass holder earned by presenting a grant: from the
+// first request that found the grant valid until then plus the entry TTL.
+type entryWindow struct {
+	grant string // which grant opened it; a new payment or NFT proof opens a new one
+	until time.Time
+}
+
+// SetEntryTTL sets where the entry window's length comes from. It is read on
+// every request, so a settings change applies at once. Without it, or at 0, a
+// pass is honored for its own length only.
+func (s *Service) SetEntryTTL(f func() time.Duration) {
+	s.mu.Lock()
+	s.entryTTL = f
+	s.mu.Unlock()
+}
+
+// grantFor returns the session's current grant, if it is still valid: a
+// settled receipt or a live NFT lease, with a key that changes per grant.
+// s.mu must not be held; the ledger has its own lock.
+func (s *Service) grantFor(id string) (key string, expires time.Time, ok bool) {
+	now := s.now()
+	if x, has := s.ledger.get(id); has && x.State == "settled" && now.Before(x.Expires) {
+		return "pay/" + x.Fingerprint, x.Expires, true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if x, has := s.nfts[id]; has && now.Before(x.Expires) {
+		return "nft/" + strconv.FormatInt(x.Expires.UnixNano(), 10), x.Expires, true
+	}
+	return "", time.Time{}, false
+}
+
+// admitUntil is when a session's access ends: the later of its grant's own
+// expiry and its entry window. The window opens the first time the grant is
+// presented, so a visitor who gets in is not sent back to the end of the line
+// because the grant lapses while they shop. It reports false when neither
+// applies. It records the window it opens.
+func (s *Service) admitUntil(id string, open bool) (until time.Time, ok bool) {
+	now := s.now()
+	key, expires, granted := s.grantFor(id)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var ttl time.Duration
+	if s.entryTTL != nil {
+		ttl = s.entryTTL()
+	}
+	w, has := s.entries[id]
+	if granted && open && ttl > 0 && (!has || w.grant != key) {
+		if len(s.entries) >= 100000 {
+			for k, v := range s.entries {
+				if !now.Before(v.until) {
+					delete(s.entries, k)
+				}
+			}
+		}
+		if len(s.entries) < 100000 {
+			w = entryWindow{grant: key, until: now.Add(ttl)}
+			s.entries[id] = w
+			has = true
+		}
+	}
+	if has && now.Before(w.until) && (granted || w.grant != "") {
+		if granted && expires.After(w.until) {
+			return expires, true
+		}
+		return w.until, true
+	}
+	if granted {
+		return expires, true
+	}
+	return time.Time{}, false
+}
+
+// Eligible reads a durable, unexpired grant, or the entry window that a grant
+// opened. Bans and the bounded priority pool still run in Concert. A receipt
+// never authorizes an unbounded proxy bypass.
 func (s *Service) Eligible(r *http.Request) bool {
 	if !s.ledger.healthy() {
 		return false
@@ -310,13 +386,8 @@ func (s *Service) Eligible(r *http.Request) bool {
 	if !ok {
 		return false
 	}
-	if x, ok := s.ledger.get(id); ok && x.State == "settled" && s.now().Before(x.Expires) {
-		return true
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	x, ok := s.nfts[id]
-	return ok && s.now().Before(x.Expires)
+	_, ok = s.admitUntil(id, true)
+	return ok
 }
 
 // gatewayCall runs a gateway operation, waiting at most timeout. A
@@ -557,16 +628,23 @@ func (s *Service) status(w http.ResponseWriter, r *http.Request) {
 		reply(w, 200, map[string]any{"eligible": false})
 		return
 	}
+	// The window a presented grant opened counts as access too; asking for
+	// status never opens one.
+	until, admitted := s.admitUntil(id, false)
 	paid, exists := s.ledger.get(id)
 	if exists && paid.State == "settled" && s.now().Before(paid.Expires) {
-		reply(w, 200, map[string]any{"eligible": s.ledger.healthy(), "state": paid.State, "kind": "payment", "expires": paid.Expires, "receipt": paid.Response})
+		reply(w, 200, map[string]any{"eligible": s.ledger.healthy(), "state": paid.State, "kind": "payment", "expires": until, "receipt": paid.Response})
 		return
 	}
 	s.mu.Lock()
 	nft, hasNFT := s.nfts[id]
 	s.mu.Unlock()
 	if hasNFT && s.now().Before(nft.Expires) {
-		reply(w, 200, map[string]any{"eligible": s.ledger.healthy(), "kind": "nft", "expires": nft.Expires})
+		reply(w, 200, map[string]any{"eligible": s.ledger.healthy(), "kind": "nft", "expires": until})
+		return
+	}
+	if admitted {
+		reply(w, 200, map[string]any{"eligible": s.ledger.healthy(), "kind": "window", "expires": until})
 		return
 	}
 	if exists {
