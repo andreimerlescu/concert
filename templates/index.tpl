@@ -58,7 +58,6 @@
       </button>
     </li>
     <li class="ms-auto align-self-center small text-body-secondary d-flex flex-wrap gap-3">
-      <span title="Where IP details come from"><i aria-hidden="true" class="bi bi-globe2"></i> <span class="text-truncate d-inline-block ipinfo-state align-bottom">{{.IPInfo}}</span></span>
       <span><i aria-hidden="true" class="bi bi-arrow-repeat"></i> <span id="updated-at">loading…</span></span>
     </li>
   </ul>

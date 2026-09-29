@@ -2,7 +2,7 @@
 </main>
 <footer class="border-top py-3 small text-body-secondary">
   <div class="container-fluid d-flex flex-wrap justify-content-between gap-2">
-    <span>Concert {{.Version}}</span>
+    <span>Concert {{.Version}}{{if .IPInfo}} <span class="mx-1" aria-hidden="true">·</span> <span title="Where IP details come from"><i aria-hidden="true" class="bi bi-globe2"></i> <span class="ipinfo-state">{{.IPInfo}}</span></span>{{end}}</span>
     <span>FIFO waiting room reverse proxy · built on room and sema</span>
   </div>
 </footer>
