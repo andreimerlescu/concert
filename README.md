@@ -6,6 +6,7 @@
 [![Apache 2.0 License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/andreimerlescu/concert/blob/main/LICENSE)
 [![Built on room](https://img.shields.io/badge/built%20on-room-00d4ff)](https://github.com/andreimerlescu/room)
 [![GitHub Stars](https://img.shields.io/github/stars/andreimerlescu/concert?style=social)](https://github.com/andreimerlescu/concert/stargazers)
+![Unique](https://counthis.app/github?repository=andreimerlescu/concert&label=Unique) ![Visitors](https://counthis.app/g/qyjy5vwjtjgbjfzy)
 
 ![Concert — FIFO Waiting Room Reverse Proxy](/concert.jpg)
 
