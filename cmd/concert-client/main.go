@@ -2,11 +2,20 @@
 // fast lane. Payer keys stay in this process; Concert and its gateway never
 // see them.
 //
-//	concert-client          pay for a fast-lane pass (CONCERT_ACCEPT_TERMS=yes)
-//	concert-client --nft    prove NFT ownership for a short lease
+//	concert-client               pay for a fast-lane pass (CONCERT_ACCEPT_TERMS=yes)
+//	concert-client --nft         prove NFT ownership for a short lease
+//	concert-client --wait PATH   wait in line for PATH, then print the response
 //
 // A signed authorization is saved to the state file before it is sent, and
 // the client never signs a second one while the first is unresolved.
+//
+// --wait needs no wallet keys and never pays. It holds a place in Concert's
+// line with the saved session (Concert's -agent-queue), retrying as the
+// server's Retry-After says, and reports the fast-lane offer when Concert
+// makes one; paying stays the explicit default command above. The state
+// file is locked only while the session is renewed, so a payment can be
+// made with the same session while a --wait runs, and the waiting place is
+// then admitted through the fast lane.
 package main
 
 import (
@@ -24,9 +33,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/andreimerlescu/concert/internal/chain/hedera"
@@ -153,13 +165,26 @@ func walletFromEnvironment(network string, n gateway.Network, getenv func(string
 type client struct {
 	origin string
 	http   *http.Client
+	pause  func(context.Context, time.Duration) error // waits between retries in line
 }
 
 func newClient(origin string) *client {
-	return &client{origin: origin, http: &http.Client{
+	return &client{origin: origin, pause: pause, http: &http.Client{
 		Timeout:       55 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirects are refused") },
 	}}
+}
+
+// pause waits d or until ctx is done. Tests replace it.
+var pause = func(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (c *client) request(ctx context.Context, path, session string, body any, headers map[string]string, out any) (int, error) {
@@ -367,18 +392,28 @@ func env(name, fallback string) string {
 
 func main() {
 	log.SetFlags(0)
-	if err := run(context.Background(), os.Args[1:], os.Getenv); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	err := run(ctx, os.Args[1:], os.Getenv)
+	stop()
+	if err != nil {
 		log.Fatal(err)
 	}
 }
 
+const usage = "usage: concert-client [--nft | --wait PATH]"
+
 func run(ctx context.Context, args []string, getenv func(string) string) error {
-	nft := false
-	for _, a := range args {
-		if a != "--nft" {
-			return errors.New("usage: concert-client [--nft]")
+	nft, waitPath := false, ""
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--nft" && !nft && waitPath == "":
+			nft = true
+		case args[i] == "--wait" && !nft && waitPath == "" && i+1 < len(args) && strings.HasPrefix(args[i+1], "/"):
+			waitPath = args[i+1]
+			i++
+		default:
+			return errors.New(usage)
 		}
-		nft = true
 	}
 	origin := strings.TrimRight(env("CONCERT_ORIGIN", "http://127.0.0.1:8080"), "/")
 	if err := checkOrigin(origin); err != nil {
@@ -388,6 +423,13 @@ func run(ctx context.Context, args []string, getenv func(string) string) error {
 	if network == "" {
 		return errors.New("set CONCERT_CLIENT_NETWORK")
 	}
+	file, err := filepath.Abs(env("CONCERT_CLIENT_STATE", "client-state.json"))
+	if err != nil {
+		return err
+	}
+	if waitPath != "" {
+		return waitInLine(ctx, origin, network, file, waitPath, getenv, os.Stdout)
+	}
 	networks, err := gateway.LoadNetworks(env("CONCERT_NETWORKS_CONFIG", "examples/networks.json"))
 	if err != nil {
 		return err
@@ -396,18 +438,11 @@ func run(ctx context.Context, args []string, getenv func(string) string) error {
 	if !ok {
 		return errors.New("network configuration is missing")
 	}
-	file, err := filepath.Abs(env("CONCERT_CLIENT_STATE", "client-state.json"))
+	unlock, err := lockState(file)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
-		return err
-	}
-	lock, err := os.OpenFile(file+".lock", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return errors.New("client state is locked; ensure no client is running before removing a stale .lock file")
-	}
-	defer func() { lock.Close(); os.Remove(file + ".lock") }()
+	defer unlock()
 
 	st, err := loadState(file, origin, network)
 	if err != nil {
@@ -434,6 +469,132 @@ func run(ctx context.Context, args []string, getenv func(string) string) error {
 	fmt.Println(string(b))
 	fmt.Println("Session saved. Send it as the Concert-Session header on protected requests.")
 	return nil
+}
+
+// lockState takes the state file's lock; the returned function releases it.
+func lockState(file string) (func(), error) {
+	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+		return nil, err
+	}
+	lock, err := os.OpenFile(file+".lock", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, errors.New("client state is locked; ensure no client is running before removing a stale .lock file")
+	}
+	return func() { lock.Close(); os.Remove(file + ".lock") }, nil
+}
+
+// waitInLine renews the saved session under the state lock, releases the
+// lock, and waits in line for path with it, writing progress and then the
+// admitted response to out. It is bounded by CONCERT_CLIENT_MAX_WAIT
+// (default 1h) and by ctx.
+func waitInLine(ctx context.Context, origin, network, file, path string, getenv func(string) string, out io.Writer) error {
+	maxWait := time.Hour
+	if v := getenv("CONCERT_CLIENT_MAX_WAIT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return errors.New("CONCERT_CLIENT_MAX_WAIT must be a positive duration, for example 30m")
+		}
+		maxWait = d
+	}
+	unlock, err := lockState(file)
+	if err != nil {
+		return err
+	}
+	st, err := loadState(file, origin, network)
+	c := newClient(origin)
+	if err == nil {
+		err = c.renew(ctx, file, &st)
+	}
+	unlock()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, maxWait)
+	defer cancel()
+	return c.wait(ctx, path, st.Session, out)
+}
+
+// queued is Concert's answer to a client waiting in line.
+type queued struct {
+	Queued     bool   `json:"queued"`
+	Error      string `json:"error"`
+	Position   int64  `json:"position"`
+	QueueDepth int64  `json:"queue_depth"`
+	StatusURL  string `json:"status_url"`
+	RetryAfter int    `json:"retry_after_seconds"`
+	FastLane   *struct {
+		PaymentURL  string `json:"payment_url"`
+		PassSeconds int    `json:"pass_seconds"`
+		Offers      []struct {
+			Network string `json:"network"`
+			Asset   string `json:"asset"`
+			Amount  string `json:"amount"`
+		} `json:"offers"`
+	} `json:"fast_lane"`
+}
+
+const (
+	minRetry     = time.Second
+	maxRetry     = time.Minute
+	maxPageBytes = 16 << 20
+)
+
+// retryDelay is the server's Retry-After, else the body's
+// retry_after_seconds, else 5s, bounded to 1s-1m.
+func retryDelay(h http.Header, q queued) time.Duration {
+	d := 5 * time.Second
+	if n, err := strconv.Atoi(strings.TrimSpace(h.Get("Retry-After"))); err == nil {
+		d = time.Duration(n) * time.Second
+	} else if q.RetryAfter > 0 {
+		d = time.Duration(q.RetryAfter) * time.Second
+	}
+	return min(max(d, minRetry), maxRetry)
+}
+
+// wait requests path with session until Concert stops answering "queued",
+// then writes that response's status and body to out. It never pays: a
+// fast-lane offer is reported once, and paying stays a separate command.
+func (c *client) wait(ctx context.Context, path, session string, out io.Writer) error {
+	offered := false
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.origin+path, nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Concert-Session", session)
+		res, err := c.http.Do(req)
+		if err != nil {
+			return err
+		}
+		if res.StatusCode != http.StatusTooManyRequests {
+			fmt.Fprintf(out, "%d %s\n", res.StatusCode, http.StatusText(res.StatusCode))
+			_, err := io.Copy(out, io.LimitReader(res.Body, maxPageBytes))
+			res.Body.Close()
+			if err == nil && res.StatusCode >= http.StatusBadRequest {
+				err = fmt.Errorf("Concert answered %d", res.StatusCode)
+			}
+			return err
+		}
+		var q queued
+		derr := json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&q)
+		res.Body.Close()
+		if derr != nil || !q.Queued {
+			return fmt.Errorf("not waiting in line: %s", or(q.Error, "unexpected 429"))
+		}
+		fmt.Fprintf(out, "In line: position %d of %d. Watch it at %s\n", q.Position, q.QueueDepth, q.StatusURL)
+		if q.FastLane != nil && !offered {
+			offered = true
+			fmt.Fprintf(out, "Concert offers its fast lane (%d s pass) at %s:", q.FastLane.PassSeconds, q.FastLane.PaymentURL)
+			for _, o := range q.FastLane.Offers {
+				fmt.Fprintf(out, " %s %s on %s;", o.Amount, o.Asset, o.Network)
+			}
+			fmt.Fprintln(out, " this client does not pay; run concert-client with CONCERT_ACCEPT_TERMS=yes to pay with this session.")
+		}
+		if err := c.pause(ctx, retryDelay(res.Header, q)); err != nil {
+			return fmt.Errorf("stopped waiting at position %d: %w", q.Position, err)
+		}
+	}
 }
 
 // renew keeps the session ID, and with it any unresolved payment, while

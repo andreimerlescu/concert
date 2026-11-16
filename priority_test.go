@@ -181,40 +181,108 @@ func TestRankedSem_HighestRankFirst(t *testing.T) {
 	}
 }
 
-// Until room can order its line by rank (see orderLineByRank), ranked
-// visitors below the lane rank wait in arrival order, and the portal still
-// shows their rank.
-func TestPriority_RankedVisitorsWaitInArrivalOrder(t *testing.T) {
+// rankedLineTest is a full room (cap 1, one parked request) and a way to
+// join its line with a fresh cookie jar, optionally holding a rank grant,
+// from a given address.
+type rankedLineTest struct {
+	a     *app
+	p     *portal
+	front *httptest.Server
+	pass  string
+}
+
+func newRankedLineTest(t *testing.T, orderLine bool) *rankedLineTest {
+	t.Helper()
 	up := newFakeUpstream(t)
 	cfg := portalTestConfig(up.URL())
 	cfg.capacity = 1
+	cfg.trustedProxies = "127.0.0.1/32"
+	cfg.priorityOrderLine = orderLine
 	a, p, front := newTestPortal(t, cfg, up)
 	pass := admitPass(t, front)
 	fillSlot(t, front, up)
+	return &rankedLineTest{a: a, p: p, front: front, pass: pass}
+}
 
-	join := func(hdr map[string]string) string {
-		c := jarClient()
-		resp, _ := doReq(t, c, http.MethodGet, front.URL+"/api/wait", hdr, nil)
-		if resp.StatusCode != http.StatusTooManyRequests {
-			t.Fatalf("expected to be queued, got %d", resp.StatusCode)
+// join queues a new visitor from ip at rank (rankGuest: no grant) and
+// returns its room ticket.
+func (l *rankedLineTest) join(t *testing.T, ip string, rank priorityRank) string {
+	t.Helper()
+	hdr := withXFF(ip)
+	if rank != rankGuest {
+		for k, v := range withGrant(l.pass, grantFor(t, l.a, l.pass, rank)) {
+			hdr[k] = v
 		}
-		return ticketOf(t, c, front)
 	}
-	guest := join(nil)
-	prospect := join(withGrant(pass, grantFor(t, a, pass, rankProspect)))
-	member := join(withGrant(pass, grantFor(t, a, pass, rankMember)))
+	c := jarClient()
+	resp, _ := doReq(t, c, http.MethodGet, l.front.URL+"/api/wait", hdr, nil)
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("expected to be queued, got %d", resp.StatusCode)
+	}
+	return ticketOf(t, c, l.front)
+}
 
-	line := a.room.Queue(10)
-	if len(line) != 3 || line[0].Token != guest || line[1].Token != prospect || line[2].Token != member {
-		t.Fatalf("the line should stay in arrival order: %+v", line)
+func (l *rankedLineTest) line(t *testing.T, want ...string) {
+	t.Helper()
+	line := l.a.room.Queue(10)
+	got := make([]string, len(line))
+	for i, ti := range line {
+		got[i] = ti.Token
 	}
-	if a.prio.placed.Load() != 0 {
-		t.Errorf("nobody should be moved while orderLineByRank is off: %d", a.prio.placed.Load())
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("line order:\n got %v\nwant %v", got, want)
 	}
-	views := p.queueViews(time.Now())
-	if views[0].Rank != "" || views[1].Rank != "prospect" || views[2].Rank != "member" {
-		t.Errorf("queue view ranks: %q %q %q", views[0].Rank, views[1].Rank, views[2].Rank)
+}
+
+// With -priority-order-line (the default), ranked visitors below the lane
+// rank wait ahead of lower ranks, in arrival order within a rank, and the
+// portal shows the rank room recorded.
+func TestPriority_LineOrderedByRank(t *testing.T) {
+	l := newRankedLineTest(t, true)
+	g1 := l.join(t, "203.0.113.1", rankGuest)
+	g2 := l.join(t, "203.0.113.2", rankGuest)
+	g3 := l.join(t, "203.0.113.3", rankGuest)
+	m1 := l.join(t, "203.0.113.4", rankMember)
+	l.line(t, m1, g1, g2, g3) // a member who arrived after three guests is ahead of them
+
+	p1 := l.join(t, "203.0.113.5", rankProspect)
+	l.line(t, p1, m1, g1, g2, g3) // a prospect is ahead of a member
+
+	m2 := l.join(t, "203.0.113.6", rankMember)
+	l.line(t, p1, m1, m2, g1, g2, g3) // equal ranks keep arrival order
+
+	if n := l.a.prio.placed.Load(); n != 3 {
+		t.Errorf("priority_placed_total: %d, want 3 (every ranked arrival passed someone)", n)
 	}
+	views := l.p.queueViews(time.Now())
+	if views[0].Rank != "prospect" || views[1].Rank != "member" || views[3].Rank != "" {
+		t.Errorf("queue view ranks: %q %q %q", views[0].Rank, views[1].Rank, views[3].Rank)
+	}
+}
+
+// -priority-order-line=false keeps strict arrival order for ranked visitors.
+func TestPriority_RankedVisitorsWaitInArrivalOrderWhenOff(t *testing.T) {
+	l := newRankedLineTest(t, false)
+	guest := l.join(t, "203.0.113.1", rankGuest)
+	prospect := l.join(t, "203.0.113.2", rankProspect)
+	member := l.join(t, "203.0.113.3", rankMember)
+	l.line(t, guest, prospect, member)
+	if n := l.a.prio.placed.Load(); n != 0 {
+		t.Errorf("nobody should be moved with -priority-order-line=false: %d", n)
+	}
+}
+
+// A ban drops a ranked visitor from the line like any other.
+func TestPriority_BanDropsRankedVisitor(t *testing.T) {
+	l := newRankedLineTest(t, true)
+	guest := l.join(t, "203.0.113.1", rankGuest)
+	l.join(t, "198.51.100.9", rankProspect)
+	if _, err := l.a.abuse.banFor(netip.MustParseAddr("198.51.100.9"), time.Hour, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 2*time.Second, func() bool { return l.a.room.LiveQueueDepth() == 1 },
+		"the ban never removed the ranked visitor")
+	l.line(t, guest)
 }
 
 func TestPriority_FormsSkipLineForAdmittedVisitors(t *testing.T) {
@@ -256,5 +324,22 @@ func TestPriority_BansApplyAtEveryRank(t *testing.T) {
 	}
 	if resp, body := get(t, front.URL+"/hello", withGrant(pass, grant)); !isBlocked(resp, body) {
 		t.Errorf("banned staff: got %d, want blocked", resp.StatusCode)
+	}
+}
+
+// Ordering the line by rank is what priority.go was written to do, so it is
+// on unless an operator turns it off.
+func TestPriority_OrderLineDefaultsOn(t *testing.T) {
+	clearConcertEnv(t)
+	cfg, _, err := parseConfig(newFlagSet(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.priorityOrderLine {
+		t.Error("-priority-order-line should default to true")
+	}
+	t.Setenv("CONCERT_PRIORITY_ORDER_LINE", "false")
+	if cfg, _, err = parseConfig(newFlagSet(), nil); err != nil || cfg.priorityOrderLine {
+		t.Errorf("CONCERT_PRIORITY_ORDER_LINE=false: got %v %v", cfg.priorityOrderLine, err)
 	}
 }

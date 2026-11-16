@@ -32,7 +32,7 @@ XLM payments use the native asset through Soroban. This is not a classic Stellar
 
 ## Run a test deployment
 
-Requires Go 1.26.1 or later, nothing else. Wallet access is part of the `concert` binary.
+Requires Go 1.27.3 or later, nothing else. Wallet access is part of the `concert` binary.
 
 1. Start from the samples: `concert example fastlane > fastlane.json` and `concert example networks > networks.json` (the files are also in `examples/`, and `installer.sh` writes them to `/etc/concert/*.example.json`). Every value in them is a well-formed placeholder: replace each one using the [configuration reference](#configuration-reference) below, and remove the offers, collections and networks you do not use. Keep `test_mode: true` for testing; it rejects mainnet identifiers. Set `enabled` to `true` only after configuration is complete. Keep both files private, mode 0640, readable by the account Concert runs as. Under SELinux, install them with `installer.sh`, which applies the `concert_etc_t` label Concert needs to read them.
 2. Configure a native receiving address for each offer. XRP receiving addresses must accept a direct payment without a required destination tag. Use a numeric Hedera receiving account and a separate funded Hedera sponsor. Fund the dedicated Stellar sponsor on the selected network. Concert does not custody payer funds or need a recipient's private key.
@@ -185,6 +185,8 @@ concert-client
 
 Load the client secret from your secret store before running this example. To prove NFT ownership instead, set `CONCERT_NFT_RULE` to the configured local rule ID, set `CONCERT_NFT_TOKEN` when needed, and run `concert-client --nft`. Keep the state file private and send its session as the `Concert-Session` header on subsequent protected requests.
 
+To wait in Concert's line instead of paying, run `concert-client --wait /path`. It needs no wallet credentials (only `CONCERT_CLIENT_NETWORK`, which names the state file's session) and never pays: it holds one place with the saved session, prints the position and `status_url`, sleeps for `Retry-After` (1s–1m, `CONCERT_CLIENT_MAX_WAIT` overall, default 1h) and prints the admitted response. When Concert offers its fast lane, `--wait` says so once. The state file is locked only while the session is renewed, so `concert-client` can pay with the same session in another shell; the waiting place is then admitted through the priority lane on its next retry. This needs `-agent-queue` on the server; see [The fast-lane offer in a queued response](#the-fast-lane-offer-in-a-queued-response).
+
 For XRP the client builds the Payment as `@x402/xrpl`'s client does (current `Sequence`, network fee, the widest accepted `LastLedgerSequence`, and `InvoiceID`, `DestinationTag` or `NetworkID` when required); it supports the `sequence` transfer method and never creates tickets. It also checks that each RPC endpoint is on the requested network before signing.
 
 The client renews its saved session on every run; renewal keeps the session ID, so a saved payment stays attached to it. If the saved session expired before its payment was resolved, the client stops instead of presenting the payment under a new session. The client saves and flushes the signed authorization before submission and locks its state file against concurrent runs. Rerunning uses the **same** authorization. A crash can leave a `.lock`; confirm that the old process has stopped before removing that lock, and retain the JSON state. An intentional later purchase needs a new state file after the old payment is resolved. Never delete state to get around an uncertain payment.
@@ -214,6 +216,29 @@ window.concertWallets['xrpl:1'] = {
 The snippet describes an interface; wire it to the chosen wallet SDK. NFT signatures are raw challenge bytes for XRPL's `ripple-keypairs` algorithm, SEP-53 for Stellar, account-key signatures for Hedera and Ed25519 for Solana. A wallet that cannot sign the specified message format cannot use that proof route. No WalletConnect project ID or universal XRPL/XLM/HBAR browser connector is bundled. The signed-payment and signed-message forms also accept externally generated proofs.
 
 The browser retains a pending signed payment in `sessionStorage` and exposes an explicit identical-payload retry. Keep that tab open until the payment is resolved. A new tab can recover server status with its session cookie; an expired/deleted session or lost authorization may require merchant assistance. Automated clients have stronger disk-backed recovery and are preferable for unattended purchases.
+
+## The fast-lane offer in a queued response
+
+With `-agent-queue` on, software waiting in line with a `Concert-Session` header keeps one place per session (see [AI agents in the line](../README.md#ai-agents-in-the-line)). When it is queued, Concert offers it the fast lane in the response itself, the way a browser in the line sees the wallet-access card:
+
+```
+HTTP/1.1 429 Too Many Requests
+Retry-After: 5
+Link: <https://shop.example/_concert/payment>; rel="payment"
+Cache-Control: no-store
+
+{"fast_lane":{"offers":[{"amount":"1000000","asset":"XRP","network":"xrpl:1"}],"pass_seconds":300,
+  "payment_url":"https://shop.example/_concert/payment"},
+ "hint":"send the same Concert-Session header and retry to hold your position",
+ "position":37,"queue_depth":412,"queued":true,"retry_after_seconds":5,
+ "status_url":"https://shop.example/queue/status/9f2c…"}
+```
+
+- `fast_lane` and the `Link` header appear only when at least one payment offer is configured. An NFT-only configuration has nothing to buy and shows neither.
+- The offer is built from the public configuration (`GET /_concert/config`): each offer's network, asset and amount in atomic units, and the pass length. It names no recipient. The client gets the full x402 requirements, including `payTo`, from the 402 at `payment_url` and must check them there, as `concert-client` checks the amount and recipient.
+- `payment_url` is the pass resource described above. Paying there with the same session makes that session eligible: its next retry takes the priority lane, and if the lane stays full past `-priority-wait`, the session keeps its place in line as before.
+- The offer is information, never a charge. Every payment is still screened by `policy_url`, and a queued place is kept whether or not the agent pays.
+- Eligibility still does not reserve capacity. A reserved slot would be a separate product; see [RESERVED_CAPACITY.md](RESERVED_CAPACITY.md) (a proposal).
 
 ## Durability, recovery and operational limits
 

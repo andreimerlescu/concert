@@ -72,6 +72,14 @@ type config struct {
 	priorityWait     time.Duration
 	priorityLaneRank int
 	priorityForms    bool
+	// priorityOrderLine places ranked visitors who wait ahead of lower
+	// ranks in room's line; false keeps strict arrival order.
+	priorityOrderLine bool
+
+	// Keyed places for Concert-Session clients; see agent.go. agentPlaces
+	// 0, as in configs built directly, means defaultAgentPlaces.
+	agentQueue  bool
+	agentPlaces int
 
 	// Let's Encrypt; see tls.go. TLS on -listen is enabled when tlsDomains
 	// names at least one host.
@@ -206,6 +214,12 @@ func (c *config) normalize() error {
 	}
 	if err := c.normalizePriority(); err != nil {
 		return err
+	}
+	if c.agentPlaces == 0 {
+		c.agentPlaces = defaultAgentPlaces
+	}
+	if c.agentPlaces < 1 || c.agentPlaces > maxAgentPlaces {
+		return fmt.Errorf("invalid -agent-places %d: must be between 1 and %d", c.agentPlaces, maxAgentPlaces)
 	}
 
 	if c.tlsHosts, err = parseTLSDomains(c.tlsDomains); err != nil {
@@ -369,7 +383,10 @@ func validateRoutes(c *config) error {
 			if r.prefix && r.path == "" {
 				return fmt.Errorf("%s: \"/*\" would capture every path", g.flag)
 			}
-			if r.path == "/queue/status" || r.path == "/_room" || strings.HasPrefix(r.path, "/_room/") ||
+			// room registers GET /queue/status/:ticket as well as
+			// /queue/status; a path under it would make gin panic.
+			if r.path == "/queue/status" || strings.HasPrefix(r.path, "/queue/status/") ||
+				r.path == "/_room" || strings.HasPrefix(r.path, "/_room/") ||
 				r.path == "/_concert" || strings.HasPrefix(r.path, "/_concert/") {
 				return fmt.Errorf("%s: %s is reserved by concert", g.flag, r.path)
 			}

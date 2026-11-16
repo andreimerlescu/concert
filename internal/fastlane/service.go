@@ -218,6 +218,24 @@ func (s *Service) session(r *http.Request) (id, token string, exp time.Time, ok 
 	return digest([]byte("session/" + nonce)), token, exp, true
 }
 
+// SessionID returns the stable session ID carried by the Concert-Session
+// header, when it holds a valid, unexpired token. It reads only the header,
+// never the concert_fastlane cookie: software that waits in line sends the
+// header, while a browser carries the cookie and keeps the cookie flow.
+// The ID is the one receipts are stored under, and survives renewal. Cost:
+// one header read and one HMAC check. Safe for concurrent use.
+func (s *Service) SessionID(r *http.Request) (string, bool) {
+	token := r.Header.Get(SessionHeader)
+	if token == "" {
+		return "", false
+	}
+	nonce, _, ok := s.parseToken(token)
+	if !ok {
+		return "", false
+	}
+	return digest([]byte("session/" + nonce)), true
+}
+
 // allow applies the per-address POST limit. RemoteAddr is Concert's canonical
 // client address (see registerConcertRoutes), never a client-supplied header.
 func (s *Service) allow(remote string, now time.Time) bool {

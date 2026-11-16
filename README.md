@@ -62,7 +62,7 @@ Or build from source:
     cd concert
     make build
 
-`make build` writes static binaries for Linux, macOS and Windows on amd64 and arm64 to `bin/`. Requires Go 1.26 or newer.
+`make build` writes static binaries for Linux, macOS and Windows on amd64 and arm64 to `bin/`. Requires Go 1.27.3 or newer (room v1.5.0 declares it).
 
 On RHEL, Alma, Rocky, CentOS Stream or Fedora, `installer.sh` installs a prebuilt binary as a confined systemd service under SELinux enforcing mode, downloads the IPtoASN database for IP details, and schedules its daily refresh. See the comments at the top of the script.
 
@@ -124,6 +124,7 @@ Every option can be set with a flag or an environment variable. A flag overrides
 | `-priority-lane-rank` | `CONCERT_PRIORITY_LANE_RANK` | `3` (customer) | Lowest rank that uses the priority lane |
 | `-priority-wait` | `CONCERT_PRIORITY_WAIT` | `5s` | Longest wait for a lane slot before joining the line |
 | `-priority-forms` | `CONCERT_PRIORITY_FORMS` | `true` | Forms from admitted visitors use the lane, and get 503 instead of queuing |
+| `-priority-order-line` | `CONCERT_PRIORITY_ORDER_LINE` | `true` | Place ranked visitors who wait ahead of lower ranks; `false` keeps strict arrival order |
 | `-abuse` | `CONCERT_ABUSE` | `true` | Enable the abuse registry |
 | `-abuse-strikes` | `CONCERT_ABUSE_STRIKES` | `20` | Strike total within the window that triggers a ban |
 | `-abuse-window` | `CONCERT_ABUSE_WINDOW` | `1m` | Window over which strikes accumulate |
@@ -138,6 +139,8 @@ Every option can be set with a flag or an environment variable. A flag overrides
 | `-rate` | `CONCERT_RATE` | `0` | Base price per queue position (0 disables skip-the-line) |
 | `-surge` | `CONCERT_SURGE` | `0` | Extra price per position for each client in the queue |
 | `-pass` | `CONCERT_PASS_DURATION` | `0` | VIP pass lifetime after paying to skip (0 disables passes) |
+| `-agent-queue` | `CONCERT_AGENT_QUEUE` | `false` | With wallet access on, a valid `Concert-Session` header keeps one place in line per session, with no cookies; see [AI agents in the line](#ai-agents-in-the-line) |
+| `-agent-places` | `CONCERT_AGENT_PLACES` | `4` | Places in line one client address (IPv6: its /64) may hold through `Concert-Session`; past it, 429 and a strike |
 | `-upstream-timeout` | `CONCERT_UPSTREAM_TIMEOUT` | `30s` | How long to wait for the origin's response headers |
 | `-api-json` | `CONCERT_API_JSON` | `true` | Answer queued non-browser clients with JSON 429 instead of HTML |
 | `-retry-after` | `CONCERT_RETRY_AFTER` | `5` | `Retry-After` seconds sent to queued API clients |
@@ -442,6 +445,34 @@ When `-max-queue` is reached, new arrivals receive `503 Service Unavailable` wit
 
 Set `-api-json=false` to serve the HTML page to every client regardless of `Accept`.
 
+## AI agents in the line
+
+Software that waits for a drop, such as an AI shopping agent, usually keeps no cookie jar. On the cookie flow above, every retry would take a new place at the back of the line and a churn strike, until it is banned. With wallet access configured ([docs/FASTLANE.md](docs/FASTLANE.md)) and `-agent-queue` on, an agent waits by its fast-lane session instead.
+
+**Off by default.** Agents that hold places are also what scalpers use. Turn it on only for a launch where you want software buyers, and keep `-agent-places` low.
+
+**Identity.** A request is an agent's when it carries a valid `Concert-Session` header, the session token from `POST /_concert/session`. Concert checks the token's signature and keys the place in room's line by the session's ID, which stays the same when the session is renewed. The agent gets no cookies, and the same session finds the same place on every retry. A session that stops asking for the ticket TTL loses its place. Browsers carry the `concert_fastlane` cookie, not the header, so they stay on the cookie flow. No other header, `Authorization` included, can key a place, because only a header Concert signs is an identity no one can forge.
+
+**Fair to people.** Agents queue first come, first served with everyone else, and earn no churn strikes for retrying with the same session. Bans drop an address's agent places with its other tickets. Sessions are free to create, so one client address (IPv6: its /64) may hold at most `-agent-places` places, 4 by default. A new session past that gets `429` with `Retry-After`, plus a strike. A paid session goes through the priority lane before it is ever queued, exactly as a paid browser does. Paying to skip the line is screened by `policy_url` like every payment.
+
+**The response.** A queued agent gets Concert's API contract, with its place and, when payment offers are configured, the fast-lane offer:
+
+    HTTP/1.1 429 Too Many Requests
+    Retry-After: 5
+    Link: <https://shop.example/_concert/payment>; rel="payment"
+    Cache-Control: no-store
+
+    {"fast_lane":{"offers":[{"amount":"1000000","asset":"XRP","network":"xrpl:1"}],"pass_seconds":300,"payment_url":"https://shop.example/_concert/payment"},"hint":"send the same Concert-Session header and retry to hold your position","position":37,"queue_depth":412,"queued":true,"retry_after_seconds":5,"status_url":"https://shop.example/queue/status/9f2c…"}
+
+- `position` counts every place ahead, 1 being the front.
+- `status_url` is absolute, under the fast lane's `origin`, so an agent can hand it to a person ("you're #37, watch here"). It names the place without granting it, is limited to one view a second, and does not keep the place alive.
+- `fast_lane` and `Link` appear only with payment offers. They name the pass resource, the networks, assets and amounts, and the pass length. Recipients come from the 402 at `payment_url`. See [The fast-lane offer in a queued response](docs/FASTLANE.md#the-fast-lane-offer-in-a-queued-response).
+- When the queue is full, agents get the same `503` "waiting room is full" as other API clients. `-api-json` does not apply to agents: they always get JSON.
+
+`concert-client --wait /path` is a reference agent: it waits with its saved session and never pays on its own.
+
+The portal's Queue tab marks agent places as **agent** with the first 8 characters of the session ID, and its overview counts the places held and the arrivals refused. The line is per process, like the rest of the queue: two Concert instances keep two independent lines, and an agent's place exists only on the instance it asked.
+
 ## Operations endpoints
 
 These are never queued, so they keep answering even when the room is full. Banned clients are rejected here too.
@@ -482,6 +513,7 @@ Expose `/_room/*` only on a trusted network, or block it at your TLS terminator.
 Concert answers these paths itself, and they never reach your origin:
 
     /queue/status
+    /queue/status/{id}
     /_room/healthz
     /_room/stats
     /_room/cap
@@ -498,8 +530,8 @@ Your application ranks its own visitors by adding a header to any page response:
 | Rank | Value | Send it when | While the room is full | Default TTL |
 |---|---|---|---|---|
 | 0 | `guest` | Anonymous, or to clear a grant | First come, first served | — |
-| 1 | `member` | Signed in, nothing bought yet | Waits in arrival order | 8h |
-| 2 | `prospect` | On a buying page, items in cart | Waits in arrival order | 30m |
+| 1 | `member` | Signed in, nothing bought yet | Waits ahead of guests | 8h |
+| 2 | `prospect` | On a buying page, items in cart | Waits ahead of members and guests | 30m |
 | 3 | `customer` | Has bought before | Priority lane | 8h |
 | 4 | `subscriber` | Has an active subscription | Priority lane | 8h |
 | 5 | `checkout` | Payment in progress | Priority lane | 30m |
@@ -512,7 +544,9 @@ Concert removes the header before the response reaches the browser and stores th
 - Unknown values are ignored and logged.
 - Only page responses grant ranks: asset, bypass and stream responses can't.
 
-While the room is busy, ranks at or above `-priority-lane-rank` skip the line through the priority lane: a separate pool of `-priority-cap` slots, so the origin sees at most `-cap + -priority-cap` page requests at once. A lane request waits up to `-priority-wait` for a slot, highest rank first, then joins the line. Ranks below the lane rank wait in arrival order, and the portal shows their rank. Set the lane rank to 2 to let prospects skip the line too. Bans apply at every rank.
+While the room is busy, ranks at or above `-priority-lane-rank` skip the line through the priority lane: a separate pool of `-priority-cap` slots, so the origin sees at most `-cap + -priority-cap` page requests at once. A lane request waits up to `-priority-wait` for a slot, highest rank first, then joins the line. Set the lane rank to 2 to let prospects skip the line too. Bans apply at every rank.
+
+Ranked visitors who wait in the line are placed by rank: ahead of every lower rank, behind every equal or higher rank, in arrival order within a rank. A `member` who arrives after three guests waits ahead of them, and a `prospect` waits ahead of the `member`. Guests keep first come, first served among themselves, and a new arrival always joins behind every ranked visitor. The portal's Queue tab shows each visitor's rank. A visitor is placed when their ticket is issued or their rank changes; a lower rank later never moves them back. Set `-priority-order-line=false` to keep the line in strict arrival order whatever the rank; the Queue tab then shows no ranks.
 
 With `-priority-forms`, a form submission from a visitor already admitted uses the lane too. If the lane stays full, the visitor gets `503` and a page saying the form was not sent. Queuing the submission would lose the form.
 
@@ -633,8 +667,6 @@ On `SIGTERM` Concert stops accepting new connections, gives in-flight requests u
 **One instance, one queue, one registry.** Queue state, asset semaphores, the abuse registry and the history live in the process's memory. Two Concert instances are two independent waiting rooms: the origin sees up to twice `-cap`, a visitor's place in line exists only on the instance that issued their ticket, and a client banned on one instance is not banned on the other. If you must run more than one, divide `-cap` by the number of instances and enable sticky sessions at the load balancer. Use a cookie the load balancer inserts itself, because `room_ticket` is only issued once a visitor is queued. Admission passes and priority grants work across instances as long as they share `CONCERT_ADMIT_SECRET`.
 
 **A pass limits concurrency, not request rate.** A pass holder can have at most its per-user cap of asset requests in flight, but fast assets finish quickly, so a single pass can still generate many requests per second. The global semaphore bounds the total load on the host regardless. Volumetric attacks from many addresses belong at a CDN or WAF in front of Concert; the abuse registry handles individual misbehaving clients.
-
-**Ranked visitors below the lane rank wait in arrival order.** room can't yet reorder its line by rank, so `member` and `prospect` visitors keep their arrival position; the portal still shows their rank.
 
 **Skip the line is not wired end to end.** `-rate`, `-surge`, `-skip-url`, and `-pass` enable the pricing card on the waiting room page. But promoting a paid visitor requires calling room's in-process API after payment, and Concert does not yet expose an endpoint your payment flow can call. Leave `-rate` at `0` in production for now. The portal's "move to the front" works without pricing.
 

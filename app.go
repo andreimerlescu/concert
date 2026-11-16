@@ -27,16 +27,20 @@ type app struct {
 	fastlane *fastlane.Service
 	// gatewayClose stops the in-process chain gateway after the fast lane.
 	gatewayClose func()
+	// agentOffer is the fast-lane offer a queued agent is shown, or nil
+	// without payment offers; see agent.go. Set once in newApp.
+	agentOffer *agentOffer
 
 	cfg       config // as concert started; the running configuration is current().cfg
 	room      *room.WaitingRoom
 	stats     *counters
 	admit     *admitter
 	abuse     *abuseRegistry // always present; current().abuse is nil while -abuse=false
-	prio      *priorityState // rank grants, the ranked line and counters; see priority.go
+	prio      *priorityState // rank grants and counters; see priority.go
 	handler   http.Handler   // serves every request with the current generation
 	settings  *settingsManager
 	drops     *dropper      // bans waiting to be removed from the line; see queue.go
+	agents    *agentPlaces  // which address holds each keyed place; see agent.go
 	bansPath  string        // bans.json, or "" when bans are not persisted
 	queuePath string        // saved queue, or "" when the queue is not persisted
 	rateBits  atomic.Uint64 // skip-the-line base price, float64 bits
@@ -79,12 +83,13 @@ func newApp(cfg config) (*app, error) {
 
 	stats := &counters{}
 	a := &app{
-		cfg:   cfg,
-		stats: stats,
-		admit: newAdmitter(cfg.admitSecret, cfg.admitTTL, cfg.cookiePath, cfg.cookieDomain, cfg.secureCookie),
-		abuse: newAbuseRegistry(cfg, stats),
-		drops: newDropper(),
-		stop:  make(chan struct{}),
+		cfg:    cfg,
+		stats:  stats,
+		admit:  newAdmitter(cfg.admitSecret, cfg.admitTTL, cfg.cookiePath, cfg.cookieDomain, cfg.secureCookie),
+		abuse:  newAbuseRegistry(cfg, stats),
+		drops:  newDropper(),
+		agents: newAgentPlaces(),
+		stop:   make(chan struct{}),
 	}
 	a.settings = newSettingsManager(cfg)
 	// Before the first generation: its proxy turns the origin's
@@ -106,6 +111,11 @@ func newApp(cfg config) (*app, error) {
 		}
 		return ""
 	})
+	// Requests agentGate identified by a Concert-Session header are keyed
+	// by session in room's line (see agent.go); every other request keeps
+	// the cookie flow. The function only reads what agentGate left in the
+	// context, so it costs nothing on the hot path.
+	wr.SetTicketKeyFunc(agentKeyFromContext)
 	registerRoomEvents(wr, a)
 
 	g, err := a.buildGeneration(cfg, nil)
@@ -141,6 +151,12 @@ func newApp(cfg config) (*app, error) {
 			return nil, fmt.Errorf("fast lane: %w", err)
 		}
 	}
+	if a.fastlane != nil {
+		// A queued agent's status_url is absolute, so it can be handed to
+		// a person: "you're #37, watch here".
+		wr.SetStatusBaseURL(a.fastlane.Config().Origin + "/queue/status/")
+		a.agentOffer = newAgentOffer(a.fastlane)
+	}
 	// All startup errors after this point close the fast lane's journal.
 	started := false
 	defer func() {
@@ -169,6 +185,9 @@ func newApp(cfg config) (*app, error) {
 			wr.Stop()
 			return nil, err
 		}
+		if n := a.agents.seed(wr); n > 0 {
+			log.Printf("queue: %d restored place(s) belong to agents", n)
+		}
 	}
 
 	// IP details never stop startup: without a usable NADDR_DATA or
@@ -179,7 +198,6 @@ func newApp(cfg config) (*app, error) {
 	a.abuse.setOnBan(a.queueDrop)
 
 	go a.abuse.janitor(a.stop)
-	go a.prio.janitor(a.room, a.stop)
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
@@ -224,8 +242,8 @@ func (a *app) attachHistory(h *history) {
 }
 
 // Close stops the janitors and the drop loop, flushes unsaved bans and the
-// history log, saves the queue, and stops the IP database watcher and the
-// waiting room's background workers. run calls it after the listeners have
+// history log, stops the waiting room's reaper, saves the queue, and stops
+// the IP database watcher. run calls it after the listeners have
 // drained, so no new tickets or history arrive while they are being saved.
 func (a *app) Close() {
 	a.stopOnce.Do(func() {
@@ -240,6 +258,10 @@ func (a *app) Close() {
 			closers[i]()
 		}
 
+		// Stop waits for room's reaper to exit (room v1.5.0), so no reaper
+		// pass runs during or after the export below. The line itself
+		// stays readable after Stop.
+		a.room.Stop()
 		if a.queuePath != "" {
 			a.saveQueue()
 		}
@@ -247,7 +269,6 @@ func (a *app) Close() {
 			g.assets.users.close()
 		}
 		a.ipinfo.close()
-		a.room.Stop()
 	})
 }
 
@@ -278,7 +299,9 @@ func registerRoomEvents(wr *room.WaitingRoom, a *app) {
 		// A visitor who arrived with no room_ticket at all took a fresh
 		// place in line: a script discarding cookies does this on every
 		// retry. An unrecognised ticket (StaleTicket) is a browser whose old
-		// ticket expired or was removed, and is not struck.
+		// ticket expired or was removed, and is not struck. A keyed arrival
+		// (an agent's session, s.Key set) has an empty ClientKey, which
+		// churnStrike ignores: agents are capped by -agent-places instead.
 		if !s.StaleTicket {
 			a.churnStrike(s.ClientKey)
 		}

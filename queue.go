@@ -95,7 +95,9 @@ func (a *app) dropLoop() {
 
 // dropWaiting removes every waiting visitor whose client key falls inside
 // one of scopes, except exempt addresses, and reports how many it removed.
-// room runs the predicate with no locks held.
+// room records the resolved address on keyed tickets too, so a ban drops
+// an address's agent places with the rest. room runs the predicate with no
+// locks held.
 func (a *app) dropWaiting(scopes ...netip.Prefix) int {
 	if len(scopes) == 0 {
 		return 0
@@ -111,6 +113,9 @@ func (a *app) dropWaiting(scopes ...netip.Prefix) int {
 		}
 		for _, s := range scopes {
 			if s.Contains(ip) {
+				if t.Key != "" {
+					a.agents.forget(t.Key)
+				}
 				return true
 			}
 		}

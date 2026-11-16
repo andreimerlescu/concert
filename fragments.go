@@ -486,7 +486,7 @@ func (p *portal) fragQueue(c *gin.Context) {
 		kept := list[:0]
 		for _, o := range list {
 			if strings.Contains(strings.ToLower(o.Client), q) || strings.Contains(strings.ToLower(o.Path), q) ||
-				strings.Contains(strings.ToLower(o.UserAgent), q) {
+				strings.Contains(strings.ToLower(o.UserAgent), q) || (o.Agent != "" && strings.Contains("agent "+o.Agent, q)) {
 				kept = append(kept, o)
 			}
 		}

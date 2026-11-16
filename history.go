@@ -482,7 +482,7 @@ func (h *history) quiet(g *generation) []pathRule {
 		return q.rules
 	}
 	rules := append(parsePaths(g.cfg.assets), parsePaths(g.cfg.assetPublic)...)
-	rules = append(rules, pathRule{path: "/queue/status"}, pathRule{path: "/_room/healthz"})
+	rules = append(rules, statusRules...)
 	h.quietCache.Store(&quietRules{g: g, rules: rules})
 	return rules
 }

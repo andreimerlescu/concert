@@ -1,3 +1,22 @@
+# v0.0.9: room v1.5.0
+
+## Behaviour changes
+
+- **Go 1.27.3 is required to build.** room v1.5.0 declares `go 1.27.3`, and a module cannot declare a lower Go version than its dependencies, so Concert's `go.mod` moves from 1.26.1 to 1.27.3.
+- **The line is ordered by rank, by default.** Visitors the origin ranks below `-priority-lane-rank` (`member`, `prospect`) used to wait in arrival order. They are now placed ahead of every lower rank, in arrival order within a rank, through room's `SetTicketRank`: a `member` who arrives after three guests waits ahead of them. `priority_placed_total` counts the moves. Operators who depend on strict arrival order set `-priority-order-line=false` (`CONCERT_PRIORITY_ORDER_LINE`); the portal's Queue tab then shows no ranks, because the rank now lives on room's ticket instead of a Concert-side map.
+- **`/queue/status/{id}` is a new reserved path.** room now serves a keyed ticket's public place there. `-bypass`, `-assets`, `-asset-public`, `-stream-paths` and `-ban-paths` entries under `/queue/status/` are refused at startup with the usual "reserved by concert" error, because gin would panic on the route conflict. Successful views stay out of the access log and the history, like `/queue/status`.
+
+## New, off by default
+
+- **AI agents can wait in line (`-agent-queue`).** With wallet access configured, a request carrying a valid `Concert-Session` header is identified to room by its session (room's keyed tickets): it keeps one place across retries and renewals, gets no cookies, and earns no churn strikes. One client address (IPv6: its /64) may hold `-agent-places` (default 4) such places; past that it gets 429 and a strike (`strikeAgentPlaces`, weight 1). Bans drop an address's agent places with its other tickets. The portal's Queue tab marks them **agent** with the first 8 characters of the session ID. Browsers carry the `concert_fastlane` cookie, not the header, and are unaffected.
+- **A queued agent is offered the fast lane.** A waiting agent gets Concert's API contract, `429` with `Retry-After: -retry-after` (not room's keyed default of `503` and `Retry-After: 3`), with its `position`, the `queue_depth`, an absolute `status_url` (`/queue/status/{id}` under the fast lane's `origin`) a person can watch, and, when payment offers are configured, a `fast_lane` object and a `Link: <…/_concert/payment>; rel="payment"` header. Paying stays an explicit act subject to the usual policy screening. Cookie API clients and browsers get exactly the responses they got before, and the queue-depth breaker still answers `503` "waiting room is full".
+
+- **`concert-client --wait PATH` waits in line.** It renews the saved session, then requests `PATH` with that `Concert-Session` until Concert stops answering `queued`, printing the position and `status_url` and sleeping for `Retry-After` (bounded to 1s–1m, `CONCERT_CLIENT_MAX_WAIT` overall, default 1h; Ctrl-C stops it). It needs no wallet keys and never pays: it reports a fast-lane offer once, and paying stays the explicit `concert-client` command with its amount and recipient checks. The state file is locked only while renewing, so that command can pay with the same session while `--wait` runs.
+
+## Fixes
+
+- **Shutdown no longer races room's reaper.** `Close` stops the waiting room before it saves the queue. room v1.5.0's `Stop` waits for its reaper to exit, so no reaper pass can remove a ticket while the line is being written.
+
 # Source update: v0.1.0
 
 ## Admission and payment

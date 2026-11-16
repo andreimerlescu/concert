@@ -116,7 +116,7 @@
 {{define "queue-rows"}}{{range .}}<tr data-key="{{.ID}}" data-first="{{.JoinedMS}}">
 <td class="fw-semibold">{{.PosLabel}}</td>
 <td class="cell-ip" data-chip>{{if .Client}}{{template "ipcell" (ipcell .Client)}}{{else}}—{{end}}</td>
-<td>{{if .Ready}}<span class="badge text-bg-success">ready</span>{{else if .Idle}}<span class="badge text-bg-secondary">idle</span>{{else}}<span class="badge text-bg-primary">waiting</span>{{end}}{{if .Promoted}} <span class="badge text-bg-info">moved up</span>{{end}}{{if .HasPass}} <span class="badge text-bg-warning">VIP</span>{{end}}{{with .Rank}} <span class="badge text-bg-primary" data-bs-toggle="tooltip" data-bs-title="Priority rank granted by the application (Concert-Priority)">{{.}}</span>{{end}}</td>
+<td>{{if .Ready}}<span class="badge text-bg-success">ready</span>{{else if .Idle}}<span class="badge text-bg-secondary">idle</span>{{else}}<span class="badge text-bg-primary">waiting</span>{{end}}{{if .Promoted}} <span class="badge text-bg-info">moved up</span>{{end}}{{if .HasPass}} <span class="badge text-bg-warning">VIP</span>{{end}}{{with .Rank}} <span class="badge text-bg-primary" data-bs-toggle="tooltip" data-bs-title="Priority rank granted by the application (Concert-Priority)">{{.}}</span>{{end}}{{with .Agent}} <span class="badge text-bg-dark" data-bs-toggle="tooltip" data-bs-title="Software waiting with a Concert-Session header; this is the start of its session ID">agent {{.}}</span>{{end}}</td>
 <td class="text-nowrap"><span class="js-since" data-ms="{{.JoinedMS}}"></span></td>
 <td class="text-nowrap"><span class="js-ago" data-ms="{{.SeenMS}}"></span></td>
 <td class="text-truncate cell-path font-monospace small" title="{{.Path}}">{{if .Path}}{{.Path}}{{else}}—{{end}}</td>
