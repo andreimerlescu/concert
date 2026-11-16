@@ -25,9 +25,12 @@ import (
 // 503) into JSON for clients that did not ask for HTML. It applies only to
 // gated catch-all requests: registered routes (/queue/status, /_room/*,
 // bypass, asset and stream paths) have a non-empty FullPath and are left alone.
+//
+// Keyed requests (agents; see agent.go) are not cookie clients: agentGate
+// shapes their responses, with no cookies, whatever -api-json says.
 func apiQueueResponses(retryAfter int) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if c.FullPath() != "" || wantsHTML(c.Request) {
+		if c.FullPath() != "" || wantsHTML(c.Request) || c.GetString(ctxAgentKey) != "" {
 			c.Next()
 			return
 		}
@@ -294,6 +297,9 @@ func (p *portal) apiOverview(c *gin.Context) {
 	for k, v := range g.priorityView() {
 		h[k] = v
 	}
+	for k, v := range g.agentView() {
+		h[k] = v
+	}
 	c.JSON(http.StatusOK, h)
 }
 
@@ -315,6 +321,17 @@ type occupantView struct {
 	HasPass     bool      `json:"has_pass"`
 	Promoted    bool      `json:"promoted"`
 	Rank        string    `json:"rank"`
+	// Agent is the first 8 characters of the session ID of a keyed place
+	// (an agent waiting with Concert-Session), or "".
+	Agent string `json:"agent"`
+}
+
+// ticketRankLabel is the label of a rank room recorded on a ticket.
+func ticketRankLabel(r int) string {
+	if r <= 0 || r >= int(rankCount) {
+		return ""
+	}
+	return rankLabel(priorityRank(r))
 }
 
 func occupantID(token string) string {
@@ -341,7 +358,8 @@ func (p *portal) queueViews(now time.Time) []occupantView {
 			Ready:       t.Position <= 0,
 			HasPass:     t.HasPass,
 			Promoted:    t.Promoted,
-			Rank:        rankLabel(p.a.prio.line.rankOf(t.Token)),
+			Rank:        ticketRankLabel(t.Rank),
+			Agent:       agentSessionLabel(t.Key),
 		})
 	}
 	return out
@@ -446,6 +464,9 @@ func (p *portal) apiKick(c *gin.Context) {
 		}
 	}
 	p.notes.remove(t.Token)
+	if t.Key != "" {
+		p.a.agents.forget(t.Key)
+	}
 	log.Printf("portal: %s removed %s (%s) from the line, ban=%v", portalActor(c), body.ID, t.ClientKey, body.Ban)
 
 	secs := int(banFor / time.Second)
@@ -676,6 +697,12 @@ func (p *portal) serveMain(w http.ResponseWriter, r *http.Request, g *generation
 		token = ck.Value
 	}
 	isStatus := reqPath == "/queue/status"
+	if isTicketStatus(reqPath) {
+		// A keyed ticket's public place: it reads a place by ID, carries no
+		// ticket of the viewer's own, and never issues one.
+		next.ServeHTTP(w, r)
+		return
+	}
 	if token != "" && p.kicked.has(token, now) {
 		// A banned visitor is answered by the ban check in the main
 		// handler, which shows the block notice rather than the removal notice.

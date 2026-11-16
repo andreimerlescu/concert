@@ -39,19 +39,21 @@ import (
 // Ranks, lowest to highest, and what they get while the room is busy:
 //
 //	0 guest       anonymous; no header needed        first come, first served
-//	1 member      signed in, nothing bought          waits in arrival order
-//	2 prospect    buying page, items in cart         waits in arrival order
+//	1 member      signed in, nothing bought          waits ahead of guests
+//	2 prospect    buying page, items in cart         waits ahead of members
 //	3 customer    has bought before                  priority lane
 //	4 subscriber  active subscription                priority lane
 //	5 checkout    payment in progress                priority lane
 //	6 staff       operators and support              priority lane, first
 //
-// Ranked visitors below -priority-lane-rank wait in arrival order for now;
-// see orderLineByRank. Visitors at or above it take the priority lane: a
-// separate pool of -priority-cap slots, so the origin never sees more than
-// -cap + -priority-cap page requests at once. A lane request waits up to
-// -priority-wait for a slot, highest rank first, and otherwise joins the
-// line.
+// Ranked visitors who wait are placed in room's line ahead of every lower
+// rank and behind every equal or higher one, in arrival order within a
+// rank (room's SetTicketRank). -priority-order-line=false keeps the line in
+// strict arrival order instead. Visitors at or above -priority-lane-rank
+// take the priority lane: a separate pool of -priority-cap slots, so the
+// origin never sees more than -cap + -priority-cap page requests at once.
+// A lane request waits up to -priority-wait for a slot, highest rank
+// first, and otherwise joins the line, where it is placed by rank too.
 //
 // With -priority-forms, a form submission (any method but GET and HEAD) from
 // a visitor holding a valid admission pass also uses the lane, at its own
@@ -68,8 +70,7 @@ const (
 	priorityMinTTL    = time.Minute
 	priorityMaxTTL    = 24 * time.Hour
 	maxPriorityWait   = time.Minute
-	rankedLineMax     = 100000 // ranked tickets tracked in room's line
-	priorityLogValues = 50     // distinct bad header values logged
+	priorityLogValues = 50 // distinct bad header values logged
 
 	// Grant cookie: pass id(16) | rank(1) | expiry unix seconds(8) | HMAC(16)
 	grantRankOff = passIDLen
@@ -78,14 +79,6 @@ const (
 	grantMACLen  = 16
 	grantRawLen  = grantBodyLen + grantMACLen
 )
-
-// orderLineByRank moves ranked visitors ahead of lower ranks in room's line.
-// Off until room can order its line by rank itself: room's AdminPromote
-// gives a ticket the same position as the one already there, and ties go to
-// whoever arrived first, so strict rank order is not possible through it.
-// Ranked visitors below the lane rank wait in arrival order meanwhile; their
-// rank is still recorded for the portal.
-const orderLineByRank = false
 
 // ─── ranks ───────────────────────────────────────────────────────────────────
 
@@ -350,83 +343,20 @@ func (g *priorityGrants) modifyResponse(resp *http.Response) error {
 
 // ─── the ranked line ─────────────────────────────────────────────────────────
 
-// rankedLine remembers the rank of ranked visitors waiting in room's line,
-// and keeps them ahead of lower ranks.
-type rankedLine struct {
-	mu sync.Mutex
-	m  map[string]priorityRank // room ticket -> rank
-}
-
-func (l *rankedLine) rankOf(token string) priorityRank {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.m[token]
-}
-
-// place records token's rank for the portal and, once orderLineByRank is on,
-// moves it up room's line behind every waiting visitor of equal or higher
-// rank. It reports whether the ticket moved.
-func (l *rankedLine) place(wr *room.WaitingRoom, token string, rank priorityRank) bool {
-	l.mu.Lock()
-	if _, ok := l.m[token]; !ok && len(l.m) >= rankedLineMax {
-		l.mu.Unlock()
+// rankTicket places a waiting ticket by rank in room's line, and reports
+// whether it moved. room records the rank on the ticket (TicketInfo.Rank,
+// which the portal shows) and keeps it ahead of lower ranks, behind equal
+// or higher ones. A ticket already carrying this rank is left alone: a
+// second placement could only jump it ahead of a visitor an operator moved
+// to the front since, and each placement costs room a pass over its line.
+func rankTicket(wr *room.WaitingRoom, token string, rank priorityRank) bool {
+	if ti, ok := wr.Ticket(token); !ok || ti.Rank == int(rank) {
 		return false
 	}
-	l.m[token] = rank
-	if !orderLineByRank {
-		l.mu.Unlock()
-		return false
-	}
-	ahead := make([]string, 0, len(l.m))
-	for t, r := range l.m {
-		if t != token && r >= rank {
-			ahead = append(ahead, t)
-		}
-	}
-	l.mu.Unlock()
-
-	me, ok := wr.Ticket(token)
-	if !ok || me.Position <= 0 {
-		return false
-	}
-	var target int64 = 1
-	for _, t := range ahead {
-		if ti, ok := wr.Ticket(t); ok && ti.Position > 0 {
-			target++
-		}
-	}
-	if target >= me.Position {
-		return false
-	}
-	return promoteAt(wr.AdminPromote, token, target) == nil
-}
-
-// prune forgets tickets that are no longer waiting.
-func (l *rankedLine) prune(wr *room.WaitingRoom) {
-	l.mu.Lock()
-	tokens := make([]string, 0, len(l.m))
-	for t := range l.m {
-		tokens = append(tokens, t)
-	}
-	l.mu.Unlock()
-
-	var gone []string
-	for _, t := range tokens {
-		if ti, ok := wr.Ticket(t); !ok || ti.Position <= 0 {
-			gone = append(gone, t)
-		}
-	}
-	l.mu.Lock()
-	for _, t := range gone {
-		delete(l.m, t)
-	}
-	l.mu.Unlock()
-}
-
-// promoteAt calls room's AdminPromote with pos as the target position,
-// whatever integer type room declares for it.
-func promoteAt[P ~int | ~int32 | ~int64](promote func(string, P) error, token string, pos int64) error {
-	return promote(token, P(pos))
+	// ErrTokenNotFound and ErrAlreadyAdmitted only mean the ticket left the
+	// line or reached the front meanwhile; there is nothing to place.
+	moved, _ := wr.SetTicketRank(token, int(rank))
+	return moved
 }
 
 // ─── the priority lane ───────────────────────────────────────────────────────
@@ -530,37 +460,20 @@ func (s *rankedSem) release() {
 // ─── state and the gate ──────────────────────────────────────────────────────
 
 // priorityState is priority's long-lived state; the lane itself belongs to
-// the generation (see reload.go) because its size is a setting.
+// the generation (see reload.go) because its size is a setting. Ranks of
+// waiting visitors live on room's tickets.
 type priorityState struct {
 	grants       *priorityGrants
-	line         *rankedLine
 	requests     [rankCount]atomic.Int64 // gated page requests, by rank
 	laneServed   atomic.Int64
 	laneFull     atomic.Int64 // waited for the lane in vain
-	placed       atomic.Int64 // tickets moved up the line by rank
+	placed       atomic.Int64 // tickets SetTicketRank moved up the line
 	forms        atomic.Int64 // form submissions that used the lane
 	formsRefused atomic.Int64
 }
 
 func newPriorityState(secret []byte, admit *admitter) *priorityState {
-	return &priorityState{
-		grants: newPriorityGrants(secret, admit),
-		line:   &rankedLine{m: map[string]priorityRank{}},
-	}
-}
-
-// janitor forgets ranked tickets that are no longer waiting.
-func (ps *priorityState) janitor(wr *room.WaitingRoom, stop <-chan struct{}) {
-	t := time.NewTicker(10 * time.Second)
-	defer t.Stop()
-	for {
-		select {
-		case <-stop:
-			return
-		case <-t.C:
-			ps.line.prune(wr)
-		}
-	}
+	return &priorityState{grants: newPriorityGrants(secret, admit)}
 }
 
 // roomBusy reports whether a new page request would have to wait: every
@@ -571,8 +484,8 @@ func roomBusy(wr *room.WaitingRoom) bool {
 
 // priorityGate runs ahead of room's middleware on gated requests. It sends
 // lane-ranked visitors and admitted form submissions through the priority
-// lane while the room is busy, and moves ranked visitors who end up
-// waiting ahead of lower ranks.
+// lane while the room is busy, and, with -priority-order-line, places
+// ranked visitors who end up waiting ahead of lower ranks.
 func (g *generation) priorityGate(c *gin.Context) {
 	if c.FullPath() != "" {
 		return // registered routes: status, ops, bypass, assets, streams
@@ -629,13 +542,21 @@ func (g *generation) priorityGate(c *gin.Context) {
 		token = ck.Value
 	}
 	c.Next()
-	if rank == rankGuest || c.GetBool(ctxAdmitted) {
+	if rank == rankGuest || !cfg.priorityOrderLine || c.GetBool(ctxAdmitted) {
 		return
 	}
 	if t := issuedTicket(c.Writer.Header()); t != "" {
 		token = t
 	}
-	if token != "" && ps.line.place(g.a.room, token, rank) {
+	if key := c.GetString(ctxAgentKey); key != "" {
+		// A keyed place (see agent.go) has no cookie; room names its
+		// internal token, which never leaves concert.
+		token = ""
+		if ti, ok := g.a.room.TicketByKey(key); ok {
+			token = ti.Token
+		}
+	}
+	if token != "" && rankTicket(g.a.room, token, rank) {
 		ps.placed.Add(1)
 	}
 }

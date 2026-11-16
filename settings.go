@@ -140,6 +140,12 @@ var settingDefs = []settingDef{
 		def: "", usage: "fast lane JSON (x402 offers and NFT rules; see docs/FASTLANE.md), empty turns wallet access off (flag or CONCERT_FASTLANE_CONFIG only; takes a restart)", ptr: func(c *config) any { return &c.fastlaneFile }},
 	{key: "networks_config", flag: "networks-config", env: "CONCERT_NETWORKS_CONFIG", group: groupSkip, label: "Chain endpoints file", restart: true,
 		def: "", usage: "chain endpoints JSON for the fast lane's payment networks (see docs/FASTLANE.md); sponsor keys come from CONCERT_STELLAR_FEE_SECRET and CONCERT_HEDERA_FEE_SECRET (flag or CONCERT_NETWORKS_CONFIG only; takes a restart)", ptr: func(c *config) any { return &c.networksFile }},
+	{key: "agent_queue", flag: "agent-queue", env: "CONCERT_AGENT_QUEUE", group: groupSkip, label: "AI agents wait in line",
+		def: false, usage: "with wallet access on, requests carrying a valid Concert-Session header keep one place in line per session, with no cookies (off by default: agents are also what scalpers use)",
+		ptr: func(c *config) any { return &c.agentQueue }},
+	{key: "agent_places", flag: "agent-places", env: "CONCERT_AGENT_PLACES", group: groupSkip, label: "Agent places per address",
+		def: defaultAgentPlaces, usage: "keyed places one client address (IPv6: its /64) may hold in line; past it, 429 and a strike",
+		ptr: func(c *config) any { return &c.agentPlaces }, check: intBetween(1, maxAgentPlaces)},
 	// ---- Skip the line ----
 	{key: "rate", flag: "rate", env: "CONCERT_RATE", group: groupSkip, label: "Price per position",
 		def: 0.0, usage: "base cost per queue position (0 with -surge 0 turns paid skip-the-line off)",
@@ -167,6 +173,9 @@ var settingDefs = []settingDef{
 	{key: "priority_forms", flag: "priority-forms", env: "CONCERT_PRIORITY_FORMS", group: groupPriority, label: "Forms skip the line",
 		def: true, usage: "form submissions from admitted visitors use the priority lane instead of the waiting room, and get 503 rather than queuing when it is full",
 		ptr: func(c *config) any { return &c.priorityForms }},
+	{key: "priority_order_line", flag: "priority-order-line", env: "CONCERT_PRIORITY_ORDER_LINE", group: groupPriority, label: "Order the line by rank",
+		def: true, usage: "ranked visitors who wait are placed ahead of lower ranks, in arrival order within a rank; false keeps the line in strict arrival order",
+		ptr: func(c *config) any { return &c.priorityOrderLine }},
 
 	// ---- Origin and listener ----
 	{key: "listen", flag: "listen", env: "CONCERT_LISTEN", group: groupOrigin, label: "Listen address", restart: true,

@@ -12,6 +12,9 @@ const (
 	ctxAdmitted = "concert.admitted"
 	// ctxClientIP holds the resolved client netip.Addr for the request.
 	ctxClientIP = "concert.client_ip"
+	// ctxAgentKey holds the room key of a request agentGate identified by
+	// its Concert-Session header; see agent.go.
+	ctxAgentKey = "concert.agent_key"
 )
 
 // shutdownGrace bounds how long in-flight requests get to finish on SIGTERM,
@@ -50,6 +53,7 @@ const (
 	strikeAdminAuth    = 5 // wrong admin token
 	strikeUserThrottle = 1 // per-pass asset pool exhausted
 	strikeTicketChurn  = 1 // queued arrival without a room_ticket cookie
+	strikeAgentPlaces  = 1 // new keyed place past -agent-places for the address
 )
 
 // First-poll grace limits. room accepts 10s-24h (0 turns it off). concert

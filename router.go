@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -13,8 +14,9 @@ import (
 
 // buildRouter wires routes in the order that determines what is guarded:
 // client identification and ban enforcement first, then ops, bypass, asset
-// and stream routes (outside the room), then the priority gate and the API
-// interceptor, then room's middleware, then the gated proxy catch-all.
+// and stream routes (outside the room), then the priority gate, the agent
+// gate and the API interceptor, then room's middleware, then the gated
+// proxy catch-all.
 // Route conflicts make gin panic; they are returned as errors instead.
 func buildRouter(g *generation) (engine *gin.Engine, err error) {
 	defer func() {
@@ -63,6 +65,7 @@ func buildRouter(g *generation) (engine *gin.Engine, err error) {
 	// The priority gate comes first, so its lane requests and refused forms
 	// are answered before the API interceptor wraps the writer.
 	r.Use(g.priorityGate)
+	r.Use(g.agentGate) // keyed places for Concert-Session clients; see agent.go
 	if cfg.apiJSON {
 		r.Use(apiQueueResponses(cfg.retryAfter))
 	}
@@ -84,11 +87,25 @@ func registerPaths(r *gin.Engine, rules []pathRule, handlers ...gin.HandlerFunc)
 	}
 }
 
+// statusRules are room's status routes and concert's health check: polled
+// every few seconds by every waiting visitor, so they stay out of the access
+// log and the history. /queue/status/{id} is a keyed ticket's public place.
+var statusRules = []pathRule{
+	{path: "/queue/status"},
+	{path: "/queue/status", prefix: true},
+	{path: "/_room/healthz"},
+}
+
+// isTicketStatus reports whether p is room's GET /queue/status/{id}.
+func isTicketStatus(p string) bool {
+	return strings.HasPrefix(p, "/queue/status/")
+}
+
 // accessLogSkipper keeps asset traffic and pollers out of the access log.
 // Assets are the bulk of requests; a log line each would dominate I/O.
 func accessLogSkipper(cfg config) func(*gin.Context) bool {
 	quiet := append(parsePaths(cfg.assets), parsePaths(cfg.assetPublic)...)
-	quiet = append(quiet, pathRule{path: "/queue/status"}, pathRule{path: "/_room/healthz"})
+	quiet = append(quiet, statusRules...)
 	return func(c *gin.Context) bool {
 		p := c.Request.URL.Path
 		for _, rule := range quiet {
