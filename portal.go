@@ -49,8 +49,9 @@ const (
 	assetIconsCSS     = "lib/css/bootstrap-icons.1.13.1.min.css"
 	assetBootstrapJS  = "lib/js/bootstrap.bundle.5.3.3.min.js"
 	assetPortalLight  = "css/portal-light.css"
-	assetPortalDark   = "css/portal-dark.css"
+	assetPortalThemes = "css/portal-themes.css"
 	assetPortalJS     = "js/portal.js"
+	assetThemeJS      = "js/theme.js"
 )
 
 const (
@@ -158,7 +159,7 @@ func newPortal(a *app) (*portal, error) {
 	for _, req := range []string{
 		templateHeader, templateFooter, templateIndex, templateFragments,
 		assetBootstrapCSS, assetIconsCSS, assetBootstrapJS,
-		assetPortalLight, assetPortalDark, assetPortalJS,
+		assetPortalLight, assetPortalThemes, assetPortalJS, assetThemeJS,
 	} {
 		if _, err := fs.Stat(static, req); err != nil {
 			return nil, fmt.Errorf("portal: templates/%s is missing", req)
@@ -390,8 +391,9 @@ type portalPage struct {
 	IconsCSS     string
 	BootstrapJS  string
 	PortalLight  string
-	PortalDark   string
+	PortalThemes string
 	PortalJS     string
+	ThemeJS      string
 	Version      string
 	Upstream     string
 	HistoryNote  string
@@ -416,8 +418,9 @@ func (p *portal) render(c *gin.Context, status int, page portalPage) {
 	page.IconsCSS = assetIconsCSS
 	page.BootstrapJS = assetBootstrapJS
 	page.PortalLight = assetPortalLight
-	page.PortalDark = assetPortalDark
+	page.PortalThemes = assetPortalThemes
 	page.PortalJS = assetPortalJS
+	page.ThemeJS = assetThemeJS
 	page.Version = BinaryVersion()
 	page.Upstream = p.a.current().cfg.upstream
 	page.HistoryNote = p.historyNote()

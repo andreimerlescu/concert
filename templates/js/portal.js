@@ -2,31 +2,7 @@
 (() => {
     'use strict';
 
-    // ── Theme ──────────────────────────────────────────────────────────────
-    const THEME_KEY = 'concert.portal.theme';
-    const root = document.documentElement;
-
-    function applyTheme(theme) {
-        root.setAttribute('data-bs-theme', theme);
-        const dark = document.getElementById('theme-dark');
-        if (dark) dark.disabled = theme !== 'dark';
-        const icon = document.querySelector('#theme-toggle i');
-        if (icon) icon.className = theme === 'dark' ? 'bi bi-sun' : 'bi bi-moon-stars';
-    }
-
-    const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-    let savedTheme = 'dark';
-    try { savedTheme = localStorage.getItem(THEME_KEY) || 'dark'; } catch {}
-    applyTheme(savedTheme);
-
-    const themeToggle = document.getElementById('theme-toggle');
-    if (themeToggle) {
-        themeToggle.addEventListener('click', () => {
-            const next = root.getAttribute('data-bs-theme') === 'dark' ? 'light' : 'dark';
-            try { localStorage.setItem(THEME_KEY, next); } catch {}
-            applyTheme(next);
-        });
-    }
+    // The theme picker is js/theme.js, loaded from <head>.
 
     if (!document.getElementById('portal-app')) return; // sign-in page
 

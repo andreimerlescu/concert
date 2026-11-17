@@ -197,7 +197,7 @@ func TestPortal_TemplatesAndAssetsEmbedded(t *testing.T) {
 	for _, f := range []string{
 		templateHeader, templateFooter, templateIndex,
 		assetBootstrapCSS, assetIconsCSS, assetBootstrapJS,
-		assetPortalLight, assetPortalDark, assetPortalJS,
+		assetPortalLight, assetPortalThemes, assetPortalJS, assetThemeJS,
 	} {
 		if _, err := fs.Stat(portalFS, "templates/"+f); err != nil {
 			t.Errorf("templates/%s not embedded: %v", f, err)
