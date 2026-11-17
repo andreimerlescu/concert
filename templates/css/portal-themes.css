@@ -1,0 +1,373 @@
+/* Concert portal themes: graphicle.dev's ten themes, mapped onto Bootstrap.
+   theme.js sets data-gd-theme (the palette) and data-bs-theme (light or dark,
+   so Bootstrap's success, warning and danger colors suit the page) on <html>
+   before the page paints. Each theme block holds graphicle.dev's own tokens,
+   plus the RGB triplets Bootstrap needs and --muted, the secondary text color.
+   Generated from graphicle.dev's theme.css; edit the tokens there, not here. */
+
+/* Paper (graphicle.dev's own): today's light look. --faded was #7a6d58 (4.2:1 on the page); it's a shade darker to reach 4.5:1. */
+:root,[data-gd-theme="paper"]{
+  --paper:#f2e8d2;--paper-deep:#e9dcbf;--ink:#1b1712;--ink-soft:#4a4134;--faded:#665a47;--rule:#2b2419;--hair:#b9a988;
+  --red:#8c1d12;--stamp:#8c1d12;--link:#1b1712;--hed:#1b1712;
+  --glow-hed:none;--glow-link:none;--texture:radial-gradient(ellipse at 20% 0%,rgba(255,255,255,.35),transparent 60%),radial-gradient(ellipse at 100% 100%,rgba(120,90,40,.10),transparent 55%),repeating-linear-gradient(0deg,rgba(80,60,20,.025) 0 1px,transparent 1px 3px);color-scheme:light;
+  --paper-rgb:242,232,210;--ink-rgb:27,23,18;--link-rgb:27,23,18;--deep-rgb:233,220,191;--muted:var(--faded)
+}
+
+/* Synthwave '84 (Robb Owen's SynthWave '84 for VS Code (MIT)): values from themes/synthwave-color-theme.json of robb0wen/synthwave-vscode: editor.background, sideBar.background, the Comment color, and its pink, yellow, orange, cyan and green. The glow is the theme's own, on headings and links only. */
+[data-gd-theme="synthwave84"]{
+  --paper:#262335;--paper-deep:#241b2f;--ink:#ffffff;--ink-soft:#b6b1b1;--faded:#848bbd;--rule:#848bbd;--hair:#495495;
+  --red:#f97e72;--stamp:#fede5d;--link:#36f9f6;--hed:#ff7edb;
+  --glow-hed:0 0 2px #100c0f,0 0 5px rgba(220,7,142,.2),0 0 10px rgba(255,255,255,.2);--glow-link:0 0 2px #001716,0 0 3px rgba(3,237,249,.46),0 0 5px rgba(3,237,249,.46);--texture:none;color-scheme:dark;
+  --paper-rgb:38,35,53;--ink-rgb:255,255,255;--link-rgb:54,249,246;--deep-rgb:36,27,47;--muted:var(--faded)
+}
+
+/* Solarized Light (Ethan Schoonover's Solarized (MIT)): base3 page, base2 deeper, base02 text, base01 muted (base00, the canonical body text, is 4.1:1 on base3). Links are text-colored and underlined: no Solarized accent reaches 4.5:1 on base3. */
+[data-gd-theme="solarized-light"]{
+  --paper:#fdf6e3;--paper-deep:#eee8d5;--ink:#073642;--ink-soft:#586e75;--faded:#586e75;--rule:#073642;--hair:#93a1a1;
+  --red:#cb4b16;--stamp:#dc322f;--link:#073642;--hed:#002b36;
+  --glow-hed:none;--glow-link:none;--texture:none;color-scheme:light;
+  --paper-rgb:253,246,227;--ink-rgb:7,54,66;--link-rgb:7,54,66;--deep-rgb:238,232,213;--muted:var(--ink-soft)
+}
+
+/* Solarized Dark (Ethan Schoonover's Solarized (MIT)): base03 page, base02 deeper, base1 text, base0 muted (base01, the canonical secondary text, is 2.8:1), base2 headings, cyan links. */
+[data-gd-theme="solarized-dark"]{
+  --paper:#002b36;--paper-deep:#073642;--ink:#93a1a1;--ink-soft:#839496;--faded:#839496;--rule:#93a1a1;--hair:#586e75;
+  --red:#b58900;--stamp:#cb4b16;--link:#2aa198;--hed:#eee8d5;
+  --glow-hed:none;--glow-link:none;--texture:none;color-scheme:dark;
+  --paper-rgb:0,43,54;--ink-rgb:147,161,161;--link-rgb:42,161,152;--deep-rgb:7,54,66;--muted:var(--ink-soft)
+}
+
+/* Nord (Nord by Sven Greb and Arctic Ice Studio (MIT)): nord0 page, nord1 deeper, nord6 text, nord4 and nord9 muted (nord3 is 1.7:1), nord8 links. */
+[data-gd-theme="nord"]{
+  --paper:#2e3440;--paper-deep:#3b4252;--ink:#eceff4;--ink-soft:#d8dee9;--faded:#81a1c1;--rule:#d8dee9;--hair:#4c566a;
+  --red:#ebcb8b;--stamp:#d08770;--link:#88c0d0;--hed:#eceff4;
+  --glow-hed:none;--glow-link:none;--texture:none;color-scheme:dark;
+  --paper-rgb:46,52,64;--ink-rgb:236,239,244;--link-rgb:136,192,208;--deep-rgb:59,66,82;--muted:var(--ink-soft)
+}
+
+/* Dracula (Dracula by Zeno Rocha and contributors (MIT)): Background, Foreground, cyan links, pink headings, orange accent. Muted text is Comment (#6272a4, 3.0:1) lightened toward Foreground until it reaches 4.5:1; the deeper surface is the theme's ANSI black. */
+[data-gd-theme="dracula"]{
+  --paper:#282a36;--paper-deep:#21222c;--ink:#f8f8f2;--ink-soft:#f8f8f2;--faded:#a1aac5;--rule:#6272a4;--hair:#44475a;
+  --red:#ffb86c;--stamp:#50fa7b;--link:#8be9fd;--hed:#ff79c6;
+  --glow-hed:none;--glow-link:none;--texture:none;color-scheme:dark;
+  --paper-rgb:40,42,54;--ink-rgb:248,248,242;--link-rgb:139,233,253;--deep-rgb:33,34,44;--muted:var(--faded)
+}
+
+/* Gruvbox Dark (Gruvbox by Pavel Pertsev (MIT)): dark0 page, dark1 deeper, light1 text, light2 and light4 muted, bright blue links, bright yellow headings. */
+[data-gd-theme="gruvbox-dark"]{
+  --paper:#282828;--paper-deep:#3c3836;--ink:#ebdbb2;--ink-soft:#d5c4a1;--faded:#a89984;--rule:#a89984;--hair:#504945;
+  --red:#fe8019;--stamp:#fb4934;--link:#83a598;--hed:#fabd2f;
+  --glow-hed:none;--glow-link:none;--texture:none;color-scheme:dark;
+  --paper-rgb:40,40,40;--ink-rgb:235,219,178;--link-rgb:131,165,152;--deep-rgb:60,56,54;--muted:var(--ink-soft)
+}
+
+/* GitHub Light (GitHub's Primer primitives, as in github-vscode-theme (MIT)): canvas default and subtle, fg default and muted, accent fg links, danger fg accent. */
+[data-gd-theme="github-light"]{
+  --paper:#ffffff;--paper-deep:#f6f8fa;--ink:#1f2328;--ink-soft:#656d76;--faded:#656d76;--rule:#1f2328;--hair:#d0d7de;
+  --red:#cf222e;--stamp:#cf222e;--link:#0969da;--hed:#1f2328;
+  --glow-hed:none;--glow-link:none;--texture:none;color-scheme:light;
+  --paper-rgb:255,255,255;--ink-rgb:31,35,40;--link-rgb:9,105,218;--deep-rgb:246,248,250;--muted:var(--faded)
+}
+
+/* GitHub Dark (GitHub's Primer primitives, as in github-vscode-theme (MIT)): canvas default and subtle, fg default and muted, accent fg links, danger fg accent. */
+[data-gd-theme="github-dark"]{
+  --paper:#0d1117;--paper-deep:#161b22;--ink:#e6edf3;--ink-soft:#7d8590;--faded:#7d8590;--rule:#7d8590;--hair:#30363d;
+  --red:#f85149;--stamp:#f85149;--link:#2f81f7;--hed:#e6edf3;
+  --glow-hed:none;--glow-link:none;--texture:none;color-scheme:dark;
+  --paper-rgb:13,17,23;--ink-rgb:230,237,243;--link-rgb:47,129,247;--deep-rgb:22,27,34;--muted:var(--faded)
+}
+
+/* High contrast (black on white, WCAG AAA): black on white; every text color is at least 7:1 (AAA). */
+[data-gd-theme="high-contrast"]{
+  --paper:#ffffff;--paper-deep:#ffffff;--ink:#000000;--ink-soft:#000000;--faded:#1a1a1a;--rule:#000000;--hair:#000000;
+  --red:#000000;--stamp:#000000;--link:#00008b;--hed:#000000;
+  --glow-hed:none;--glow-link:none;--texture:none;color-scheme:light;
+  --paper-rgb:255,255,255;--ink-rgb:0,0,0;--link-rgb:0,0,139;--deep-rgb:255,255,255;--muted:var(--faded)
+}
+
+/* No JavaScript, dark-mode system: Synthwave '84. (With JavaScript, theme.js
+   sets data-gd-theme and this doesn't apply.) */
+@media (prefers-color-scheme:dark){:root:not([data-gd-theme]){
+  --paper:#262335;--paper-deep:#241b2f;--ink:#ffffff;--ink-soft:#b6b1b1;--faded:#848bbd;--rule:#848bbd;--hair:#495495;
+  --red:#f97e72;--stamp:#fede5d;--link:#36f9f6;--hed:#ff7edb;
+  --glow-hed:0 0 2px #100c0f,0 0 5px rgba(220,7,142,.2),0 0 10px rgba(255,255,255,.2);--glow-link:0 0 2px #001716,0 0 3px rgba(3,237,249,.46),0 0 5px rgba(3,237,249,.46);--texture:none;color-scheme:dark;
+  --paper-rgb:38,35,53;--ink-rgb:255,255,255;--link-rgb:54,249,246;--deep-rgb:36,27,47;--muted:var(--faded)
+}}
+
+/* ── Bootstrap, from the theme tokens ─────────────────────────────────────── */
+
+:root {
+    --bs-body-bg: var(--paper);
+    --bs-body-bg-rgb: var(--paper-rgb);
+    --bs-body-color: var(--ink);
+    --bs-body-color-rgb: var(--ink-rgb);
+    --bs-emphasis-color: var(--ink);
+    --bs-emphasis-color-rgb: var(--ink-rgb);
+    --bs-heading-color: var(--hed);
+    --bs-secondary-color: var(--muted);
+    --bs-tertiary-color: var(--muted);
+    --bs-secondary-bg: var(--paper-deep);
+    --bs-secondary-bg-rgb: var(--deep-rgb);
+    --bs-tertiary-bg: var(--paper-deep);
+    --bs-tertiary-bg-rgb: var(--deep-rgb);
+    --bs-border-color: var(--hair);
+    --bs-border-color-translucent: var(--hair);
+    --bs-link-color: var(--link);
+    --bs-link-color-rgb: var(--link-rgb);
+    --bs-link-hover-color: var(--link);
+    --bs-link-hover-color-rgb: var(--link-rgb);
+    --bs-primary: var(--link);
+    --bs-primary-rgb: var(--link-rgb);
+    --bs-primary-text-emphasis: var(--link);
+    --bs-primary-bg-subtle: color-mix(in srgb, var(--link) 16%, var(--paper));
+    --bs-primary-border-subtle: color-mix(in srgb, var(--link) 40%, var(--paper));
+    --bs-focus-ring-color: rgba(var(--link-rgb), .35);
+    --bs-code-color: var(--red);
+    --concert-purple: var(--stamp);
+    --concert-blue: var(--link);
+    --concert-pink: var(--red);
+    --concert-cyan: var(--link);
+}
+
+body {
+    background-color: var(--paper);
+    background-image: var(--texture);
+    background-attachment: fixed;
+}
+
+h1, h2, h3, h4, h5, h6, .h1, .h2, .h3, .h4, .h5, .h6 {
+    text-shadow: var(--glow-hed);
+}
+
+a:not(.btn):not(.nav-link):not(.dropdown-item) {
+    text-shadow: var(--glow-link);
+}
+
+.navbar {
+    --bs-navbar-brand-color: var(--hed);
+    --bs-navbar-brand-hover-color: var(--hed);
+}
+
+.navbar-brand {
+    text-shadow: var(--glow-hed);
+}
+
+.navbar-brand .bi {
+    color: var(--stamp);
+}
+
+/* 9px text: --hed reads at 4.5:1 or better in every theme; --stamp does not. */
+.concert-eyebrow {
+    color: var(--hed);
+}
+
+.brand-period {
+    color: var(--red);
+}
+
+/* Cards are paper with a hairline, as on graphicle.dev; footers sit deeper. */
+.card {
+    --bs-card-bg: var(--paper);
+    --bs-card-color: var(--ink);
+    --bs-card-border-color: var(--hair);
+    --bs-card-cap-bg: var(--paper-deep);
+}
+
+.stat-card {
+    border: 1px solid var(--hair);
+    box-shadow: none;
+}
+
+.stat-card .card-footer {
+    background-color: var(--paper-deep);
+    border-top-color: var(--hair);
+}
+
+.nav-tabs {
+    --bs-nav-link-color: var(--muted);
+    --bs-nav-link-hover-color: var(--ink);
+    --bs-nav-tabs-border-color: var(--hair);
+    --bs-nav-tabs-link-hover-border-color: var(--hair) var(--hair) var(--hair);
+    --bs-nav-tabs-link-active-color: var(--hed);
+    --bs-nav-tabs-link-active-bg: var(--paper);
+    --bs-nav-tabs-link-active-border-color: var(--hair) var(--hair) var(--paper);
+}
+
+.nav-pills {
+    --bs-nav-pills-link-active-color: var(--paper);
+    --bs-nav-pills-link-active-bg: var(--link);
+}
+
+.settings-nav .nav-link.active {
+    color: var(--paper);
+    background: var(--link);
+}
+
+/* Text on the accent is the page color: every theme's link color is chosen to
+   read on the page, so the page color reads on the link color too. */
+.btn-primary {
+    --bs-btn-color: var(--paper);
+    --bs-btn-bg: var(--link);
+    --bs-btn-border-color: var(--link);
+    --bs-btn-hover-color: var(--paper);
+    --bs-btn-hover-bg: color-mix(in srgb, var(--link) 80%, var(--ink));
+    --bs-btn-hover-border-color: var(--link);
+    --bs-btn-active-color: var(--paper);
+    --bs-btn-active-bg: color-mix(in srgb, var(--link) 70%, var(--ink));
+    --bs-btn-active-border-color: var(--link);
+    --bs-btn-disabled-color: var(--paper);
+    --bs-btn-disabled-bg: var(--link);
+    --bs-btn-disabled-border-color: var(--link);
+    --bs-btn-focus-shadow-rgb: var(--link-rgb);
+    background: var(--bs-btn-bg);
+    border-color: var(--bs-btn-border-color);
+}
+
+.btn-outline-primary {
+    --bs-btn-color: var(--link);
+    --bs-btn-border-color: var(--link);
+    --bs-btn-hover-color: var(--paper);
+    --bs-btn-hover-bg: var(--link);
+    --bs-btn-hover-border-color: var(--link);
+    --bs-btn-active-color: var(--paper);
+    --bs-btn-active-bg: var(--link);
+    --bs-btn-active-border-color: var(--link);
+    --bs-btn-disabled-color: var(--link);
+    --bs-btn-disabled-border-color: var(--link);
+    --bs-btn-focus-shadow-rgb: var(--link-rgb);
+}
+
+.btn-outline-secondary {
+    --bs-btn-color: var(--ink-soft);
+    --bs-btn-border-color: var(--faded);
+    --bs-btn-hover-color: var(--ink);
+    --bs-btn-hover-bg: var(--paper-deep);
+    --bs-btn-hover-border-color: var(--rule);
+    --bs-btn-active-color: var(--ink);
+    --bs-btn-active-bg: var(--paper-deep);
+    --bs-btn-active-border-color: var(--rule);
+    --bs-btn-disabled-color: var(--muted);
+    --bs-btn-disabled-border-color: var(--hair);
+    --bs-btn-focus-shadow-rgb: var(--ink-rgb);
+}
+
+.btn-link {
+    --bs-btn-color: var(--link);
+    --bs-btn-hover-color: var(--link);
+    --bs-btn-active-color: var(--link);
+}
+
+.text-primary {
+    color: var(--link) !important;
+}
+
+.text-bg-primary {
+    color: var(--paper) !important;
+}
+
+.text-bg-light {
+    color: var(--ink) !important;
+    background-color: var(--paper-deep) !important;
+}
+
+.text-bg-dark {
+    color: var(--paper) !important;
+    background-color: var(--ink) !important;
+}
+
+.move-chip-enter {
+    color: var(--paper);
+}
+
+/* Tables take the card's paper. Bootstrap's coloured rows are fixed light
+   tints with black text, which a dark page cannot use; these are tints of
+   the page, so every theme's text and muted text read on them. */
+.table {
+    --bs-table-bg: transparent;
+    --bs-table-striped-bg: rgba(var(--ink-rgb), .04);
+    --bs-table-hover-bg: rgba(var(--ink-rgb), .06);
+    --bs-table-active-bg: rgba(var(--ink-rgb), .08);
+}
+
+.table-danger, .table-warning, .table-success, .table-info {
+    --bs-table-color: var(--ink);
+    --bs-table-bg: color-mix(in srgb, var(--row) 10%, var(--paper));
+    --bs-table-border-color: color-mix(in srgb, var(--row) 30%, var(--paper));
+    --bs-table-striped-bg: color-mix(in srgb, var(--row) 14%, var(--paper));
+    --bs-table-striped-color: var(--ink);
+    --bs-table-active-bg: color-mix(in srgb, var(--row) 18%, var(--paper));
+    --bs-table-active-color: var(--ink);
+    --bs-table-hover-bg: color-mix(in srgb, var(--row) 14%, var(--paper));
+    --bs-table-hover-color: var(--ink);
+    /* Muted text halfway to full ink: the theme's muted color alone drops
+       under 4.5:1 on a warning tint in several dark themes. */
+    --bs-secondary-color: color-mix(in srgb, var(--ink) 50%, var(--ink-soft));
+}
+
+.table-danger { --row: var(--bs-danger); }
+.table-warning { --row: var(--bs-warning); }
+.table-success { --row: var(--bs-success); }
+.table-info { --row: var(--bs-info); }
+
+.form-control:focus,
+.form-select:focus,
+.form-check-input:focus {
+    border-color: var(--link);
+    box-shadow: 0 0 0 .2rem rgba(var(--link-rgb), .3);
+}
+
+.form-check-input:checked {
+    background-color: var(--link);
+    border-color: var(--link);
+}
+
+.form-switch .form-check-input:focus:not(:checked) {
+    --bs-form-switch-bg: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='-4 -4 8 8'%3e%3ccircle r='3' fill='rgba%28128,128,128,.6%29'/%3e%3c/svg%3e");
+}
+
+.dropdown-menu {
+    --bs-dropdown-link-active-color: var(--paper);
+    --bs-dropdown-link-active-bg: var(--link);
+}
+
+/* The bar's own colour; setBar's bg-success, bg-warning and bg-danger now
+   show through instead of sitting under the old gradient. */
+.progress-bar {
+    background: var(--link);
+}
+
+/* ── The theme menu ───────────────────────────────────────────────────────── */
+
+.theme-menu {
+    min-width: 13rem;
+}
+
+.theme-menu .dropdown-item {
+    display: flex;
+    align-items: center;
+    gap: .6rem;
+    font-size: .85rem;
+}
+
+.theme-menu .bi-check2 {
+    margin-left: auto;
+    visibility: hidden;
+}
+
+.theme-menu [aria-checked="true"] .bi-check2 {
+    visibility: visible;
+}
+
+/* A swatch carries its own data-gd-theme, so these resolve to that theme. */
+.gd-swatch {
+    flex: 0 0 auto;
+    width: 1.1rem;
+    height: 1.1rem;
+    border-radius: 50%;
+    border: 1px solid var(--rule);
+    background: conic-gradient(var(--link) 0 25%, var(--stamp) 0 50%, var(--paper) 0);
+}
+
+.gd-swatch-auto {
+    background: linear-gradient(135deg, #f2e8d2 50%, #262335 50%);
+}

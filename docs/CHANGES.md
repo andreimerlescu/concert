@@ -13,6 +13,10 @@
 
 - **`concert-client --wait PATH` waits in line.** It renews the saved session, then requests `PATH` with that `Concert-Session` until Concert stops answering `queued`, printing the position and `status_url` and sleeping for `Retry-After` (bounded to 1s–1m, `CONCERT_CLIENT_MAX_WAIT` overall, default 1h; Ctrl-C stops it). It needs no wallet keys and never pays: it reports a fast-lane offer once, and paying stays the explicit `concert-client` command with its amount and recipient checks. The state file is locked only while renewing, so that command can pay with the same session while `--wait` runs.
 
+## Portal
+
+- **A theme picker replaces the light/dark toggle.** The palette button in the portal's top bar offers graphicle.dev's ten themes: Paper, Solarized Light, GitHub Light and High contrast (light), and Synthwave '84, Solarized Dark, Nord, Dracula, Gruvbox Dark and GitHub Dark (dark), plus Match system (Paper or Synthwave '84, following the OS setting; the default). The choice is kept in the browser's `localStorage` (`concert.portal.theme`), follows across open tabs, and is applied from `<head>` by `js/theme.js` so pages no longer flash the default theme. A saved `dark` becomes Synthwave '84 and a saved `light` becomes GitHub Light, the nearest matches to the old two. `css/portal-themes.css` replaces `css/portal-dark.css`. Coloured history and ban-log rows are now tints of the page in every theme, and the overview's capacity bars show their green, amber and red states, which the old gradient covered.
+
 ## Fixes
 
 - **Shutdown no longer races room's reaper.** `Close` stops the waiting room before it saves the queue. room v1.5.0's `Stop` waits for its reaper to exit, so no reaper pass can remove a ticket while the line is being written.
