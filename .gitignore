@@ -6,3 +6,5 @@ bin/
 *.log
 logs/*
 !logs/.keep
+._*
+.github/

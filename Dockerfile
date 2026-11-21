@@ -19,7 +19,7 @@ RUN CGO_ENABLED=0 \
     GOOS=${TARGETOS} \
     GOARCH=${TARGETARCH} \
     GOFIPS140=${GOFIPS140} \
-    go build -trimpath -buildvcs=false -ldflags="-s -w" -o /out/concert .
+    go build -trimpath -buildvcs=false -ldflags="-s -w" -o /out/concert ./cmd/concert
 
 # Minimal, non-root, distroless runtime image (no shell, no package manager).
 FROM gcr.io/distroless/static-debian12:nonroot

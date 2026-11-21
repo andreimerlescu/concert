@@ -1,3 +1,37 @@
+# v0.2.0 cleanup
+
+- **Stray Go files removed from the repository root.** Source update 003 carried fifteen `package main` files at the root beside the root `concert` package, so `go build ./...` failed with "found packages concert and main". Fourteen were pre-v0.2.0 copies of what is now `internal/server` (byte-identical to the 002 sources). `mesh.go` and `mesh_test.go` were an earlier draft of the edge and leaf tiers that never compiled; v0.2.0's `internal/hop` and `internal/server/topology.go` implement the feature. The root now holds only `version.go`.
+- **No GitHub workflows.** The project has none and keeps none: `.github/` is ignored, and the docs no longer mention CI.
+- `.gitignore` also excludes macOS `._*` metadata files.
+
+# v0.2.0: edge and leaf tiers, capacity benchmark
+
+## Behaviour changes
+
+- **The source moved.** The server is `internal/server` and the binary is built from `./cmd/concert`: `go install github.com/andreimerlescu/concert/cmd/concert@latest`. `make` and the Dockerfile build the new paths. The embedded templates, web pages and examples moved with the code to `internal/server/`. `VERSION` stays at the root and is embedded by the root `concert` package.
+- **Accept-Encoding passes through.** Concert's upstream transport no longer asks the origin for gzip on the browser's behalf and unzips it in the proxy. Before, a browser that did not ask for gzip still got the right bytes, but without `Content-Length` (no download progress), and Concert spent CPU decompressing. Browsers that accept gzip get the origin's encoding unchanged, as before.
+- **Bodyless requests are retried on another upstream** (`-upstream-retries`, default 1) when the first refused the connection. This applies only with several upstreams and only to requests without a body; a request with a body is never re-sent.
+
+## New, off by default
+
+- **Edge and leaf tiers (`-role edge|leaf`).** One site served by several hosts runs an edge Concert (waiting room, fast lane, cookies, bans) in front of a leaf Concert per host, with or without haproxy between them. The edge signs a `Concert-Hop` claim (HMAC-SHA256 under `CONCERT_HOP_SECRET`, bound to method, URI, time and the client the edge resolved) into each request it admitted. A leaf that verifies it, from `-hop-peers` only, serves it in its own lane:
+  - no room, pass, fast lane or per-visitor pool, about 1.3 µs of verification;
+  - a slot in the host gate, where edge traffic comes before direct traffic, and paid or lane-ranked edge traffic first;
+  - no cookies, and the application's `Concert-Priority` passed back for the edge to grant.
+
+  Direct traffic to a leaf gets a full, ordinary Concert, including its own fast lane if configured. See [TOPOLOGY.md](TOPOLOGY.md).
+- **Backpressure and redispatch.** A full leaf answers `503` with `Concert-Backpressure: full` before anything reaches its application. An edge balancing the leaves itself retries a bodyless request on another leaf, routes by each leaf's free slots, and briefly avoids a leaf that pushed back.
+- **Capacity from the leaves (`-hop-auto-cap`).** An edge polls every leaf (`-hop-poll`) and sizes its room to `min(-cap, Σ healthy shares − priority lane)`. Drops apply at once and rises after two agreeing rounds. A silent leaf fades out over 3 to 15 polls. The room is never shrunk below what it has in flight. `/_room/readyz` answers 503 until a leaf has reported.
+- **Bans follow the edge.** The edge pushes its full ban list to every leaf whose applied version differs, at once on a new ban. Leaves mirror it, lift what the edge lifts, keep their own bans, and ignore snapshots older than the last applied.
+- **Capacity benchmark.** `bench-concert` (or `concert bench`) crawls an application with lemmings to find the largest concurrency with a page p95 under `-p95` and no load-induced failures. Lemmings are browser sessions that follow links up to 14 deep, visit each page at most 14 times per stage, and load every file type a shop serves, checking byte ranges on audio and video. The run doubles, then bisects. It writes a JSON report that explains the first failure second by second, by URL and by file type, and `capacity.json` for a leaf. A leaf with `-bench-on-start` measures its application on first start, before listening.
+- **Silence reports.** A leaf records the load it carried when its application stopped answering, to the log, `silence.jsonl` and its state, and stops counting toward the edge's capacity until the application recovers.
+- **Metrics.** `/_room/stats` gains `role`, `node` and an `edge` or `leaf` section; `/_room/metrics` gains `concert_node_info`, `concert_edge_*` and `concert_leaf_*`.
+
+## Fixes found by the new tests
+
+- The edge counted a leaf's backpressure only when it reached the browser, missing every refusal it retried successfully.
+- Two control rounds overlapping could store an older leaf report over a newer one, or deliver an older ban snapshot after a newer one. Rounds are serialized, and both sides keep only the newest.
+
 # v0.0.9: room v1.5.0
 
 ## Behaviour changes

@@ -37,7 +37,7 @@ clean:
 	rm -rf $(BIN_DIR)
 
 summary:
-	summarize -s useExpanded,templates/lib,.git,.idea,summaries,lemmings -x useExpanded,png,jpg,LICENSE
+	summarize -s useExpanded,internal/server/templates/lib,.git,.idea,summaries,lemmings -x useExpanded,png,jpg,LICENSE
 
 build: $(PLATFORMS)
 
@@ -46,10 +46,10 @@ build-fips:
 	@mkdir -p $(BIN_DIR)
 	CGO_ENABLED=0 GOFIPS140=v1.0.0 GOOS=linux GOARCH=amd64 \
 		go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS)" \
-		-o $(BIN_DIR)/$(BINARY)-fips-linux-amd64 .
+		-o $(BIN_DIR)/$(BINARY)-fips-linux-amd64 ./cmd/concert
 	CGO_ENABLED=0 GOFIPS140=v1.0.0 GOOS=linux GOARCH=arm64 \
 		go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS)" \
-		-o $(BIN_DIR)/$(BINARY)-fips-linux-arm64 .
+		-o $(BIN_DIR)/$(BINARY)-fips-linux-arm64 ./cmd/concert
 
 checksums:
 	@cd $(BIN_DIR) && shasum -a 256 $(BINARY)-* > SHA256SUMS.txt
@@ -58,4 +58,7 @@ $(PLATFORMS):
 	@mkdir -p $(BIN_DIR)
 	CGO_ENABLED=0 GOOS=$(call os,$@) GOARCH=$(call arch,$@) \
 		go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS)" \
-		-o $(BIN_DIR)/$(BINARY)-$(call os,$@)-$(call arch,$@)$(call ext,$@) .
+		-o $(BIN_DIR)/$(BINARY)-$(call os,$@)-$(call arch,$@)$(call ext,$@) ./cmd/concert
+	CGO_ENABLED=0 GOOS=$(call os,$@) GOARCH=$(call arch,$@) \
+		go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS)" \
+		-o $(BIN_DIR)/bench-concert-$(call os,$@)-$(call arch,$@)$(call ext,$@) ./cmd/bench-concert

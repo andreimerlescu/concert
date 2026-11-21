@@ -126,7 +126,7 @@ CONCERT_ADMIT_SECRET_FILE=/run/secrets/concert/admit_secret \
 
 | Framework | Key Concert Controls |
 | --- | --- |
-| **SOC 2 / ISO 27001** | Per-user Argon2id + TOTP MFA / SSO RBAC, hash-chained `audit.jsonl`, `-read-only-settings` GitOps mode, CycloneDX SBOM (`make sbom`), CI `govulncheck` |
+| **SOC 2 / ISO 27001** | Per-user Argon2id + TOTP MFA / SSO RBAC, hash-chained `audit.jsonl`, `-read-only-settings` GitOps mode, CycloneDX SBOM (`make sbom`), `govulncheck` (`make vulncheck`) |
 | **PCI DSS v4.0.1** | TLS 1.2/1.3 AEAD ciphers, HSTS, upstream mTLS, `-privacy-strip-query`, MFA/SSO for admin access, `-stats-auth`, centralized JSON SIEM logs |
 | **HIPAA** | Encryption in transit (TLS + upstream mTLS), unique operator identities, audit controls, query stripping to prevent ePHI in URLs, encrypted volume for `-data-dir` |
 | **GDPR / CCPA** | `-privacy-scrub-query`, `-privacy-anonymize-ip`, configurable `-history-retention`, DSAR export/erasure APIs, HttpOnly/Secure cookies |

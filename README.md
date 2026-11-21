@@ -54,7 +54,7 @@ Concert caps the number of concurrent page requests that reach your origin. Ever
 
 ## Install
 
-    go install github.com/andreimerlescu/concert@latest
+    go install github.com/andreimerlescu/concert/cmd/concert@latest
 
 Or build from source:
 
@@ -161,6 +161,8 @@ Every option can be set with a flag or an environment variable. A flag overrides
 | | `NADDR_DATA` | *(empty)* | IPtoASN file for IP details in the portal (plain or `.gz`) |
 | | `NADDR_DATA_POLL` | `30s` | How often `NADDR_DATA` is checked for changes; `off` disables reloading |
 | | `NADDR_ADDR` | *(empty)* | A running naddr service (`host:port` or URL), used when `NADDR_DATA` is empty or unusable |
+
+The settings for running Concert as an edge in front of leaf Concerts (`-role`, `-node-id`, `-hop-*`, `-host-cap`, `-upstream-retries`, `-bench-*` and `CONCERT_HOP_SECRET`) are listed in [docs/TOPOLOGY.md](docs/TOPOLOGY.md#configuration).
 
 Secrets are environment-only on purpose: command-line arguments are visible in `ps` output and shell history.
 
@@ -662,9 +664,23 @@ On RHEL-family systems, `installer.sh` sets up everything below with SELinux con
 
 On `SIGTERM` Concert stops accepting new connections, gives in-flight requests up to 30 seconds to finish, then saves the queue, bans and history.
 
+## Edge and leaf tiers
+
+One site served by several application hosts runs Concert in two tiers: an **edge** with the waiting room, the fast lane and every browser cookie, and a **leaf** next to each application host. The edge signs a short claim (`Concert-Hop`) into every request it admitted. A leaf that verifies it skips its own room, passes and fast lane for that request and only takes a slot in its host gate, ahead of traffic reaching the host directly. Direct traffic, such as the public reaching `i-01.mysite.com`, gets a full, ordinary Concert.
+
+The edge balances across the leaves itself or through haproxy, retries a refused bodyless request on another leaf, sizes its waiting room to the capacity the healthy leaves report, and pushes its ban list to every leaf, so an attack moved from `www` to `i-01` is already banned there. See [docs/TOPOLOGY.md](docs/TOPOLOGY.md).
+
+## Measuring capacity
+
+`bench-concert` (also `concert bench`) finds how many concurrent visitors an application serves with a page p95 under 2s and no load-induced errors. Its lemmings are browser-like sessions that crawl the site up to 14 links deep, give each page at most 14 visits per stage, and load every stylesheet, script, font, image, audio, video and download the pages reference:
+
+    bench-concert -target http://127.0.0.1:3000/ -out report.json -data-dir /var/lib/concert/data
+
+It writes `capacity.json`, which a leaf uses as its host capacity. With `-bench-on-start` a leaf measures its application on first start, before it listens. The report explains the first failing concurrency second by second, by URL and by file type. See [Measuring capacity](docs/TOPOLOGY.md#measuring-capacity).
+
 ## Limitations
 
-**One instance, one queue, one registry.** Queue state, asset semaphores, the abuse registry and the history live in the process's memory. Two Concert instances are two independent waiting rooms: the origin sees up to twice `-cap`, a visitor's place in line exists only on the instance that issued their ticket, and a client banned on one instance is not banned on the other. If you must run more than one, divide `-cap` by the number of instances and enable sticky sessions at the load balancer. Use a cookie the load balancer inserts itself, because `room_ticket` is only issued once a visitor is queued. Admission passes and priority grants work across instances as long as they share `CONCERT_ADMIT_SECRET`.
+**One instance, one queue, one registry.** Queue state, asset semaphores, the abuse registry and the history live in the process's memory. Two Concert instances are two independent waiting rooms: the origin sees up to twice `-cap`, a visitor's place in line exists only on the instance that issued their ticket, and a client banned on one instance is not banned on the other. If you must run more than one, divide `-cap` by the number of instances and enable sticky sessions at the load balancer, or run them as [edge and leaf tiers](#edge-and-leaf-tiers) instead. Use a cookie the load balancer inserts itself, because `room_ticket` is only issued once a visitor is queued. Admission passes and priority grants work across instances as long as they share `CONCERT_ADMIT_SECRET`.
 
 **A pass limits concurrency, not request rate.** A pass holder can have at most its per-user cap of asset requests in flight, but fast assets finish quickly, so a single pass can still generate many requests per second. The global semaphore bounds the total load on the host regardless. Volumetric attacks from many addresses belong at a CDN or WAF in front of Concert; the abuse registry handles individual misbehaving clients.
 
@@ -675,7 +691,7 @@ On `SIGTERM` Concert stops accepting new connections, gives in-flight requests u
 ## Development
 
     make all                    # vet, clean, test, race tests, benchmarks, cross-platform build
-    make build                  # binaries for linux, darwin, windows × amd64, arm64 in bin/
+    make build                  # concert and bench-concert for linux, darwin, windows × amd64, arm64 in bin/
     go test -race -count=1 ./...
 
 The test suite runs the real waiting room, asset tier, abuse registry, portal and history against a fake origin. It covers:
@@ -690,6 +706,9 @@ The test suite runs the real waiting room, asset tier, abuse registry, portal an
 - IP details from a local IPtoASN file and from a naddr service, flags, and the 4 / 6 / 8 badges
 - the portal's paginated fragments, row tints, and the history log across restarts, flood aggregation and rotation
 - bypass routing, streaming, forwarded-header handling, and graceful shutdown
+- edge and leaf tiers end to end over real sockets: signed claims, forged, replayed and mis-addressed claims, pass-through without cookies, priority grants across tiers, backpressure and retry, slot-aware routing, capacity planning and decay, ban mirroring, the control plane's authentication, silence reports and the startup benchmark
+- every file type a shop serves (styles, scripts, fonts, images, audio, video, archives, documents, text, data) through standalone, edge-to-leaf and edge-to-two-leaves deployments: exact bytes, types, lengths, HEAD, byte ranges, conditional requests, gzip passthrough and unbuffered streaming of large media
+- the capacity benchmark against a fake shop with a known limit, its crawl coverage, link extraction and failure classification
 
 The tests never read your `NADDR_DATA`; they build small databases of their own.
 

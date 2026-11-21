@@ -34,14 +34,14 @@ XLM payments use the native asset through Soroban. This is not a classic Stellar
 
 Requires Go 1.27.3 or later, nothing else. Wallet access is part of the `concert` binary.
 
-1. Start from the samples: `concert example fastlane > fastlane.json` and `concert example networks > networks.json` (the files are also in `examples/`, and `installer.sh` writes them to `/etc/concert/*.example.json`). Every value in them is a well-formed placeholder: replace each one using the [configuration reference](#configuration-reference) below, and remove the offers, collections and networks you do not use. Keep `test_mode: true` for testing; it rejects mainnet identifiers. Set `enabled` to `true` only after configuration is complete. Keep both files private, mode 0640, readable by the account Concert runs as. Under SELinux, install them with `installer.sh`, which applies the `concert_etc_t` label Concert needs to read them.
+1. Start from the samples: `concert example fastlane > fastlane.json` and `concert example networks > networks.json` (the files are also in `internal/server/examples/`, and `installer.sh` writes them to `/etc/concert/*.example.json`). Every value in them is a well-formed placeholder: replace each one using the [configuration reference](#configuration-reference) below, and remove the offers, collections and networks you do not use. Keep `test_mode: true` for testing; it rejects mainnet identifiers. Set `enabled` to `true` only after configuration is complete. Keep both files private, mode 0640, readable by the account Concert runs as. Under SELinux, install them with `installer.sh`, which applies the `concert_etc_t` label Concert needs to read them.
 2. Configure a native receiving address for each offer. XRP receiving addresses must accept a direct payment without a required destination tag. Use a numeric Hedera receiving account and a separate funded Hedera sponsor. Fund the dedicated Stellar sponsor on the selected network. Concert does not custody payer funds or need a recipient's private key.
 3. Set a stable random `CONCERT_ADMIT_SECRET` of at least 32 characters and a portal password. A production policy service also needs `CONCERT_POLICY_TOKEN` of at least 32 characters. Sponsor keys go in `CONCERT_STELLAR_FEE_SECRET` (an `S…` seed) and `CONCERT_HEDERA_FEE_SECRET` (a DER private key), or in the variables a network's `secret_env` names. Use a secrets manager or mode-0600 environment file. Never put sponsor or payer secrets in JSON, source control, URLs or browser code.
 4. Build and start Concert from the source directory:
 
    ```sh
    go test ./...
-   go build -trimpath -buildvcs=false -o bin/concert .
+   go build -trimpath -buildvcs=false -o bin/concert ./cmd/concert
    ./bin/concert -listen 127.0.0.1:8080 \
      -portal-listen 127.0.0.1:8081 \
      -upstream http://127.0.0.1:3000 \
@@ -60,7 +60,7 @@ The primary page request ceiling is the ordinary page capacity plus the priority
 
 ## Configuration reference
 
-Wallet access reads two JSON files and a few environment variables. The samples (`examples/fastlane.json`, `examples/networks.json`, or `concert example fastlane|networks`) contain every key below. Their values are invented but correctly formatted, so a sample with `"enabled": true` passes Concert's checks; the addresses in it belong to nobody you know, so **a payment sent to a sample address is lost**. Replace them all.
+Wallet access reads two JSON files and a few environment variables. The samples (`internal/server/examples/fastlane.json`, `internal/server/examples/networks.json`, or `concert example fastlane|networks`) contain every key below. Their values are invented but correctly formatted, so a sample with `"enabled": true` passes Concert's checks; the addresses in it belong to nobody you know, so **a payment sent to a sample address is lost**. Replace them all.
 
 Amounts are always integer strings in the chain's smallest unit: 1 XRP = 1,000,000 drops, 1 XLM = 10,000,000 stroops, 1 HBAR = 100,000,000 tinybars, 1 SOL = 1,000,000,000 lamports.
 
@@ -201,7 +201,7 @@ The client renews its saved session on every run; renewal keeps the session ID, 
 
 The shipped browser supports Solana wallets through the [Wallet Standard](https://github.com/wallet-standard/wallet-standard) (`standard:connect`, `solana:signTransaction`, `solana:signMessage`), which Phantom, Solflare, Backpack and other current wallets implement. No Solana SDK is loaded: `access.js` decodes the unsigned native SOL transfer from Concert, checks payer, recipient and amount against the displayed price, asks the wallet to sign it, and refuses a signed transaction whose message the wallet changed. The automated browser test uses a Wallet Standard test wallet; approval in a real wallet extension has not been exercised in this environment.
 
-For other wallets, bundle a compatible adapter in `web/wallet-adapters.js` and rebuild the binary. The registration contract is:
+For other wallets, bundle a compatible adapter in `internal/server/web/wallet-adapters.js` and rebuild the binary. The registration contract is:
 
 ```js
 window.concertWallets['xrpl:1'] = {
