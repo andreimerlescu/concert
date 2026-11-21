@@ -22,4 +22,15 @@ type counters struct {
 	abuseBans     atomic.Int64
 	abuseRejected atomic.Int64
 	abuseDropped  atomic.Int64
+
+	upstream2xx     atomic.Int64
+	upstream3xx     atomic.Int64
+	upstream4xx     atomic.Int64
+	upstream5xx     atomic.Int64
+	upstreamErrors  atomic.Int64
+	upstreamLatency durationHistogram
+
+	clusterSyncSent   atomic.Int64
+	clusterSyncRecv   atomic.Int64
+	clusterSyncErrors atomic.Int64
 }

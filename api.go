@@ -411,6 +411,17 @@ func (p *portal) apiPromote(c *gin.Context) {
 		return
 	}
 	log.Printf("portal: %s moved %s (%s) to the front", portalActor(c), body.ID, t.ClientKey)
+	pr := portalPrincipal(c)
+	p.a.recordAudit(auditEvent{
+		Actor:    pr.Actor,
+		Role:     pr.Role.String(),
+		Source:   "portal",
+		Action:   "queue.promote",
+		Target:   body.ID,
+		Outcome:  "allow",
+		ClientIP: pr.IP.String(),
+		Details:  map[string]any{"client": t.ClientKey},
+	})
 	c.JSON(http.StatusOK, gin.H{"promoted": body.ID})
 }
 
@@ -468,6 +479,17 @@ func (p *portal) apiKick(c *gin.Context) {
 		p.a.agents.forget(t.Key)
 	}
 	log.Printf("portal: %s removed %s (%s) from the line, ban=%v", portalActor(c), body.ID, t.ClientKey, body.Ban)
+	pr := portalPrincipal(c)
+	p.a.recordAudit(auditEvent{
+		Actor:    pr.Actor,
+		Role:     pr.Role.String(),
+		Source:   "portal",
+		Action:   "queue.kick",
+		Target:   body.ID,
+		Outcome:  "allow",
+		ClientIP: pr.IP.String(),
+		Details:  map[string]any{"client": t.ClientKey, "ban": body.Ban},
+	})
 
 	secs := int(banFor / time.Second)
 	if banFor == banForeverLeft {
@@ -517,6 +539,22 @@ func (p *portal) apiBanSave(c *gin.Context) {
 		jsonError(c, http.StatusBadRequest, err.Error())
 		return
 	}
+	pr := portalPrincipal(c)
+	// Permanent bans and CIDR range bans require the admin role.
+	if (body.Permanent || !target.single) && !pr.Role.allows(roleAdmin) {
+		p.a.recordAudit(auditEvent{
+			Actor:    pr.Actor,
+			Role:     pr.Role.String(),
+			Source:   "portal",
+			Action:   "ban.create",
+			Target:   target.String(),
+			Outcome:  "deny",
+			ClientIP: pr.IP.String(),
+			Details:  map[string]any{"permanent": body.Permanent, "range": !target.single, "required": roleAdmin.String()},
+		})
+		jsonError(c, http.StatusForbidden, "permanent bans and CIDR range bans require admin role")
+		return
+	}
 	var d time.Duration // 0 = permanent
 	if !body.Permanent {
 		d, err = time.ParseDuration(strings.TrimSpace(body.Duration))
@@ -552,6 +590,16 @@ func (p *portal) apiBanSave(c *gin.Context) {
 		// joined in between.
 		dropped := p.a.dropWaiting(target.scope())
 		p.a.saveBansNow()
+		p.a.recordAudit(auditEvent{
+			Actor:    pr.Actor,
+			Role:     pr.Role.String(),
+			Source:   "portal",
+			Action:   "ban.create",
+			Target:   displayKey(key),
+			Outcome:  "allow",
+			ClientIP: pr.IP.String(),
+			Details:  map[string]any{"permanent": body.Permanent, "duration": d.String(), "dropped": dropped},
+		})
 		log.Printf("portal: %s banned %s %s, removed %d waiting", portalActor(c), displayKey(key), lasting, dropped)
 		c.JSON(http.StatusOK, gin.H{
 			"client":    displayKey(key),
@@ -571,6 +619,16 @@ func (p *portal) apiBanSave(c *gin.Context) {
 	dropped := p.a.dropWaiting(target.scope())
 	p.a.saveBansNow()
 	exempt := reg.exemptWithin(target.prefix)
+	p.a.recordAudit(auditEvent{
+		Actor:    pr.Actor,
+		Role:     pr.Role.String(),
+		Source:   "portal",
+		Action:   "ban.create_range",
+		Target:   target.prefix.String(),
+		Outcome:  "allow",
+		ClientIP: pr.IP.String(),
+		Details:  map[string]any{"permanent": body.Permanent, "duration": d.String(), "dropped": dropped},
+	})
 	log.Printf("portal: %s banned range %s %s, removed %d waiting (exempt within: %v)",
 		portalActor(c), target.prefix, lasting, dropped, exempt)
 	c.JSON(http.StatusOK, gin.H{
@@ -600,6 +658,17 @@ func (p *portal) apiUnban(c *gin.Context) {
 	}
 	p.history.lifted(target.scope(), time.Now(), "the portal ("+portalActor(c)+")")
 	p.a.saveBansNow()
+	p.a.cluster.publishUnban(target)
+	pr := portalPrincipal(c)
+	p.a.recordAudit(auditEvent{
+		Actor:    pr.Actor,
+		Role:     pr.Role.String(),
+		Source:   "portal",
+		Action:   "ban.lift",
+		Target:   target.String(),
+		Outcome:  "allow",
+		ClientIP: pr.IP.String(),
+	})
 	log.Printf("portal: %s unbanned %s", portalActor(c), target)
 	c.JSON(http.StatusOK, gin.H{"unbanned": target.String()})
 }
@@ -631,10 +700,29 @@ func (p *portal) apiSettingsSave(c *gin.Context) {
 		return
 	}
 	ip, _ := remoteAddr(c.Request)
+	pr := portalPrincipal(c)
 	if err := p.a.changeSettings(set, nil, ip); err != nil {
+		p.a.recordAudit(auditEvent{
+			Actor:    pr.Actor,
+			Role:     pr.Role.String(),
+			Source:   "portal",
+			Action:   "settings.update",
+			Outcome:  "error",
+			ClientIP: pr.IP.String(),
+			Details:  map[string]any{"keys": sortedKeys(set), "error": err.Error()},
+		})
 		jsonError(c, settingsStatus(err), err.Error())
 		return
 	}
+	p.a.recordAudit(auditEvent{
+		Actor:    pr.Actor,
+		Role:     pr.Role.String(),
+		Source:   "portal",
+		Action:   "settings.update",
+		Outcome:  "allow",
+		ClientIP: pr.IP.String(),
+		Details:  map[string]any{"keys": sortedKeys(set)},
+	})
 	log.Printf("portal: %s changed settings: %s", portalActor(c), strings.Join(sortedKeys(set), ", "))
 	c.JSON(http.StatusOK, p.settingsView())
 }
@@ -648,10 +736,29 @@ func (p *portal) apiSettingsReset(c *gin.Context) {
 		return
 	}
 	ip, _ := remoteAddr(c.Request)
+	pr := portalPrincipal(c)
 	if err := p.a.changeSettings(nil, keys, ip); err != nil {
+		p.a.recordAudit(auditEvent{
+			Actor:    pr.Actor,
+			Role:     pr.Role.String(),
+			Source:   "portal",
+			Action:   "settings.reset",
+			Outcome:  "error",
+			ClientIP: pr.IP.String(),
+			Details:  map[string]any{"keys": keys, "error": err.Error()},
+		})
 		jsonError(c, settingsStatus(err), err.Error())
 		return
 	}
+	p.a.recordAudit(auditEvent{
+		Actor:    pr.Actor,
+		Role:     pr.Role.String(),
+		Source:   "portal",
+		Action:   "settings.reset",
+		Outcome:  "allow",
+		ClientIP: pr.IP.String(),
+		Details:  map[string]any{"keys": keys},
+	})
 	log.Printf("portal: %s reset settings: %s", portalActor(c), strings.Join(keys, ", "))
 	c.JSON(http.StatusOK, p.settingsView())
 }
@@ -752,8 +859,8 @@ func (p *portal) rejectKicked(w http.ResponseWriter, r *http.Request, isStatus b
 }
 
 const kickedPage = `<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>Removed from the line</title></head>
-<body style="font-family:system-ui,sans-serif;max-width:32rem;margin:15vh auto;padding:0 1rem;text-align:center">
-<h1>You were removed from the line</h1>
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Removed from the line</title>
+<style>body{font-family:system-ui,-apple-system,sans-serif;max-width:32rem;margin:15vh auto;padding:0 1rem;text-align:center;color:#111;background:#fff}@media(prefers-color-scheme:dark){body{color:#f3f4f6;background:#111827}a{color:#60a5fa}}</style></head>
+<body><main role="main"><h1 role="alert">You were removed from the line</h1>
 <p>An administrator removed your place in the queue. You can rejoin at the back.</p>
-<p><a href="/">Rejoin the line</a></p></body></html>`
+<p><a href="/">Rejoin the line</a></p></main></body></html>`

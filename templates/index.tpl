@@ -8,8 +8,17 @@
         <p class="text-body-secondary small mb-4">Enter the portal pass to manage this concert.</p>
         {{if .Error}}<div class="alert alert-danger py-2" role="alert"><i aria-hidden="true" class="bi bi-exclamation-triangle"></i> {{.Error}}</div>{{end}}
         <form method="post" action="/login" autocomplete="off">
+          {{if .MultiUser}}
+          <label for="user" class="form-label">Username</label>
+          <input type="text" class="form-control mb-3" id="user" name="user" autocomplete="username" autofocus>
+          <label for="pass" class="form-label">Password</label>
+          <input type="password" class="form-control mb-3" id="pass" name="pass" required>
+          <label for="totp" class="form-label">MFA code <span class="text-body-secondary small">(if enabled)</span></label>
+          <input type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" class="form-control mb-3" id="totp" name="totp" placeholder="6-digit TOTP">
+          {{else}}
           <label for="pass" class="form-label">Portal pass</label>
           <input type="password" class="form-control mb-3" id="pass" name="pass" required autofocus>
+          {{end}}
           <button type="submit" class="btn btn-primary w-100"><i aria-hidden="true" class="bi bi-box-arrow-in-right"></i> Sign in</button>
         </form>
       </div>

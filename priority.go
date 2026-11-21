@@ -200,6 +200,7 @@ func intBetween(lo, hi int) func(any) error {
 // priorityGrants signs, verifies and issues concert_priority cookies.
 type priorityGrants struct {
 	key      []byte
+	prevKey  []byte
 	admit    *admitter
 	issued   atomic.Int64
 	cleared  atomic.Int64
@@ -208,16 +209,30 @@ type priorityGrants struct {
 	nlogged  atomic.Int64
 }
 
-func newPriorityGrants(secret []byte, admit *admitter) *priorityGrants {
+func derivePriorityKey(secret []byte) []byte {
 	m := hmac.New(sha256.New, secret)
 	m.Write([]byte("concert/priority/grant-key"))
-	return &priorityGrants{key: m.Sum(nil), admit: admit}
+	return m.Sum(nil)
+}
+
+func newPriorityGrants(secret []byte, admit *admitter) *priorityGrants {
+	return &priorityGrants{key: derivePriorityKey(secret), admit: admit}
+}
+
+func (g *priorityGrants) setPrevSecret(prev []byte) {
+	if len(prev) > 0 {
+		g.prevKey = derivePriorityKey(prev)
+	}
+}
+
+func (g *priorityGrants) macWith(key, body []byte) []byte {
+	m := hmac.New(sha256.New, key)
+	m.Write(body)
+	return m.Sum(nil)[:grantMACLen]
 }
 
 func (g *priorityGrants) mac(body []byte) []byte {
-	m := hmac.New(sha256.New, g.key)
-	m.Write(body)
-	return m.Sum(nil)[:grantMACLen]
+	return g.macWith(g.key, body)
 }
 
 func (g *priorityGrants) mint(id passID, rank priorityRank, exp time.Time) string {
@@ -230,7 +245,7 @@ func (g *priorityGrants) mint(id passID, rank priorityRank, exp time.Time) strin
 }
 
 // verify returns the rank in value when it is authentic, unexpired and bound
-// to the admission pass id.
+// to the admission pass id. Accepts grants signed under prevKey during secret rotation.
 func (g *priorityGrants) verify(value string, id passID, now time.Time) (priorityRank, bool) {
 	if base64.RawURLEncoding.DecodedLen(len(value)) != grantRawLen {
 		return rankGuest, false
@@ -239,7 +254,11 @@ func (g *priorityGrants) verify(value string, id passID, now time.Time) (priorit
 	if n, err := base64.RawURLEncoding.Decode(buf[:], []byte(value)); err != nil || n != grantRawLen {
 		return rankGuest, false
 	}
-	if !hmac.Equal(buf[grantBodyLen:], g.mac(buf[:grantBodyLen])) {
+	okMAC := hmac.Equal(buf[grantBodyLen:], g.macWith(g.key, buf[:grantBodyLen]))
+	if !okMAC && len(g.prevKey) > 0 {
+		okMAC = hmac.Equal(buf[grantBodyLen:], g.macWith(g.prevKey, buf[:grantBodyLen]))
+	}
+	if !okMAC {
 		return rankGuest, false
 	}
 	var bound passID

@@ -39,7 +39,7 @@ var newGateway = func(fc fastlane.Config, c *config) (fastlane.Gateway, error) {
 	if err != nil {
 		return nil, err
 	}
-	s, err := gateway.New(fc, networks, j, os.Getenv)
+	s, err := gateway.New(fc, networks, j, envLookupForGateway)
 	if err != nil {
 		j.Close()
 		return nil, fmt.Errorf("chain gateway: %w", err)

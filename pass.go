@@ -38,13 +38,16 @@ func newPassID() (passID, error) {
 
 // admitter issues and verifies the signed concert_admit cookie. Verification
 // is stateless, so any instance sharing CONCERT_ADMIT_SECRET accepts a pass.
-// The key never changes while concert runs; the lifetime and cookie
-// attributes can, through configure, and passes already issued stay valid
-// because each carries its own expiry.
+// Setting CONCERT_ADMIT_SECRET_PREV enables zero-downtime key rotation: passes
+// signed with the previous secret remain valid and are seamlessly re-signed
+// with the current secret on the visitor's next request.
 type admitter struct {
-	secret []byte
-	kid    [passKIDLen]byte
-	opts   atomic.Pointer[admitOpts]
+	secret     []byte
+	kid        [passKIDLen]byte
+	prevSecret []byte
+	prevKID    [passKIDLen]byte
+	hasPrev    bool
+	opts       atomic.Pointer[admitOpts]
 }
 
 type admitOpts struct {
@@ -54,13 +57,31 @@ type admitOpts struct {
 	secure bool
 }
 
-func newAdmitter(secret []byte, ttl time.Duration, path, domain string, secure bool) *admitter {
-	a := &admitter{secret: secret}
+func derivePassKID(secret []byte) [passKIDLen]byte {
+	var kid [passKIDLen]byte
 	m := hmac.New(sha256.New, secret)
 	m.Write([]byte("concert/admit/key-id"))
-	copy(a.kid[:], m.Sum(nil))
+	copy(kid[:], m.Sum(nil))
+	return kid
+}
+
+func newAdmitter(secret []byte, ttl time.Duration, path, domain string, secure bool) *admitter {
+	a := &admitter{
+		secret: secret,
+		kid:    derivePassKID(secret),
+	}
 	a.configure(ttl, path, domain, secure)
 	return a
+}
+
+// setPrevSecret configures a previous signing secret for zero-downtime key rotation.
+func (a *admitter) setPrevSecret(prev []byte) {
+	if len(prev) == 0 {
+		return
+	}
+	a.prevSecret = append([]byte(nil), prev...)
+	a.prevKID = derivePassKID(prev)
+	a.hasPrev = true
 }
 
 // configure sets the lifetime and cookie attributes of passes issued from now on.
@@ -80,33 +101,48 @@ func (a *admitter) mint(id passID, now time.Time) string {
 	return base64.RawURLEncoding.EncodeToString(buf[:])
 }
 
-func (a *admitter) verify(value string, now time.Time) (passID, time.Time, passStatus) {
+func (a *admitter) verifyWithRotation(value string, now time.Time) (passID, time.Time, passStatus, bool) {
 	var id passID
 	if value == "" {
-		return id, time.Time{}, passMissing
+		return id, time.Time{}, passMissing, false
 	}
 	if base64.RawURLEncoding.DecodedLen(len(value)) != passRawLen {
-		return id, time.Time{}, passForged
+		return id, time.Time{}, passForged, false
 	}
 	var buf [passRawLen]byte
 	n, err := base64.RawURLEncoding.Decode(buf[:], []byte(value))
 	if err != nil || n != passRawLen {
-		return id, time.Time{}, passForged
+		return id, time.Time{}, passForged, false
 	}
-	if !bytes.Equal(buf[passKIDOff:passBodyLen], a.kid[:]) {
-		return id, time.Time{}, passStale
+
+	var key []byte
+	rotated := false
+	switch {
+	case bytes.Equal(buf[passKIDOff:passBodyLen], a.kid[:]):
+		key = a.secret
+	case a.hasPrev && bytes.Equal(buf[passKIDOff:passBodyLen], a.prevKID[:]):
+		key = a.prevSecret
+		rotated = true
+	default:
+		return id, time.Time{}, passStale, false
 	}
-	mac := hmac.New(sha256.New, a.secret)
+
+	mac := hmac.New(sha256.New, key)
 	mac.Write(buf[:passBodyLen])
 	if !hmac.Equal(buf[passBodyLen:], mac.Sum(nil)[:passMACLen]) {
-		return id, time.Time{}, passForged
+		return id, time.Time{}, passForged, false
 	}
 	exp := time.Unix(int64(binary.BigEndian.Uint64(buf[passExpOff:passKIDOff])), 0)
 	if !now.Before(exp) {
-		return id, time.Time{}, passExpired
+		return id, time.Time{}, passExpired, false
 	}
 	copy(id[:], buf[:passIDLen])
-	return id, exp, passValid
+	return id, exp, passValid, rotated
+}
+
+func (a *admitter) verify(value string, now time.Time) (passID, time.Time, passStatus) {
+	id, exp, st, _ := a.verifyWithRotation(value, now)
+	return id, exp, st
 }
 
 func (a *admitter) set(w http.ResponseWriter, id passID, now time.Time) {
@@ -133,9 +169,10 @@ func (a *admitter) refresh(w http.ResponseWriter, r *http.Request, now time.Time
 	if ck, err := r.Cookie(admitCookie); err == nil {
 		var id passID
 		var exp time.Time
-		id, exp, status = a.verify(ck.Value, now)
+		var rotated bool
+		id, exp, status, rotated = a.verifyWithRotation(ck.Value, now)
 		if status == passValid {
-			if exp.Sub(now) <= a.opts.Load().ttl/2 {
+			if rotated || exp.Sub(now) <= a.opts.Load().ttl/2 {
 				a.set(w, id, now)
 			}
 			return id, status
@@ -150,15 +187,15 @@ func (a *admitter) refresh(w http.ResponseWriter, r *http.Request, now time.Time
 }
 
 // check runs on every private asset and stream request. It also slides the
-// pass past half-life, so pages that lazy-load assets without navigating
-// stay admitted.
+// pass past half-life (or re-signs immediately after secret rotation), so
+// pages that lazy-load assets without navigating stay admitted.
 func (a *admitter) check(w http.ResponseWriter, r *http.Request, now time.Time) (passID, passStatus) {
 	ck, err := r.Cookie(admitCookie)
 	if err != nil {
 		return passID{}, passMissing
 	}
-	id, exp, status := a.verify(ck.Value, now)
-	if status == passValid && exp.Sub(now) <= a.opts.Load().ttl/2 {
+	id, exp, status, rotated := a.verifyWithRotation(ck.Value, now)
+	if status == passValid && (rotated || exp.Sub(now) <= a.opts.Load().ttl/2) {
 		a.set(w, id, now)
 	}
 	return id, status

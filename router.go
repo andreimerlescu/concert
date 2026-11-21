@@ -41,16 +41,22 @@ func buildRouter(g *generation) (engine *gin.Engine, err error) {
 		log.Printf("request panic on %s", clip(c.Request.URL.Path, 256))
 		c.AbortWithStatus(http.StatusInternalServerError)
 	}))
+	r.Use(correlateMiddleware)
+	r.Use(g.mainSecurityHeaders)
 	r.Use(g.identify) // before the logger: banned requests are never logged
 	if cfg.accessLogEnabled {
 		out := cfg.accessLog
 		if out == nil {
 			out = os.Stdout
 		}
-		r.Use(gin.LoggerWithConfig(gin.LoggerConfig{
-			Output: out,
-			Skip:   accessLogSkipper(cfg),
-		}))
+		if strings.EqualFold(strings.TrimSpace(cfg.logFormat), "json") {
+			r.Use(jsonAccessLogger(out, cfg))
+		} else {
+			r.Use(gin.LoggerWithConfig(gin.LoggerConfig{
+				Output: out,
+				Skip:   accessLogSkipper(cfg),
+			}))
+		}
 	}
 
 	// ---- Outside the room. ----
@@ -94,6 +100,8 @@ var statusRules = []pathRule{
 	{path: "/queue/status"},
 	{path: "/queue/status", prefix: true},
 	{path: "/_room/healthz"},
+	{path: "/_room/readyz"},
+	{path: "/_room/metrics"},
 }
 
 // isTicketStatus reports whether p is room's GET /queue/status/{id}.
@@ -134,9 +142,14 @@ func (g *generation) gated(c *gin.Context) {
 
 // forwardTo marks the request as admitted and hands it to the proxy.
 func forwardTo(proxy http.Handler) gin.HandlerFunc {
+	return forwardToPool(proxy, nil)
+}
+
+func forwardToPool(proxy http.Handler, pool *upstreamPool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Set(ctxAdmitted, true)
-		proxy.ServeHTTP(c.Writer, c.Request)
+		req := selectBackendForRequest(c.Request, pool)
+		proxy.ServeHTTP(c.Writer, req)
 	}
 }
 

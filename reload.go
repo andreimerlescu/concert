@@ -48,6 +48,7 @@ type generation struct {
 	assets    *assetGuard
 	streams   *streamGuard
 	lane      *rankedSem // priority lane; see priority.go
+	upstreams *upstreamPool
 	proxy     *httputil.ReverseProxy
 	forward   gin.HandlerFunc
 	engine    *gin.Engine
@@ -82,10 +83,16 @@ func (a *app) buildGeneration(next config, prev *generation) (*generation, error
 
 	if prev != nil && sameProxy(prev.cfg, next) {
 		g.proxy = prev.proxy
+		g.upstreams = prev.upstreams
 	} else {
-		g.proxy = newProxy(next.target, next.preserveHost, next.headerTimeout, next.trusted, a.prio.grants.modifyResponse)
+		proxy, pool, err := newEnterpriseProxy(next, a.stats, a.prio.grants.modifyResponse)
+		if err != nil {
+			return nil, err
+		}
+		g.proxy = proxy
+		g.upstreams = pool
 	}
-	g.forward = forwardTo(g.proxy)
+	g.forward = forwardToPool(g.proxy, g.upstreams)
 
 	var users *userStore
 	if prev != nil && sameUserPools(prev.cfg, next) {
@@ -141,7 +148,14 @@ func (a *app) buildGeneration(next config, prev *generation) (*generation, error
 
 func sameProxy(a, b config) bool {
 	return a.upstream == b.upstream && a.preserveHost == b.preserveHost &&
-		a.headerTimeout == b.headerTimeout && a.trustedProxies == b.trustedProxies
+		a.headerTimeout == b.headerTimeout && a.trustedProxies == b.trustedProxies &&
+		a.upstreamHealthPath == b.upstreamHealthPath &&
+		a.upstreamHealthInterval == b.upstreamHealthInterval &&
+		a.upstreamCBFailures == b.upstreamCBFailures &&
+		a.upstreamCBCooldown == b.upstreamCBCooldown &&
+		a.upstreamCA == b.upstreamCA &&
+		a.upstreamClientCert == b.upstreamClientCert &&
+		a.upstreamClientKey == b.upstreamClientKey
 }
 
 func sameUserPools(a, b config) bool {
@@ -199,6 +213,9 @@ func (a *app) commit(g *generation, lp *listenPlan) error {
 	a.admit.configure(cfg.admitTTL, cfg.cookiePath, cfg.cookieDomain, cfg.secureCookie)
 	a.abuse.setParams(abuseParamsFrom(cfg))
 	a.setPricing(cfg.rate, cfg.surge)
+	if a.history != nil {
+		a.history.setRetention(cfg.historyRetention)
+	}
 	if prev == nil || prev.assets.users != g.assets.users {
 		g.assets.users.startJanitor(janitorInterval(cfg.admitTTL), cfg.admitTTL)
 	}
@@ -214,6 +231,7 @@ func (a *app) commit(g *generation, lp *listenPlan) error {
 			prev.assets.users.close()
 		}
 		if prev.proxy != g.proxy {
+			prev.upstreams.close()
 			if t, ok := prev.proxy.Transport.(*http.Transport); ok {
 				t.CloseIdleConnections()
 			}
@@ -333,5 +351,6 @@ func portalAddress(cfg config) string {
 
 func tlsChanged(a, b config) bool {
 	return strings.Join(a.tlsHosts, ",") != strings.Join(b.tlsHosts, ",") ||
-		a.tlsEmail != b.tlsEmail || a.tlsCacheDir != b.tlsCacheDir || a.tlsStaging != b.tlsStaging
+		a.tlsEmail != b.tlsEmail || a.tlsCacheDir != b.tlsCacheDir || a.tlsStaging != b.tlsStaging ||
+		a.tlsCert != b.tlsCert || a.tlsKey != b.tlsKey || a.tlsMinVersion != b.tlsMinVersion
 }

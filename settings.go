@@ -76,17 +76,20 @@ const (
 
 // Portal sections, in display order.
 const (
-	groupRoom     = "Waiting room"
-	groupSkip     = "Skip the line"
-	groupPriority = "Priority"
-	groupOrigin   = "Origin and listener"
-	groupCookies  = "Cookies"
-	groupPaths    = "Paths"
-	groupAssets   = "Asset tier"
-	groupStreams  = "Streams"
-	groupAbuse    = "Abuse registry"
-	groupTLS      = "Let's Encrypt"
-	groupPortal   = "Admin portal"
+	groupRoom       = "Waiting room"
+	groupSkip       = "Skip the line"
+	groupPriority   = "Priority"
+	groupOrigin     = "Origin and listener"
+	groupCookies    = "Cookies"
+	groupPaths      = "Paths"
+	groupAssets     = "Asset tier"
+	groupStreams    = "Streams"
+	groupAbuse      = "Abuse registry"
+	groupTLS        = "TLS"
+	groupPortal     = "Admin portal"
+	groupEnterprise = "Enterprise security & observability"
+	groupPrivacy    = "Privacy & retention"
+	groupCluster    = "Cluster sync"
 )
 
 // settingDef describes one setting: its flag, environment variable, default,
@@ -276,7 +279,7 @@ var settingDefs = []settingDef{
 		def: "", usage: "comma-separated CIDRs that are never struck or banned",
 		ptr: func(c *config) any { return &c.abuseAllow }, check: checkCIDRList, list: listCIDRs},
 
-	// ---- Let's Encrypt; see tls.go ----
+	// ---- TLS; see tls.go ----
 	{key: "tls_domains", flag: "tls-domains", env: "CONCERT_TLS_DOMAINS", group: groupTLS, label: "Certificate hostnames",
 		def: "", usage: "comma-separated hostnames to get Let's Encrypt certificates for; enables TLS on -listen",
 		ptr: func(c *config) any { return &c.tlsDomains }, check: checkHostList, list: listHosts},
@@ -289,10 +292,45 @@ var settingDefs = []settingDef{
 	{key: "tls_staging", flag: "tls-staging", env: "CONCERT_TLS_STAGING", group: groupTLS, label: "Use staging directory",
 		def: false, usage: "use the Let's Encrypt staging directory (untrusted certificates, generous rate limits)",
 		ptr: func(c *config) any { return &c.tlsStaging }},
+	{key: "tls_cert", flag: "tls-cert", env: "CONCERT_TLS_CERT", group: groupTLS, label: "TLS certificate file (PEM)",
+		def: "", usage: "PEM certificate chain file for enterprise PKI TLS (hot-reloaded on change)",
+		ptr: func(c *config) any { return &c.tlsCert }},
+	{key: "tls_key", flag: "tls-key", env: "CONCERT_TLS_KEY", group: groupTLS, label: "TLS private key file (PEM)",
+		def: "", usage: "PEM private key file for enterprise PKI TLS (hot-reloaded on change)",
+		ptr: func(c *config) any { return &c.tlsKey }},
+	{key: "tls_min_version", flag: "tls-min-version", env: "CONCERT_TLS_MIN_VERSION", group: groupTLS, label: "Minimum TLS version",
+		def: "1.2", usage: "minimum TLS version on listeners (1.2 or 1.3)",
+		ptr: func(c *config) any { return &c.tlsMinVersion }},
+	{key: "hsts_max_age", flag: "hsts-max-age", env: "CONCERT_HSTS_MAX_AGE", group: groupTLS, label: "HSTS max-age (seconds)",
+		def: 0, usage: "Strict-Transport-Security max-age in seconds on HTTPS responses (0 disables)",
+		ptr: func(c *config) any { return &c.hstsMaxAge }, check: intAtLeast(0)},
 
-	// ---- Admin portal; see portal.go. It only runs when CONCERT_PORTAL_PASS is set. ----
+	// ---- Upstream resilience & mTLS; see upstream.go ----
+	{key: "upstream_health_path", flag: "upstream-health-path", env: "CONCERT_UPSTREAM_HEALTH_PATH", group: groupOrigin, label: "Upstream health path",
+		def: "", usage: "active health-check path on each upstream backend (e.g. /healthz; empty disables active probing)",
+		ptr: func(c *config) any { return &c.upstreamHealthPath }},
+	{key: "upstream_health_interval", flag: "upstream-health-interval", env: "CONCERT_UPSTREAM_HEALTH_INTERVAL", group: groupOrigin, label: "Upstream health interval",
+		def: 10 * time.Second, usage: "how often active upstream health probes run",
+		ptr: func(c *config) any { return &c.upstreamHealthInterval }, check: durationAtLeast(time.Second)},
+	{key: "upstream_cb_failures", flag: "upstream-cb-failures", env: "CONCERT_UPSTREAM_CB_FAILURES", group: groupOrigin, label: "Circuit breaker failures",
+		def: 0, usage: "consecutive upstream 502/503/504 or transport failures to open circuit breaker (0 disables)",
+		ptr: func(c *config) any { return &c.upstreamCBFailures }, check: intAtLeast(0)},
+	{key: "upstream_cb_cooldown", flag: "upstream-cb-cooldown", env: "CONCERT_UPSTREAM_CB_COOLDOWN", group: groupOrigin, label: "Circuit breaker cooldown",
+		def: 15 * time.Second, usage: "how long an open upstream circuit stays open before retrying",
+		ptr: func(c *config) any { return &c.upstreamCBCooldown }, check: durationAtLeast(time.Second)},
+	{key: "upstream_ca", flag: "upstream-ca", env: "CONCERT_UPSTREAM_CA", group: groupOrigin, label: "Upstream CA bundle", restart: true,
+		def: "", usage: "PEM CA certificate bundle for verifying internal HTTPS origins",
+		ptr: func(c *config) any { return &c.upstreamCA }},
+	{key: "upstream_client_cert", flag: "upstream-client-cert", env: "CONCERT_UPSTREAM_CLIENT_CERT", group: groupOrigin, label: "Upstream mTLS client cert", restart: true,
+		def: "", usage: "PEM client certificate for mutual TLS (mTLS) to HTTPS origins",
+		ptr: func(c *config) any { return &c.upstreamClientCert }},
+	{key: "upstream_client_key", flag: "upstream-client-key", env: "CONCERT_UPSTREAM_CLIENT_KEY", group: groupOrigin, label: "Upstream mTLS client key", restart: true,
+		def: "", usage: "PEM client private key for mutual TLS (mTLS) to HTTPS origins",
+		ptr: func(c *config) any { return &c.upstreamClientKey }},
+
+	// ---- Admin portal; see portal.go. ----
 	{key: "portal_listen", flag: "portal-listen", env: "CONCERT_PORTAL_LISTEN", group: groupPortal, label: "Portal address", restart: true,
-		def: "127.0.0.1:8081", usage: "admin portal address, empty turns the portal off (flag or CONCERT_PORTAL_LISTEN only; takes a restart); the portal needs CONCERT_PORTAL_PASS",
+		def: "127.0.0.1:8081", usage: "admin portal address, empty turns the portal off (flag or CONCERT_PORTAL_LISTEN only; takes a restart); requires CONCERT_PORTAL_PASS, CONCERT_PORTAL_USERS, or SSO",
 		ptr: func(c *config) any { return &c.portal.listen }},
 	{key: "portal_allow", flag: "portal-allow", env: "CONCERT_PORTAL_ALLOW", group: groupPortal, label: "Portal allowlist",
 		def: "127.0.0.1/32,::1/128", usage: "comma-separated CIDRs allowed to reach the admin portal",
@@ -303,9 +341,72 @@ var settingDefs = []settingDef{
 	{key: "portal_secure_cookie", flag: "portal-secure-cookie", env: "CONCERT_PORTAL_SECURE_COOKIE", group: groupPortal, label: "Secure portal cookie",
 		def: false, usage: "mark the portal session cookie Secure (portal served over HTTPS)",
 		ptr: func(c *config) any { return &c.portal.secureCookie }},
+	{key: "portal_tls_cert", flag: "portal-tls-cert", env: "CONCERT_PORTAL_TLS_CERT", group: groupPortal, label: "Portal TLS certificate", restart: true,
+		def: "", usage: "PEM certificate file to serve the admin portal natively over HTTPS",
+		ptr: func(c *config) any { return &c.portal.tlsCert }},
+	{key: "portal_tls_key", flag: "portal-tls-key", env: "CONCERT_PORTAL_TLS_KEY", group: groupPortal, label: "Portal TLS key", restart: true,
+		def: "", usage: "PEM private key file to serve the admin portal natively over HTTPS",
+		ptr: func(c *config) any { return &c.portal.tlsKey }},
+	{key: "portal_sso_header", flag: "portal-sso-header", env: "CONCERT_PORTAL_SSO_HEADER", group: groupPortal, label: "SSO identity header", restart: true,
+		def: "", usage: "header set by a trusted SSO proxy (e.g. X-Forwarded-Email) identifying the signed-in user",
+		ptr: func(c *config) any { return &c.portal.ssoHeader }},
+	{key: "portal_sso_role_header", flag: "portal-sso-role-header", env: "CONCERT_PORTAL_SSO_ROLE_HEADER", group: groupPortal, label: "SSO role/group header", restart: true,
+		def: "", usage: "header set by a trusted SSO proxy carrying RBAC roles/groups (viewer, operator, admin)",
+		ptr: func(c *config) any { return &c.portal.ssoRoleHeader }},
+	{key: "portal_sso_default_role", flag: "portal-sso-default-role", env: "CONCERT_PORTAL_SSO_DEFAULT_ROLE", group: groupPortal, label: "SSO default role", restart: true,
+		def: "viewer", usage: "default RBAC role for SSO users when no role header matches (viewer, operator, admin)",
+		ptr: func(c *config) any { return &c.portal.ssoDefaultRole }},
+	{key: "portal_trusted_proxies", flag: "portal-trusted-proxies", env: "CONCERT_PORTAL_TRUSTED_PROXIES", group: groupPortal, label: "Portal trusted SSO proxies", restart: true,
+		def: "", usage: "comma-separated CIDRs of identity proxies trusted to set SSO headers",
+		ptr: func(c *config) any { return &c.portal.trustedProxiesSpec }, check: checkCIDRList},
 	{key: "history_log", flag: "history-log", env: "CONCERT_HISTORY_LOG", group: groupPortal, label: "History log file", restart: true,
 		def: "", usage: "JSON-lines file the portal's request history is written to and restored from; empty means history.jsonl in -data-dir, off keeps it in memory only (flag or CONCERT_HISTORY_LOG only; takes a restart)",
 		ptr: func(c *config) any { return &c.historyLog }},
+
+	// ---- Enterprise security & observability ----
+	{key: "stats_auth", flag: "stats-auth", env: "CONCERT_STATS_AUTH", group: groupEnterprise, label: "Require auth on stats/metrics",
+		def: false, usage: "require bearer token authentication on /_room/stats and /_room/metrics",
+		ptr: func(c *config) any { return &c.statsAuth }},
+	{key: "read_only_settings", flag: "read-only-settings", env: "CONCERT_READ_ONLY_SETTINGS", group: groupEnterprise, label: "Read-only settings (GitOps)", restart: true,
+		def: false, usage: "forbid live mutations to settings.json via portal or API for immutable/GitOps deployments",
+		ptr: func(c *config) any { return &c.readOnlySettings }},
+	{key: "hardened", flag: "enterprise-hardened", env: "CONCERT_HARDENED", group: groupEnterprise, label: "Enterprise hardened preset", restart: true,
+		def: false, usage: "enforce baseline enterprise security requirements at startup (explicit secrets, secure cookies, stats auth, audit log)",
+		ptr: func(c *config) any { return &c.hardened }},
+	{key: "audit_log", flag: "audit-log", env: "CONCERT_AUDIT_LOG", group: groupEnterprise, label: "Tamper-evident audit log", restart: true,
+		def: "", usage: "hash-chained JSONL audit log path; empty means audit.jsonl in -data-dir, off disables persistence",
+		ptr: func(c *config) any { return &c.auditLog }},
+	{key: "log_format", flag: "log-format", env: "CONCERT_LOG_FORMAT", group: groupEnterprise, label: "Log format", restart: true,
+		def: "text", usage: "access and structured log format: text or json",
+		ptr: func(c *config) any { return &c.logFormat }},
+	{key: "log_level", flag: "log-level", env: "CONCERT_LOG_LEVEL", group: groupEnterprise, label: "Log level", restart: true,
+		def: "info", usage: "structured log level: debug, info, warn, error",
+		ptr: func(c *config) any { return &c.logLevel }},
+
+	// ---- Privacy & retention; see privacy.go ----
+	{key: "privacy_scrub_query", flag: "privacy-scrub-query", env: "CONCERT_PRIVACY_SCRUB_QUERY", group: groupPrivacy, label: "Scrub sensitive query params",
+		def: true, usage: "redact sensitive query parameters (tokens, secrets, keys, PII) in logs and history",
+		ptr: func(c *config) any { return &c.privacyScrubQuery }},
+	{key: "privacy_strip_query", flag: "privacy-strip-query", env: "CONCERT_PRIVACY_STRIP_QUERY", group: groupPrivacy, label: "Strip all query strings",
+		def: false, usage: "omit all query strings from logs and history (recommended for PCI/HIPAA)",
+		ptr: func(c *config) any { return &c.privacyStripQuery }},
+	{key: "privacy_anonymize_ip", flag: "privacy-anonymize-ip", env: "CONCERT_PRIVACY_ANONYMIZE_IP", group: groupPrivacy, label: "Anonymize IPs in logs/history",
+		def: false, usage: "mask client IPs to /24 (IPv4) and /48 (IPv6) in access logs and request history",
+		ptr: func(c *config) any { return &c.privacyAnonymizeIP }},
+	{key: "history_retention", flag: "history-retention", env: "CONCERT_HISTORY_RETENTION", group: groupPrivacy, label: "History retention",
+		def: 72 * time.Hour, usage: "how long client history and ended bans are kept (1h-720h)",
+		ptr: func(c *config) any { return &c.historyRetention }, check: durationBetween(time.Hour, 30*24*time.Hour)},
+
+	// ---- Cluster sync; see cluster.go ----
+	{key: "redis_addr", flag: "redis-addr", env: "CONCERT_REDIS_ADDR", group: groupCluster, label: "Redis/Valkey address", restart: true,
+		def: "", usage: "host:port of Redis/Valkey for multi-node HA ban synchronization (empty disables)",
+		ptr: func(c *config) any { return &c.redisAddr }},
+	{key: "redis_tls", flag: "redis-tls", env: "CONCERT_REDIS_TLS", group: groupCluster, label: "Redis TLS", restart: true,
+		def: false, usage: "use TLS 1.2+ when connecting to Redis/Valkey",
+		ptr: func(c *config) any { return &c.redisTLS }},
+	{key: "redis_prefix", flag: "redis-prefix", env: "CONCERT_REDIS_PREFIX", group: groupCluster, label: "Redis key prefix", restart: true,
+		def: "concert", usage: "key and pubsub channel prefix for cluster state in Redis/Valkey",
+		ptr: func(c *config) any { return &c.redisPrefix }},
 }
 
 // settingByKey indexes settingDefs by key.
@@ -811,6 +912,9 @@ func (a *app) changeSettings(set map[string]json.RawMessage, reset []string, act
 	defer m.mu.Unlock()
 
 	prev := a.current()
+	if prev.cfg.readOnlySettings {
+		return &settingsError{http.StatusForbidden, "settings are read-only (-read-only-settings / GitOps mode)"}
+	}
 	cand := prev.cfg
 	file := make(map[string]any, len(m.file)+len(set))
 	for k, v := range m.file {
@@ -941,21 +1045,38 @@ func (a *app) fixedSettings() map[string]string {
 	secret := "set (CONCERT_ADMIT_SECRET)"
 	if cfg.admitSecretGenerated {
 		secret = "random at startup (CONCERT_ADMIT_SECRET unset)"
+	} else if len(cfg.admitSecretPrev) > 0 {
+		secret = "set with dual-key rotation (CONCERT_ADMIT_SECRET + CONCERT_ADMIT_SECRET_PREV)"
 	}
 	token := "not set: admin API disabled"
-	if cfg.adminToken != "" {
-		token = "set (CONCERT_ADMIN_TOKEN)"
+	if cfg.apiTokens.enabled() {
+		token = fmt.Sprintf("enabled (%d token(s))", len(cfg.apiTokens.tokens))
+	}
+	portalAuth := "legacy password (CONCERT_PORTAL_PASS)"
+	if cfg.portal.users != nil && cfg.portal.users.count() > 0 {
+		portalAuth = fmt.Sprintf("RBAC users (%d account(s))", cfg.portal.users.count())
+		if cfg.portal.ssoHeader != "" {
+			portalAuth += " + SSO (" + cfg.portal.ssoHeader + ")"
+		}
+	} else if cfg.portal.ssoHeader != "" {
+		portalAuth = "SSO proxy (" + cfg.portal.ssoHeader + ")"
+	}
+	clusterDesc := "standalone (in-memory)"
+	if cfg.redisAddr != "" {
+		clusterDesc = "Redis sync (" + cfg.redisAddr + ")"
 	}
 	return map[string]string{
 		"Data directory":   dataDir,
 		"Admission secret": secret,
-		"Admin token":      token,
-		"Portal pass":      "set (CONCERT_PORTAL_PASS)",
+		"Admin tokens":     token,
+		"Portal auth":      portalAuth,
+		"Audit log":        a.audit.describe(),
+		"Cluster sync":     clusterDesc,
 		"IP details":       a.ipinfo.describe(),
 		"History log":      a.history.describeLog(),
 		"Main listener":    mainEP.describe(),
 		"Portal listener":  portalEP.describe(),
-		"Version":          BinaryVersion(),
+		"Version":          BinaryVersion() + " (" + fipsModeLabel() + ")",
 	}
 }
 

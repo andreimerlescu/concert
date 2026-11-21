@@ -8,7 +8,6 @@ import (
 	"math"
 	"net/http"
 	"net/netip"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -56,6 +55,15 @@ type app struct {
 	// the portal is off. See history.go.
 	history *history
 
+	// audit is the hash-chained tamper-evident administrative audit log; see audit.go.
+	audit *auditLogger
+
+	// cluster synchronizes bans across Concert instances via Redis/Valkey; see cluster.go.
+	cluster *clusterSync
+
+	// draining flips true once shutdown starts so /_room/readyz returns 503.
+	draining atomic.Bool
+
 	// Listeners, set by run once serving starts; guarded by settings.mu.
 	mainEP, portalEP *endpoint
 
@@ -80,6 +88,7 @@ func newApp(cfg config) (*app, error) {
 	if err := cfg.normalize(); err != nil {
 		return nil, err
 	}
+	configureLogging(cfg.logFormat, cfg.logLevel)
 
 	stats := &counters{}
 	a := &app{
@@ -89,12 +98,16 @@ func newApp(cfg config) (*app, error) {
 		abuse:  newAbuseRegistry(cfg, stats),
 		drops:  newDropper(),
 		agents: newAgentPlaces(),
+		audit:  newAuditLogger(auditLogPath(cfg), cfg.admitSecret),
 		stop:   make(chan struct{}),
 	}
+	a.admit.setPrevSecret(cfg.admitSecretPrev)
+	a.onClose(a.audit.close)
 	a.settings = newSettingsManager(cfg)
 	// Before the first generation: its proxy turns the origin's
 	// Concert-Priority header into grants.
 	a.prio = newPriorityState(cfg.admitSecret, a.admit)
+	a.prio.grants.setPrevSecret(cfg.admitSecretPrev)
 
 	wr := &room.WaitingRoom{}
 	if err := wr.Init(int32(cfg.capacity)); err != nil {
@@ -138,7 +151,7 @@ func newApp(cfg config) (*app, error) {
 			gw, err = newGateway(fc, &cfg)
 		}
 		if err == nil {
-			a.fastlane, err = fastlane.New(fc, cfg.dataDir, cfg.admitSecret, gw, os.Getenv("CONCERT_POLICY_TOKEN"))
+			a.fastlane, err = fastlane.New(fc, cfg.dataDir, cfg.admitSecret, gw, envOrFile("CONCERT_POLICY_TOKEN", ""))
 			if err != nil {
 				closeGateway(gw)
 			} else if gw != nil {
@@ -194,8 +207,33 @@ func newApp(cfg config) (*app, error) {
 	// NADDR_ADDR the portal shows bare addresses.
 	a.ipinfo = newIPLookup(ipInfoGetenv)
 
-	// Every new ban drops that network's waiting visitors from room's line.
-	a.abuse.setOnBan(a.queueDrop)
+	// Every new ban drops that network's waiting visitors from room's line
+	// and publishes to cluster peers when Redis sync is configured.
+	if cfg.redisAddr != "" {
+		a.cluster = newClusterSync(clusterConfig{
+			addr:     cfg.redisAddr,
+			password: cfg.redisPassword,
+			useTLS:   cfg.redisTLS,
+			prefix:   cfg.redisPrefix,
+		}, a.abuse, a.stats, a.queueDrop)
+		a.onClose(a.cluster.close)
+	}
+	a.abuse.setOnBan(func(scope netip.Prefix) {
+		a.queueDrop(scope)
+		if a.cluster != nil {
+			now := time.Now()
+			for _, b := range a.abuse.bans(now) {
+				if t, err := parseBanTarget(b.Client); err == nil && t.scope() == scope {
+					until := banForever
+					if !b.Permanent {
+						until = b.Until.UnixNano()
+					}
+					a.cluster.publishBan(t, until, b.Offenses)
+					break
+				}
+			}
+		}
+	})
 
 	go a.abuse.janitor(a.stop)
 	a.wg.Add(1)
@@ -241,11 +279,19 @@ func (a *app) attachHistory(h *history) {
 	a.onClose(h.close)
 }
 
+// recordAudit appends an administrative/security event to the hash-chained audit log.
+func (a *app) recordAudit(ev auditEvent) {
+	if a != nil && a.audit != nil {
+		a.audit.record(ev)
+	}
+}
+
 // Close stops the janitors and the drop loop, flushes unsaved bans and the
 // history log, stops the waiting room's reaper, saves the queue, and stops
 // the IP database watcher. run calls it after the listeners have
 // drained, so no new tickets or history arrive while they are being saved.
 func (a *app) Close() {
+	a.draining.Store(true)
 	a.stopOnce.Do(func() {
 		close(a.stop)
 		a.wg.Wait()
@@ -267,6 +313,7 @@ func (a *app) Close() {
 		}
 		if g := a.current(); g != nil {
 			g.assets.users.close()
+			g.upstreams.close()
 		}
 		a.ipinfo.close()
 	})
@@ -423,6 +470,10 @@ func run(ctx context.Context, cfg config) error {
 	}
 
 	mainEP.serveOn(ln, c.listen)
+	go func() {
+		<-ctx.Done()
+		a.draining.Store(true)
+	}()
 	return awaitShutdown(ctx, mainEP, portalEP)
 }
 

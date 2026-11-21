@@ -81,12 +81,42 @@ type config struct {
 	agentQueue  bool
 	agentPlaces int
 
-	// Let's Encrypt; see tls.go. TLS on -listen is enabled when tlsDomains
-	// names at least one host.
-	tlsDomains  string
-	tlsEmail    string
-	tlsCacheDir string
-	tlsStaging  bool
+	// Let's Encrypt & Enterprise TLS; see tls.go. TLS on -listen is enabled
+	// when tlsDomains names at least one host OR tlsCert+tlsKey are set.
+	tlsDomains    string
+	tlsEmail      string
+	tlsCacheDir   string
+	tlsStaging    bool
+	tlsCert       string
+	tlsKey        string
+	tlsMinVersion string
+	hstsMaxAge    int
+
+	// Upstream resilience & mTLS; see upstream.go.
+	upstreamHealthPath     string
+	upstreamHealthInterval time.Duration
+	upstreamCBFailures     int
+	upstreamCBCooldown     time.Duration
+	upstreamCA             string
+	upstreamClientCert     string
+	upstreamClientKey      string
+
+	// Enterprise security, logging, privacy, and multi-node sync.
+	statsAuth          bool
+	readOnlySettings   bool
+	hardened           bool
+	auditLog           string
+	logFormat          string
+	logLevel           string
+	privacyScrubQuery  bool
+	privacyStripQuery  bool
+	privacyAnonymizeIP bool
+	historyRetention   time.Duration
+
+	redisAddr     string
+	redisTLS      bool
+	redisPrefix   string
+	redisPassword string // env/file only: CONCERT_REDIS_PASSWORD
 
 	trustedProxies   string
 	abuseEnabled     bool
@@ -120,11 +150,15 @@ type config struct {
 
 	// Derived / non-flag fields.
 	admitSecret          []byte         // CONCERT_ADMIT_SECRET, or random when unset
+	admitSecretPrev      []byte         // CONCERT_ADMIT_SECRET_PREV for zero-downtime key rotation
 	admitSecretGenerated bool           // true when admitSecret was generated
-	target               *url.URL       // set by normalize
+	adminTokensSpec      string         // CONCERT_ADMIN_TOKENS
+	apiTokens            *apiTokenStore // parsed CONCERT_ADMIN_TOKEN + CONCERT_ADMIN_TOKENS
+	target               *url.URL       // primary upstream; set by normalize
+	targets              []*url.URL     // all parsed upstreams; set by normalize
 	trusted              []netip.Prefix // parsed -trusted-proxies
 	allow                []netip.Prefix // parsed -abuse-allow
-	tlsHosts             []string       // parsed -tls-domains; empty means plain HTTP
+	tlsHosts             []string       // parsed -tls-domains; empty means no ACME
 	accessLog            io.Writer      // access log destination; nil means os.Stdout
 }
 
@@ -151,11 +185,16 @@ func parseConfig(fs *flag.FlagSet, args []string) (config, bool, error) {
 		return config{}, false, err
 	}
 
-	// Secrets are environment-only: command-line arguments are visible in
-	// ps output and shell history, and they are never written to settings.json.
-	cfg.adminToken = env.String("CONCERT_ADMIN_TOKEN", "")
-	cfg.admitSecret = []byte(env.String("CONCERT_ADMIT_SECRET", ""))
-	cfg.portal.pass = env.String("CONCERT_PORTAL_PASS", "")
+	// Secrets are environment-only (or *_FILE for Kubernetes/Docker/Vault
+	// mounted secrets): command-line arguments are visible in ps output and
+	// shell history, and secrets are never written to settings.json.
+	cfg.adminToken = envOrFile("CONCERT_ADMIN_TOKEN", "")
+	cfg.adminTokensSpec = envOrFile("CONCERT_ADMIN_TOKENS", "")
+	cfg.admitSecret = []byte(envOrFile("CONCERT_ADMIT_SECRET", ""))
+	cfg.admitSecretPrev = []byte(envOrFile("CONCERT_ADMIT_SECRET_PREV", ""))
+	cfg.portal.pass = envOrFile("CONCERT_PORTAL_PASS", "")
+	cfg.portal.usersSpec = envOrFile("CONCERT_PORTAL_USERS", "")
+	cfg.redisPassword = envOrFile("CONCERT_REDIS_PASSWORD", "")
 	cfg.accessLog = os.Stdout
 
 	if *showVersion {
@@ -172,11 +211,34 @@ func parseConfig(fs *flag.FlagSet, args []string) (config, bool, error) {
 
 // normalize validates the config and fills derived fields. It is idempotent.
 func (c *config) normalize() error {
-	u, err := url.Parse(c.upstream)
-	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-		return fmt.Errorf("invalid -upstream %q: must look like http://host:port", c.upstream)
+	targets, err := parseUpstreams(c.upstream)
+	if err != nil {
+		return err
 	}
-	c.target = u
+	c.targets = targets
+	c.target = targets[0]
+
+	if c.upstreamCBFailures < 0 {
+		return fmt.Errorf("invalid -upstream-cb-failures %d: must be >= 0", c.upstreamCBFailures)
+	}
+	if c.upstreamCBCooldown < 0 {
+		return fmt.Errorf("invalid -upstream-cb-cooldown %s: must not be negative", c.upstreamCBCooldown)
+	}
+	if c.upstreamCBCooldown == 0 {
+		c.upstreamCBCooldown = 15 * time.Second
+	}
+	if c.upstreamHealthPath != "" && !strings.HasPrefix(c.upstreamHealthPath, "/") {
+		return fmt.Errorf("invalid -upstream-health-path %q: must start with /", c.upstreamHealthPath)
+	}
+	if c.upstreamHealthInterval == 0 {
+		c.upstreamHealthInterval = 10 * time.Second
+	}
+	if c.upstreamHealthInterval < time.Second {
+		return fmt.Errorf("invalid -upstream-health-interval %s: must be at least 1s", c.upstreamHealthInterval)
+	}
+	if (c.upstreamClientCert == "") != (c.upstreamClientKey == "") {
+		return errors.New("-upstream-client-cert and -upstream-client-key must both be set")
+	}
 
 	if c.capacity < 1 || c.capacity > math.MaxInt32 {
 		return fmt.Errorf("invalid -cap %d: must be between 1 and %d", c.capacity, math.MaxInt32)
@@ -225,6 +287,15 @@ func (c *config) normalize() error {
 	if c.tlsHosts, err = parseTLSDomains(c.tlsDomains); err != nil {
 		return fmt.Errorf("invalid -tls-domains: %w", err)
 	}
+	if _, err := parseTLSMinVersion(c.tlsMinVersion); err != nil {
+		return err
+	}
+	if (c.tlsCert == "") != (c.tlsKey == "") {
+		return errors.New("-tls-cert and -tls-key must both be set")
+	}
+	if len(c.tlsHosts) > 0 && c.tlsCert != "" {
+		return errors.New("-tls-cert/-tls-key cannot be combined with -tls-domains")
+	}
 	if len(c.tlsHosts) > 0 {
 		if strings.TrimSpace(c.tlsCacheDir) == "" {
 			return errors.New("-tls-cache is required with -tls-domains")
@@ -232,6 +303,9 @@ func (c *config) normalize() error {
 		if c.tlsEmail != "" && !strings.Contains(c.tlsEmail, "@") {
 			return fmt.Errorf("invalid -tls-email %q", c.tlsEmail)
 		}
+	}
+	if c.hstsMaxAge < 0 {
+		return fmt.Errorf("invalid -hsts-max-age %d: must not be negative", c.hstsMaxAge)
 	}
 
 	if len(c.admitSecret) == 0 {
@@ -243,6 +317,24 @@ func (c *config) normalize() error {
 		c.admitSecretGenerated = true
 	} else if len(c.admitSecret) < minSecretLen {
 		return fmt.Errorf("CONCERT_ADMIT_SECRET must be at least %d bytes", minSecretLen)
+	}
+	if len(c.admitSecretPrev) > 0 && len(c.admitSecretPrev) < minSecretLen {
+		return fmt.Errorf("CONCERT_ADMIT_SECRET_PREV must be at least %d bytes", minSecretLen)
+	}
+	if c.apiTokens, err = loadAPITokens(c.adminToken, c.adminTokensSpec); err != nil {
+		return err
+	}
+	if c.historyRetention == 0 {
+		c.historyRetention = historyRetention
+	}
+	if c.historyRetention < time.Hour || c.historyRetention > 30*24*time.Hour {
+		return fmt.Errorf("invalid -history-retention %s: must be between 1h and 720h", c.historyRetention)
+	}
+	if lf := strings.ToLower(strings.TrimSpace(c.logFormat)); lf != "" && lf != "text" && lf != "json" {
+		return fmt.Errorf("invalid -log-format %q: must be text or json", c.logFormat)
+	}
+	if ll := strings.ToLower(strings.TrimSpace(c.logLevel)); ll != "" && ll != "debug" && ll != "info" && ll != "warn" && ll != "warning" && ll != "error" {
+		return fmt.Errorf("invalid -log-level %q: must be debug, info, warn, or error", c.logLevel)
 	}
 
 	if c.trusted, err = parsePrefixes(c.trustedProxies); err != nil {
@@ -276,7 +368,44 @@ func (c *config) normalize() error {
 		return err
 	}
 
+	if c.hardened {
+		if err := c.validateHardened(); err != nil {
+			return err
+		}
+	}
+
 	return validateRoutes(c)
+}
+
+// validateHardened enforces baseline enterprise security controls when
+// -enterprise-hardened (CONCERT_HARDENED=true) is enabled.
+func (c *config) validateHardened() error {
+	var errs []string
+	if c.admitSecretGenerated {
+		errs = append(errs, "CONCERT_ADMIT_SECRET (or _FILE) must be explicitly configured")
+	}
+	if !c.secureCookie {
+		errs = append(errs, "-secure-cookie must be true")
+	}
+	if !c.statsAuth {
+		errs = append(errs, "-stats-auth must be true so /_room/stats and /_room/metrics require authentication")
+	}
+	if !c.apiTokens.enabled() {
+		errs = append(errs, "CONCERT_ADMIN_TOKEN or CONCERT_ADMIN_TOKENS must be configured")
+	}
+	if strings.EqualFold(strings.TrimSpace(c.auditLog), "off") || strings.EqualFold(strings.TrimSpace(c.auditLog), "none") {
+		errs = append(errs, "-audit-log cannot be disabled")
+	}
+	if c.dataDir == "" && strings.TrimSpace(c.auditLog) == "" {
+		errs = append(errs, "-audit-log or -data-dir must be set so tamper-evident audit logs persist")
+	}
+	if c.portal.enabled() && c.portal.tlsCert == "" && !c.portal.secureCookie && len(c.portal.trustedProxies) == 0 {
+		errs = append(errs, "admin portal requires -portal-tls-cert/-portal-tls-key or -portal-secure-cookie behind a trusted TLS proxy")
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("enterprise-hardened checks failed: %s", strings.Join(errs, "; "))
+	}
+	return nil
 }
 
 // effectiveAssetCap is -asset-cap when set, otherwise cap × asset-user-cap-h2,

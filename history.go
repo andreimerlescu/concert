@@ -316,6 +316,7 @@ type history struct {
 	aggDropped atomic.Int64
 
 	quietCache atomic.Pointer[quietRules]
+	retention  atomic.Int64 // nanoseconds; defaults to historyRetention
 
 	stop     chan struct{}
 	stopOnce sync.Once
@@ -332,6 +333,22 @@ type historyShard struct {
 type quietRules struct {
 	g     *generation
 	rules []pathRule
+}
+
+func (h *history) setRetention(d time.Duration) {
+	if h == nil || d <= 0 {
+		return
+	}
+	h.retention.Store(int64(d))
+}
+
+func (h *history) getRetention() time.Duration {
+	if h != nil {
+		if v := h.retention.Load(); v > 0 {
+			return time.Duration(v)
+		}
+	}
+	return historyRetention
 }
 
 // newHistory builds the history, replays the history log at logPath when
@@ -525,9 +542,10 @@ func (h *history) record(g *generation, ip netip.Addr, req historyRequest, statu
 	if !blocked && !bannedNow && status < http.StatusBadRequest && matchesAny(h.quiet(g), req.path) {
 		return
 	}
-	target := req.path
-	if req.query != "" {
-		target += "?" + req.query
+	target := formatPrivacyPath(req.path, req.query, g.cfg.privacyScrubQuery, g.cfg.privacyStripQuery)
+	storeIP := ip
+	if g.cfg.privacyAnonymizeIP && !blocked && !bannedNow {
+		storeIP = anonymizeIP(ip)
 	}
 	e := historyEntry{
 		at:      now,
@@ -543,14 +561,14 @@ func (h *history) record(g *generation, ip netip.Addr, req historyRequest, statu
 		e.window, e.triggered, logRaw = h.hitWindow(ip, e, start, !blocked)
 	}
 	ua := clip(req.ua, historyUALen)
-	h.add(ip, e, ua)
+	h.add(storeIP, e, ua)
 	if h.log == nil {
 		return
 	}
 	if logRaw {
-		h.log.emit(h.requestEvent(ip, e, ua))
+		h.log.emit(h.requestEvent(storeIP, e, ua))
 	} else {
-		h.aggAdd(e.window, ip, e.path, e.at)
+		h.aggAdd(e.window, storeIP, e.path, e.at)
 	}
 }
 
@@ -1015,13 +1033,14 @@ func (h *history) sweep(now time.Time) {
 		delete(h.active, id)
 		events = append(events, w.liftEvent())
 	}
-	h.dropEndedLocked(now.Add(-historyRetention), now)
+	ret := h.getRetention()
+	h.dropEndedLocked(now.Add(-ret), now)
 	h.mu.Unlock()
 	for _, ev := range events {
 		h.log.emit(ev)
 	}
 
-	cutoff := now.Add(-historyRetention)
+	cutoff := now.Add(-ret)
 	for i := range h.shards {
 		sh := &h.shards[i]
 		sh.mu.Lock()

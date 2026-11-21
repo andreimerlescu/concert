@@ -7,10 +7,12 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/tls"
 	"embed"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -55,21 +57,22 @@ const (
 )
 
 const (
-	portalCookie      = "concert_portal"
-	portalNonceLen    = 16
-	portalExpOff      = portalNonceLen
-	portalBodyLen     = portalExpOff + 8
-	portalMACLen      = 16
-	portalRawLen      = portalBodyLen + portalMACLen
-	minPortalPassLen  = 16
-	portalMaxNotes    = 100000 // path and browser notes kept for waiting visitors
-	portalQueueLimit  = 500    // visitors the queue view lists, from the front
-	portalGrace       = 5 * time.Second
-	loginMaxFailures  = 5
-	loginWindow       = 15 * time.Minute
-	loginLockout      = 15 * time.Minute
-	ctxPortalNonce    = "portal.nonce"
-	settingsBodyLimit = 1 << 20
+	portalCookie       = "concert_portal"
+	portalNonceLen     = 16
+	portalExpOff       = portalNonceLen
+	portalBodyLen      = portalExpOff + 8
+	portalMACLen       = 16
+	portalRawLen       = portalBodyLen + portalMACLen
+	minPortalPassLen   = 16
+	portalMaxNotes     = 100000 // path and browser notes kept for waiting visitors
+	portalQueueLimit   = 500    // visitors the queue view lists, from the front
+	portalGrace        = 5 * time.Second
+	loginMaxFailures   = 5
+	loginWindow        = 15 * time.Minute
+	loginLockout       = 15 * time.Minute
+	ctxPortalNonce     = "portal.nonce"
+	ctxPortalPrincipal = "portal.principal"
+	settingsBodyLimit  = 1 << 20
 )
 
 var (
@@ -91,13 +94,30 @@ type portalConfig struct {
 	sessionTTL   time.Duration
 	secureCookie bool
 
-	pass  string         // CONCERT_PORTAL_PASS; env-only
-	allow []netip.Prefix // parsed allowSpec
+	tlsCert string
+	tlsKey  string
+
+	ssoHeader          string
+	ssoRoleHeader      string
+	ssoDefaultRole     string
+	trustedProxiesSpec string
+
+	pass      string // CONCERT_PORTAL_PASS; env/file only
+	usersSpec string // CONCERT_PORTAL_USERS; env/file only
+
+	allow                []netip.Prefix // parsed allowSpec
+	trustedProxies       []netip.Prefix // parsed trustedProxiesSpec
+	ssoDefaultRoleParsed rbacRole
+	users                *userDirectory
+}
+
+func (pc *portalConfig) hasAuth() bool {
+	return pc.pass != "" || (pc.users != nil && pc.users.count() > 0) || pc.ssoHeader != ""
 }
 
 // enabled reports whether the portal should be listening.
 func (pc *portalConfig) enabled() bool {
-	return pc.listen != "" && pc.pass != ""
+	return pc.listen != "" && pc.hasAuth()
 }
 
 func (pc *portalConfig) normalize() error {
@@ -106,10 +126,43 @@ func (pc *portalConfig) normalize() error {
 		return fmt.Errorf("invalid -portal-allow: %w", err)
 	}
 	pc.allow = allow
+	tp, err := parsePrefixes(pc.trustedProxiesSpec)
+	if err != nil {
+		return fmt.Errorf("invalid -portal-trusted-proxies: %w", err)
+	}
+	pc.trustedProxies = tp
+
+	if pc.usersSpec != "" {
+		dir, err := loadPortalUsers(pc.usersSpec)
+		if err != nil {
+			return err
+		}
+		pc.users = dir
+	}
+
+	if pc.ssoHeader != "" {
+		if len(pc.trustedProxies) == 0 {
+			return errors.New("-portal-trusted-proxies must be set when -portal-sso-header is enabled")
+		}
+		defRole := pc.ssoDefaultRole
+		if defRole == "" {
+			defRole = "viewer"
+		}
+		r, ok := parseRole(defRole)
+		if !ok {
+			return fmt.Errorf("invalid -portal-sso-default-role %q: must be viewer, operator, or admin", pc.ssoDefaultRole)
+		}
+		pc.ssoDefaultRoleParsed = r
+	}
+
+	if (pc.tlsCert == "") != (pc.tlsKey == "") {
+		return errors.New("-portal-tls-cert and -portal-tls-key must both be set")
+	}
+
 	if !pc.enabled() {
 		return nil
 	}
-	if len(pc.pass) < minPortalPassLen {
+	if pc.pass != "" && len(pc.pass) < minPortalPassLen {
 		return fmt.Errorf("CONCERT_PORTAL_PASS must be at least %d characters", minPortalPassLen)
 	}
 	if len(pc.allow) == 0 {
@@ -126,11 +179,14 @@ func (pc *portalConfig) normalize() error {
 type portal struct {
 	a          *app
 	ln         net.Listener // bound by newPortal when -portal-listen is set; served by start
+	tlsCfg     *tls.Config
 	engine     *gin.Engine
 	tmpl       *template.Template
 	static     fs.FS
 	sessionKey []byte
 	passDigest [sha256.Size]byte
+	hasPass    bool
+	users      *userDirectory
 	notes      *noteStore
 	kicked     *kickList
 	fails      *loginLimiter
@@ -138,18 +194,21 @@ type portal struct {
 }
 
 // newPortal builds the portal and, when -portal-listen is set, binds its
-// listener. It returns nil when CONCERT_PORTAL_PASS is unset: without a pass
-// there is no portal. With a pass but no address the portal exists but
-// does not listen. The history is created here, restored from its log, and
-// closed with the app.
+// listener. It returns nil when no portal auth (CONCERT_PORTAL_PASS,
+// CONCERT_PORTAL_USERS, or -portal-sso-header) is configured.
 func newPortal(a *app) (*portal, error) {
 	cfg := a.current().cfg
 	pc := cfg.portal
-	if pc.pass == "" {
+	if !pc.hasAuth() {
 		if pc.listen != "" {
-			log.Printf("portal disabled: set CONCERT_PORTAL_PASS to enable it on %s", pc.listen)
+			log.Printf("portal disabled: set CONCERT_PORTAL_PASS, CONCERT_PORTAL_USERS, or -portal-sso-header to enable it on %s", pc.listen)
 		}
 		return nil, nil
+	}
+
+	portalTLS, err := newPortalTLSConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("portal TLS: %w", err)
 	}
 
 	static, err := fs.Sub(portalFS, "templates")
@@ -166,17 +225,26 @@ func newPortal(a *app) (*portal, error) {
 		}
 	}
 
-	keyMAC := hmac.New(sha256.New, []byte(pc.pass))
+	seed := []byte(pc.pass)
+	if len(seed) == 0 {
+		seed = cfg.admitSecret
+	}
+	keyMAC := hmac.New(sha256.New, seed)
 	keyMAC.Write([]byte("concert/portal/session-key"))
 
 	p := &portal{
 		a:          a,
+		tlsCfg:     portalTLS,
 		static:     static,
 		sessionKey: keyMAC.Sum(nil),
-		passDigest: sha256.Sum256([]byte(pc.pass)),
+		hasPass:    pc.pass != "",
+		users:      pc.users,
 		notes:      newNoteStore(portalMaxNotes),
 		kicked:     &kickList{m: map[string]time.Time{}},
 		fails:      &loginLimiter{m: map[netip.Addr]*loginState{}},
+	}
+	if p.hasPass {
+		p.passDigest = sha256.Sum256([]byte(pc.pass))
 	}
 	tmpl, err := template.New(templateIndex).Funcs(p.templateFuncs()).
 		ParseFS(static, templateHeader, templateFooter, templateIndex, templateFragments)
@@ -186,6 +254,7 @@ func newPortal(a *app) (*portal, error) {
 	p.tmpl = tmpl
 
 	p.history = newHistory(a.abuse, a.prio.grants, a.ipinfo, historyLogPath(cfg), time.Now())
+	p.history.setRetention(cfg.historyRetention)
 	a.attachHistory(p.history)
 	p.engine = p.routes()
 
@@ -209,10 +278,17 @@ func (p *portal) start(ctx context.Context) *endpoint {
 		return nil
 	}
 	ep := newEndpoint("portal", p.engine, portalGrace, portalServer)
+	if p.tlsCfg != nil {
+		ep.setTLS(p.tlsCfg)
+	}
 	if p.ln != nil {
 		pc := p.pc()
 		ep.serveOn(p.ln, pc.listen)
-		log.Printf("portal listening on %s (allowed: %s)", p.ln.Addr(), pc.allowSpec)
+		proto := "HTTP"
+		if p.tlsCfg != nil {
+			proto = "HTTPS"
+		}
+		log.Printf("portal listening on %s (%s, allowed: %s)", p.ln.Addr(), proto, pc.allowSpec)
 	} else {
 		log.Printf("portal off: set CONCERT_PORTAL_LISTEN and restart to turn it on")
 	}
@@ -297,34 +373,47 @@ func (p *portal) routes() *gin.Engine {
 	r.POST("/logout", p.requireSession, p.requireFormCSRF, p.logout)
 
 	api := r.Group("/api", p.requireSession, p.requireCSRF)
-	api.GET("/overview", p.apiOverview)
-	api.GET("/fastlane", func(c *gin.Context) {
+	api.GET("/me", func(c *gin.Context) {
+		pr := portalPrincipal(c)
+		c.JSON(http.StatusOK, gin.H{"actor": pr.Actor, "role": pr.Role.String(), "source": pr.Source})
+	})
+	api.GET("/metrics", p.requireRole(roleViewer), func(c *gin.Context) {
+		serveMetrics(c, p.a)
+	})
+	api.GET("/overview", p.requireRole(roleViewer), p.apiOverview)
+	api.GET("/fastlane", p.requireRole(roleViewer), func(c *gin.Context) {
 		if p.a.fastlane == nil {
 			c.JSON(200, gin.H{"enabled": false})
 			return
 		}
 		c.JSON(200, p.a.fastlane.Summary())
 	})
-	api.GET("/queue", p.apiQueue)
-	api.POST("/queue/promote", p.apiPromote)
-	api.POST("/queue/kick", p.apiKick)
-	api.GET("/bans", p.apiBans)
-	api.POST("/bans", p.apiBanSave)
-	api.DELETE("/bans", p.apiUnban)
-	api.GET("/history", p.apiHistory)
-	api.GET("/history/client", p.apiHistoryClient)
-	api.GET("/history/ban", p.apiHistoryBan)
-	api.GET("/settings", p.apiSettings)
-	api.POST("/settings", p.apiSettingsSave)
-	api.DELETE("/settings", p.apiSettingsReset)
+	api.GET("/queue", p.requireRole(roleViewer), p.apiQueue)
+	api.POST("/queue/promote", p.requireRole(roleOperator), p.apiPromote)
+	api.POST("/queue/kick", p.requireRole(roleOperator), p.apiKick)
+	api.GET("/bans", p.requireRole(roleViewer), p.apiBans)
+	api.POST("/bans", p.requireRole(roleOperator), p.apiBanSave)
+	api.DELETE("/bans", p.requireRole(roleOperator), p.apiUnban)
+	api.GET("/history", p.requireRole(roleViewer), p.apiHistory)
+	api.GET("/history/client", p.requireRole(roleViewer), p.apiHistoryClient)
+	api.GET("/history/ban", p.requireRole(roleViewer), p.apiHistoryBan)
+	api.GET("/settings", p.requireRole(roleViewer), p.apiSettings)
+	api.POST("/settings", p.requireRole(roleAdmin), p.apiSettingsSave)
+	api.DELETE("/settings", p.requireRole(roleAdmin), p.apiSettingsReset)
+	api.GET("/privacy/export", p.requireRole(roleAdmin), func(c *gin.Context) {
+		handlePrivacyExport(c, p.a, portalPrincipal(c), "portal")
+	})
+	api.DELETE("/privacy/erase", p.requireRole(roleAdmin), func(c *gin.Context) {
+		handlePrivacyErase(c, p.a, portalPrincipal(c), "portal")
+	})
 
 	// Server-rendered tables; see fragments.go.
-	api.GET("/frag/queue", p.fragQueue)
-	api.GET("/frag/bans", p.fragBans)
-	api.GET("/frag/visitors", p.fragVisitors)
-	api.GET("/frag/visitor", p.fragVisitor)
-	api.GET("/frag/banlog", p.fragBanLog)
-	api.GET("/frag/ban", p.fragBan)
+	api.GET("/frag/queue", p.requireRole(roleViewer), p.fragQueue)
+	api.GET("/frag/bans", p.requireRole(roleViewer), p.fragBans)
+	api.GET("/frag/visitors", p.requireRole(roleViewer), p.fragVisitors)
+	api.GET("/frag/visitor", p.requireRole(roleViewer), p.fragVisitor)
+	api.GET("/frag/banlog", p.requireRole(roleViewer), p.fragBanLog)
+	api.GET("/frag/ban", p.requireRole(roleViewer), p.fragBan)
 
 	r.NoRoute(func(c *gin.Context) { c.String(http.StatusNotFound, "not found") })
 	return r
@@ -398,6 +487,9 @@ type portalPage struct {
 	Upstream     string
 	HistoryNote  string
 	IPInfo       string
+	Actor        string
+	Role         string
+	MultiUser    bool
 	Authed       bool
 }
 
@@ -407,10 +499,11 @@ func (p *portal) historyNote() string {
 	if p.history.log != nil {
 		persist = "It is also written to " + p.history.log.path + " and restored when concert restarts."
 	}
+	retH := int(p.history.getRetention() / time.Hour)
 	return fmt.Sprintf("Kept in memory: the last %d requests from each of up to %s addresses, until %dh after an "+
 		"address's last request; bans are kept %dh after they end. Requests from banned clients and every 4xx or 5xx "+
 		"response are always recorded; successful asset and waiting-room status requests are not, as in the access log. %s",
-		historyPerClient, fmtCount(historyMaxClients), int(historyRetention/time.Hour), int(historyRetention/time.Hour), persist)
+		historyPerClient, fmtCount(historyMaxClients), retH, retH, persist)
 }
 
 func (p *portal) render(c *gin.Context, status int, page portalPage) {
@@ -425,6 +518,7 @@ func (p *portal) render(c *gin.Context, status int, page portalPage) {
 	page.Upstream = p.a.current().cfg.upstream
 	page.HistoryNote = p.historyNote()
 	page.IPInfo = p.a.ipinfo.describe()
+	page.MultiUser = p.users != nil && p.users.count() > 0
 	var buf bytes.Buffer
 	if err := p.tmpl.ExecuteTemplate(&buf, templateIndex, page); err != nil {
 		log.Printf("portal: render: %v", err)
@@ -434,9 +528,30 @@ func (p *portal) render(c *gin.Context, status int, page portalPage) {
 	c.Data(status, "text/html; charset=utf-8", buf.Bytes())
 }
 
+func (p *portal) authenticateRequest(r *http.Request, now time.Time) ([]byte, principal, bool) {
+	ip, _ := remoteAddr(r)
+	if nonce, pr, ok := p.verifySessionPrincipal(r, now); ok {
+		pr.IP = ip
+		return nonce, pr, true
+	}
+	if pr, ok := resolveSSOPrincipal(r, p.pc(), ip); ok {
+		m := hmac.New(sha256.New, p.sessionKey)
+		m.Write([]byte("sso-csrf:"))
+		m.Write([]byte(pr.Actor))
+		return m.Sum(nil)[:portalNonceLen], pr, true
+	}
+	return nil, principal{}, false
+}
+
 func (p *portal) index(c *gin.Context) {
-	if nonce, ok := p.verifySession(c.Request, time.Now()); ok {
-		p.render(c, http.StatusOK, portalPage{Title: "Dashboard", Authed: true, CSRF: p.csrfToken(nonce)})
+	if nonce, pr, ok := p.authenticateRequest(c.Request, time.Now()); ok {
+		p.render(c, http.StatusOK, portalPage{
+			Title:  "Dashboard",
+			Authed: true,
+			CSRF:   p.csrfToken(nonce),
+			Actor:  pr.Actor,
+			Role:   pr.Role.String(),
+		})
 		return
 	}
 	p.render(c, http.StatusOK, portalPage{Title: "Sign in"})
@@ -447,75 +562,197 @@ func (p *portal) login(c *gin.Context) {
 	now := time.Now()
 	if left, locked := p.fails.locked(ip, now); locked {
 		c.Header("Retry-After", strconv.Itoa(int(left/time.Second)+1))
+		p.a.recordAudit(auditEvent{
+			Actor:    "anonymous",
+			Source:   "portal",
+			Action:   "auth.login",
+			Outcome:  "deny",
+			ClientIP: ip.String(),
+			Details:  map[string]any{"reason": "locked_out"},
+		})
 		p.render(c, http.StatusTooManyRequests, portalPage{
 			Title: "Sign in",
 			Error: fmt.Sprintf("Too many failed attempts. Try again in %s.", left.Round(time.Second)),
 		})
 		return
 	}
-	got := sha256.Sum256([]byte(c.PostForm("pass")))
-	if subtle.ConstantTimeCompare(got[:], p.passDigest[:]) != 1 {
+
+	username := strings.TrimSpace(c.PostForm("user"))
+	pass := c.PostForm("pass")
+	totp := c.PostForm("totp")
+
+	var authed principal
+	ok := false
+	if p.users != nil && p.users.count() > 0 && username != "" {
+		if u, matched := p.users.authenticate(username, pass, totp, now); matched {
+			authed = principal{Actor: u.username, Role: u.role, Source: "user", IP: ip}
+			ok = true
+		}
+	} else if p.hasPass {
+		got := sha256.Sum256([]byte(pass))
+		if subtle.ConstantTimeCompare(got[:], p.passDigest[:]) == 1 {
+			authed = principal{Actor: "admin", Role: roleAdmin, Source: "password", IP: ip}
+			ok = true
+		}
+	}
+
+	if !ok {
 		p.fails.fail(ip, now)
 		log.Printf("portal: failed sign-in from %s", ip)
-		p.render(c, http.StatusUnauthorized, portalPage{Title: "Sign in", Error: "That portal pass is not correct."})
+		p.a.recordAudit(auditEvent{
+			Actor:    username,
+			Source:   "portal",
+			Action:   "auth.login",
+			Outcome:  "deny",
+			ClientIP: ip.String(),
+			Details:  map[string]any{"reason": "invalid_credentials"},
+		})
+		p.render(c, http.StatusUnauthorized, portalPage{Title: "Sign in", Error: "Invalid portal credentials."})
 		return
 	}
 	p.fails.reset(ip)
 	pc := p.pc()
-	value, _ := p.mintSession(now, pc.sessionTTL)
+	value, _ := p.mintSessionPrincipal(now, pc.sessionTTL, authed)
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name:     portalCookie,
 		Value:    value,
 		Path:     "/",
 		MaxAge:   int(pc.sessionTTL / time.Second),
-		Secure:   pc.secureCookie,
+		Secure:   pc.secureCookie || p.tlsCfg != nil,
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
 	})
-	log.Printf("portal: %s signed in", ip)
+	log.Printf("portal: %s signed in", authed.label())
+	p.a.recordAudit(auditEvent{
+		Actor:    authed.Actor,
+		Role:     authed.Role.String(),
+		Source:   "portal",
+		Action:   "auth.login",
+		Outcome:  "allow",
+		ClientIP: ip.String(),
+		Details:  map[string]any{"auth_source": authed.Source},
+	})
 	c.Redirect(http.StatusSeeOther, "/")
 }
 
 func (p *portal) logout(c *gin.Context) {
+	pr := portalPrincipal(c)
+	p.a.recordAudit(auditEvent{
+		Actor:    pr.Actor,
+		Role:     pr.Role.String(),
+		Source:   "portal",
+		Action:   "auth.logout",
+		Outcome:  "allow",
+		ClientIP: pr.IP.String(),
+	})
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name: portalCookie, Value: "", Path: "/", MaxAge: -1,
-		Secure: p.pc().secureCookie, HttpOnly: true, SameSite: http.SameSiteStrictMode,
+		Secure: p.pc().secureCookie || p.tlsCfg != nil, HttpOnly: true, SameSite: http.SameSiteStrictMode,
 	})
 	c.Redirect(http.StatusSeeOther, "/")
 }
 
-// Session cookie: nonce(16) | expiry unix seconds(8) | HMAC(16). The key is
-// derived from CONCERT_PORTAL_PASS, so changing the pass signs everyone out.
-// The expiry is fixed at sign-in, so a new -portal-session-ttl applies to
-// sessions started after the change.
+type portalSessionPayload struct {
+	Nonce  string `json:"n"`
+	Exp    int64  `json:"e"`
+	Actor  string `json:"a"`
+	Role   string `json:"r"`
+	Source string `json:"s"`
+}
+
+// mintSession keeps backwards compatibility for tests calling mintSession directly.
 func (p *portal) mintSession(now time.Time, ttl time.Duration) (string, []byte) {
-	var buf [portalRawLen]byte
-	_, _ = rand.Read(buf[:portalNonceLen])
-	binary.BigEndian.PutUint64(buf[portalExpOff:portalBodyLen], uint64(now.Add(ttl).Unix()))
+	return p.mintSessionPrincipal(now, ttl, principal{Actor: "admin", Role: roleAdmin, Source: "password"})
+}
+
+func (p *portal) mintSessionPrincipal(now time.Time, ttl time.Duration, pr principal) (string, []byte) {
+	// Legacy single-password admin logins use the compact 40-byte v1 binary format.
+	if pr.Source == "password" && pr.Role == roleAdmin {
+		var buf [portalRawLen]byte
+		_, _ = rand.Read(buf[:portalNonceLen])
+		binary.BigEndian.PutUint64(buf[portalExpOff:portalBodyLen], uint64(now.Add(ttl).Unix()))
+		mac := hmac.New(sha256.New, p.sessionKey)
+		mac.Write(buf[:portalBodyLen])
+		copy(buf[portalBodyLen:], mac.Sum(nil)[:portalMACLen])
+		return base64.RawURLEncoding.EncodeToString(buf[:]), append([]byte(nil), buf[:portalNonceLen]...)
+	}
+	nonce := make([]byte, portalNonceLen)
+	_, _ = rand.Read(nonce)
+	payload, _ := json.Marshal(portalSessionPayload{
+		Nonce:  base64.RawURLEncoding.EncodeToString(nonce),
+		Exp:    now.Add(ttl).Unix(),
+		Actor:  pr.Actor,
+		Role:   pr.Role.String(),
+		Source: pr.Source,
+	})
+	body := base64.RawURLEncoding.EncodeToString(payload)
 	mac := hmac.New(sha256.New, p.sessionKey)
-	mac.Write(buf[:portalBodyLen])
-	copy(buf[portalBodyLen:], mac.Sum(nil)[:portalMACLen])
-	return base64.RawURLEncoding.EncodeToString(buf[:]), append([]byte(nil), buf[:portalNonceLen]...)
+	mac.Write([]byte("v2."))
+	mac.Write([]byte(body))
+	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil)[:portalMACLen])
+	return "v2." + body + "." + sig, nonce
 }
 
 func (p *portal) verifySession(r *http.Request, now time.Time) ([]byte, bool) {
+	nonce, _, ok := p.verifySessionPrincipal(r, now)
+	return nonce, ok
+}
+
+func (p *portal) verifySessionPrincipal(r *http.Request, now time.Time) ([]byte, principal, bool) {
 	ck, err := r.Cookie(portalCookie)
-	if err != nil || base64.RawURLEncoding.DecodedLen(len(ck.Value)) != portalRawLen {
-		return nil, false
+	if err != nil {
+		return nil, principal{}, false
+	}
+	if strings.HasPrefix(ck.Value, "v2.") {
+		parts := strings.Split(ck.Value, ".")
+		if len(parts) != 3 {
+			return nil, principal{}, false
+		}
+		mac := hmac.New(sha256.New, p.sessionKey)
+		mac.Write([]byte("v2."))
+		mac.Write([]byte(parts[1]))
+		wantSig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil)[:portalMACLen])
+		if subtle.ConstantTimeCompare([]byte(parts[2]), []byte(wantSig)) != 1 {
+			return nil, principal{}, false
+		}
+		raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+		if err != nil {
+			return nil, principal{}, false
+		}
+		var sp portalSessionPayload
+		if err := json.Unmarshal(raw, &sp); err != nil {
+			return nil, principal{}, false
+		}
+		if now.Unix() >= sp.Exp {
+			return nil, principal{}, false
+		}
+		nonce, err := base64.RawURLEncoding.DecodeString(sp.Nonce)
+		if err != nil || len(nonce) != portalNonceLen {
+			return nil, principal{}, false
+		}
+		role, ok := parseRole(sp.Role)
+		if !ok {
+			return nil, principal{}, false
+		}
+		return nonce, principal{Actor: sp.Actor, Role: role, Source: sp.Source}, true
+	}
+	// Legacy v1 binary session cookie fallback.
+	if base64.RawURLEncoding.DecodedLen(len(ck.Value)) != portalRawLen {
+		return nil, principal{}, false
 	}
 	var buf [portalRawLen]byte
 	if n, err := base64.RawURLEncoding.Decode(buf[:], []byte(ck.Value)); err != nil || n != portalRawLen {
-		return nil, false
+		return nil, principal{}, false
 	}
 	mac := hmac.New(sha256.New, p.sessionKey)
 	mac.Write(buf[:portalBodyLen])
 	if !hmac.Equal(buf[portalBodyLen:], mac.Sum(nil)[:portalMACLen]) {
-		return nil, false
+		return nil, principal{}, false
 	}
 	if now.Unix() >= int64(binary.BigEndian.Uint64(buf[portalExpOff:portalBodyLen])) {
-		return nil, false
+		return nil, principal{}, false
 	}
-	return append([]byte(nil), buf[:portalNonceLen]...), true
+	return append([]byte(nil), buf[:portalNonceLen]...), principal{Actor: "admin", Role: roleAdmin, Source: "password"}, true
 }
 
 func (p *portal) csrfToken(nonce []byte) string {
@@ -526,12 +763,47 @@ func (p *portal) csrfToken(nonce []byte) string {
 }
 
 func (p *portal) requireSession(c *gin.Context) {
-	nonce, ok := p.verifySession(c.Request, time.Now())
+	nonce, pr, ok := p.authenticateRequest(c.Request, time.Now())
 	if !ok {
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "sign in required"})
 		return
 	}
 	c.Set(ctxPortalNonce, nonce)
+	c.Set(ctxPortalPrincipal, pr)
+}
+
+func (p *portal) requireRole(required rbacRole) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		pr := portalPrincipal(c)
+		if !pr.Role.allows(required) {
+			p.a.recordAudit(auditEvent{
+				Actor:    pr.Actor,
+				Role:     pr.Role.String(),
+				Source:   "portal",
+				Action:   c.Request.Method + " " + c.Request.URL.Path,
+				Outcome:  "deny",
+				ClientIP: pr.IP.String(),
+				Details:  map[string]any{"reason": "insufficient_role", "required": required.String()},
+			})
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "insufficient role: requires " + required.String()})
+			return
+		}
+		c.Next()
+	}
+}
+
+func portalPrincipal(c *gin.Context) principal {
+	if v, ok := c.Get(ctxPortalPrincipal); ok {
+		if pr, ok := v.(principal); ok {
+			return pr
+		}
+	}
+	ip, _ := remoteAddr(c.Request)
+	return principal{IP: ip}
+}
+
+func portalActor(c *gin.Context) string {
+	return portalPrincipal(c).label()
 }
 
 func (p *portal) sessionCSRF(c *gin.Context) string {
@@ -559,9 +831,4 @@ func (p *portal) requireFormCSRF(c *gin.Context) {
 
 func jsonError(c *gin.Context, status int, msg string) {
 	c.AbortWithStatusJSON(status, gin.H{"error": msg})
-}
-
-func portalActor(c *gin.Context) string {
-	ip, _ := remoteAddr(c.Request)
-	return ip.String()
 }
