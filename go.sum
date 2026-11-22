@@ -4,10 +4,10 @@ github.com/andreimerlescu/goenv v1.1.0 h1:awe2tVHa7VWe1fJxTuaoS0PN5XGzXbortV/niv
 github.com/andreimerlescu/goenv v1.1.0/go.mod h1:ehn80sBXiQAH4v3FUUVze1Oh23OeHWIk/gYwxTl6WKw=
 github.com/andreimerlescu/naddr v0.0.1 h1:yr5BXiBgb1Vnkn0XDl7eN/cgxUCXd8atpboDcW9LVGU=
 github.com/andreimerlescu/naddr v0.0.1/go.mod h1:ZcdKgUdoePInqWpxfp8+/oFlf13bOda3SmzQ6Kez1Cs=
-github.com/andreimerlescu/room v1.5.0 h1:HzxfjiiJ/wWTSxyNDYKBEQ5sjnPxlYwyra6AzVK7zzs=
-github.com/andreimerlescu/room v1.5.0/go.mod h1:QxdrTCpIwer6pIMsCsuwwJB7ClkIPq34gRD5rivpzoM=
-github.com/andreimerlescu/sema v1.1.0 h1:0ivMbf9oWXIJZrrgltBA58DNdUrz1d2hS5PdFgnjNgQ=
-github.com/andreimerlescu/sema v1.1.0/go.mod h1:VCRQkKVknOKKPtAqvrNHL7hxxfoX5O7it2lWBzVxUs0=
+github.com/andreimerlescu/room v1.6.0 h1:LxSpBotSYHKz9TgRudMtJHD+8ox4NpVhD1wXi/tnHuw=
+github.com/andreimerlescu/room v1.6.0/go.mod h1:IFABd1JGKdiY3uY2l8on7bJL71eZ3wznuqlM1VTZgw0=
+github.com/andreimerlescu/sema v1.2.0 h1:I0jwUKcswZtfyHzBGDnGzi/EAYbqcpUWM3muVxjQOf0=
+github.com/andreimerlescu/sema v1.2.0/go.mod h1:VCRQkKVknOKKPtAqvrNHL7hxxfoX5O7it2lWBzVxUs0=
 github.com/btcsuite/btcd/btcec/v2 v2.5.0 h1:KioMXOWa76b86sTZZOmbzv/ldaQCmB8KFAyn5PbB8E8=
 github.com/btcsuite/btcd/btcec/v2 v2.5.0/go.mod h1:+K/MYXcLBtHEQjRbjHuJChuybk4LCgjdjgRwil+e+Kk=
 github.com/btcsuite/btcd/chainhash/v2 v2.0.0 h1:PMLlSloHJuEeB80XG9EjpXWNEKAZAMLl6YHZ6YsEuoA=

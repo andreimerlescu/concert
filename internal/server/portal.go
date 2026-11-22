@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/andreimerlescu/concert/internal/mailer"
 	"github.com/gin-gonic/gin"
 )
 
@@ -177,20 +178,21 @@ func (pc *portalConfig) normalize() error {
 // ─── lifecycle ───────────────────────────────────────────────────────────────
 
 type portal struct {
-	a          *app
-	ln         net.Listener // bound by newPortal when -portal-listen is set; served by start
-	tlsCfg     *tls.Config
-	engine     *gin.Engine
-	tmpl       *template.Template
-	static     fs.FS
-	sessionKey []byte
-	passDigest [sha256.Size]byte
-	hasPass    bool
-	users      *userDirectory
-	notes      *noteStore
-	kicked     *kickList
-	fails      *loginLimiter
-	history    *history // requests and bans on the main listener; see history.go
+	a             *app
+	ln            net.Listener // bound by newPortal when -portal-listen is set; served by start
+	tlsCfg        *tls.Config
+	engine        *gin.Engine
+	tmpl          *template.Template
+	static        fs.FS
+	sessionKey    []byte
+	passDigest    [sha256.Size]byte
+	hasPass       bool
+	users         *userDirectory
+	notes         *noteStore
+	kicked        *kickList
+	fails         *loginLimiter
+	emailOpsLimit *emailRateLimiter
+	history       *history // requests and bans on the main listener; see history.go
 }
 
 // newPortal builds the portal and, when -portal-listen is set, binds its
@@ -233,15 +235,16 @@ func newPortal(a *app) (*portal, error) {
 	keyMAC.Write([]byte("concert/portal/session-key"))
 
 	p := &portal{
-		a:          a,
-		tlsCfg:     portalTLS,
-		static:     static,
-		sessionKey: keyMAC.Sum(nil),
-		hasPass:    pc.pass != "",
-		users:      pc.users,
-		notes:      newNoteStore(portalMaxNotes),
-		kicked:     &kickList{m: map[string]time.Time{}},
-		fails:      &loginLimiter{m: map[netip.Addr]*loginState{}},
+		a:             a,
+		tlsCfg:        portalTLS,
+		static:        static,
+		sessionKey:    keyMAC.Sum(nil),
+		hasPass:       pc.pass != "",
+		users:         pc.users,
+		notes:         newNoteStore(portalMaxNotes),
+		kicked:        &kickList{m: map[string]time.Time{}},
+		fails:         &loginLimiter{m: map[netip.Addr]*loginState{}},
+		emailOpsLimit: newEmailRateLimiter(10, time.Minute),
 	}
 	if p.hasPass {
 		p.passDigest = sha256.Sum256([]byte(pc.pass))
@@ -371,6 +374,8 @@ func (p *portal) routes() *gin.Engine {
 	r.GET("/", p.index)
 	r.POST("/login", p.login)
 	r.POST("/logout", p.requireSession, p.requireFormCSRF, p.logout)
+	r.GET(mailer.UnsubscribePortalPath, p.a.handleEmailUnsubscribe)
+	r.POST(mailer.UnsubscribePortalPath, p.a.handleEmailUnsubscribe)
 
 	api := r.Group("/api", p.requireSession, p.requireCSRF)
 	api.GET("/me", func(c *gin.Context) {
@@ -381,6 +386,7 @@ func (p *portal) routes() *gin.Engine {
 		serveMetrics(c, p.a)
 	})
 	api.GET("/overview", p.requireRole(roleViewer), p.apiOverview)
+	api.POST("/topology/rebench", p.requireRole(roleAdmin), p.apiTopologyRebench)
 	api.GET("/fastlane", p.requireRole(roleViewer), func(c *gin.Context) {
 		if p.a.fastlane == nil {
 			c.JSON(200, gin.H{"enabled": false})
@@ -388,6 +394,7 @@ func (p *portal) routes() *gin.Engine {
 		}
 		c.JSON(200, p.a.fastlane.Summary())
 	})
+	api.POST("/fastlane/reconcile", p.requireRole(roleAdmin), p.apiFastlaneReconcile)
 	api.GET("/queue", p.requireRole(roleViewer), p.apiQueue)
 	api.POST("/queue/promote", p.requireRole(roleOperator), p.apiPromote)
 	api.POST("/queue/kick", p.requireRole(roleOperator), p.apiKick)
@@ -400,6 +407,13 @@ func (p *portal) routes() *gin.Engine {
 	api.GET("/settings", p.requireRole(roleViewer), p.apiSettings)
 	api.POST("/settings", p.requireRole(roleAdmin), p.apiSettingsSave)
 	api.DELETE("/settings", p.requireRole(roleAdmin), p.apiSettingsReset)
+	api.GET("/email", p.requireRole(roleViewer), p.apiEmail)
+	api.POST("/email/config", p.requireRole(roleAdmin), p.apiEmailConfigSave)
+	api.DELETE("/email/secrets", p.requireRole(roleAdmin), p.apiEmailSecretDelete)
+	api.POST("/email/pause", p.requireRole(roleAdmin), p.apiEmailPause)
+	api.POST("/email/verify", p.requireRole(roleAdmin), p.apiEmailVerify)
+	api.POST("/email/test", p.requireRole(roleAdmin), p.apiEmailTest)
+	api.POST("/email/flush", p.requireRole(roleAdmin), p.apiEmailFlush)
 	api.GET("/privacy/export", p.requireRole(roleAdmin), func(c *gin.Context) {
 		handlePrivacyExport(c, p.a, portalPrincipal(c), "portal")
 	})
@@ -607,6 +621,17 @@ func (p *portal) login(c *gin.Context) {
 			ClientIP: ip.String(),
 			Details:  map[string]any{"reason": "invalid_credentials"},
 		})
+		if _, lockedNow := p.fails.locked(ip, now); lockedNow {
+			ipLabel := p.a.emailIPLabel(ip)
+			p.a.notifyEvent(mailer.Event{
+				Category:    mailer.CatSecurity,
+				Severity:    mailer.SevWarn,
+				Title:       "Admin portal sign-in locked out",
+				Summary:     fmt.Sprintf("Client %s exceeded failed sign-in attempts and was temporarily locked out.", ipLabel),
+				Fingerprint: "security:login-lockout:" + ipLabel,
+				Details:     map[string]string{"client": ipLabel},
+			})
+		}
 		p.render(c, http.StatusUnauthorized, portalPage{Title: "Sign in", Error: "Invalid portal credentials."})
 		return
 	}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
@@ -190,7 +191,51 @@ func (l *ledger) summary() map[string]any {
 	for _, r := range l.bySession {
 		n[r.State]++
 	}
-	return map[string]any{"states": n, "receipts": len(l.byFingerprint), "capacity": l.max, "healthy": l.bad == nil}
+	used := len(l.byFingerprint)
+	pct := 0
+	if l.max > 0 {
+		pct = (used * 100) / l.max
+	}
+	return map[string]any{
+		"states":       n,
+		"receipts":     used,
+		"capacity":     l.max,
+		"records_used": used,
+		"max_records":  l.max,
+		"usage_pct":    pct,
+		"healthy":      l.bad == nil,
+	}
+}
+
+func (l *ledger) stats() (used, max, unresolved int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	used = len(l.byFingerprint)
+	max = l.max
+	for _, r := range l.receipts {
+		if r.State == "pending" || r.State == "unknown" {
+			unresolved++
+		}
+	}
+	return used, max, unresolved
+}
+
+func (l *ledger) unresolved() []Receipt {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []Receipt
+	for _, r := range l.receipts {
+		if r.State == "pending" || r.State == "unknown" {
+			out = append(out, r)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Started.Equal(out[j].Started) {
+			return out[i].Started.Before(out[j].Started)
+		}
+		return out[i].Fingerprint < out[j].Fingerprint
+	})
+	return out
 }
 
 func (l *ledger) fingerprint(fp string) (Receipt, bool) {

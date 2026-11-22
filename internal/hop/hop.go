@@ -24,14 +24,17 @@ package hop
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -102,14 +105,17 @@ type Claim struct {
 	Paid   bool       // the edge's fast lane found this client eligible
 	Class  Class
 	Proto  string // client protocol family seen at the edge: "h1", "h2" or ""
+	Nonce  string // optional single-use lowercase hex nonce (16-32 chars)
 }
 
 // Errors returned by Verify. Callers treat every one as "no claim".
 var (
-	ErrMissing   = errors.New("hop: no claim")
-	ErrMalformed = errors.New("hop: malformed claim")
-	ErrSignature = errors.New("hop: bad signature")
-	ErrSkew      = errors.New("hop: claim outside the clock skew window")
+	ErrMissing       = errors.New("hop: no claim")
+	ErrMalformed     = errors.New("hop: malformed claim")
+	ErrSignature     = errors.New("hop: bad signature")
+	ErrSkew          = errors.New("hop: claim outside the clock skew window")
+	ErrReplay        = errors.New("hop: replayed claim")
+	ErrNonceRequired = errors.New("hop: claim missing nonce")
 )
 
 // ValidNodeID reports whether id can name a node: 1 to 32 characters from
@@ -145,6 +151,8 @@ func BodyHash(b []byte) string {
 type Signer struct {
 	key  []byte
 	edge string
+	salt uint64
+	seq  atomic.Uint64
 	now  func() time.Time
 }
 
@@ -156,19 +164,46 @@ func NewSigner(secret []byte, edge string) (*Signer, error) {
 	if !ValidNodeID(edge) {
 		return nil, fmt.Errorf("hop: invalid node id %q", edge)
 	}
-	return &Signer{key: deriveKey(secret), edge: edge, now: time.Now}, nil
+	var rb [8]byte
+	if _, err := rand.Read(rb[:]); err != nil {
+		return nil, fmt.Errorf("hop: nonce salt: %w", err)
+	}
+	return &Signer{
+		key:  deriveKey(secret),
+		edge: edge,
+		salt: binary.BigEndian.Uint64(rb[:]),
+		now:  time.Now,
+	}, nil
 }
 
 // Edge is the node ID the signer puts in every claim.
 func (s *Signer) Edge() string { return s.edge }
 
+// nextNonce generates a fast, unique 16-hex-char nonce per call by mixing a
+// per-signer random salt with a monotonic atomic counter (zero syscalls on the
+// hot path, unique across restarts).
+func (s *Signer) nextNonce() string {
+	z := (s.seq.Add(1) ^ s.salt) + 0x9e3779b97f4a7c15
+	z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9
+	z = (z ^ (z >> 27)) * 0x94d049bb133111eb
+	z = z ^ (z >> 31)
+	var raw [8]byte
+	binary.BigEndian.PutUint64(raw[:], z)
+	var out [16]byte
+	hex.Encode(out[:], raw[:])
+	return string(out[:])
+}
+
 // Sign returns the Concert-Hop header value for c on a request with the
-// given method and URI (path and query exactly as sent on the wire). Edge
-// and Issued are filled in by the signer. bodyHash is BodyHash of the body
-// for control requests and "" otherwise.
+// given method and URI (path and query exactly as sent on the wire). Edge,
+// Issued, and Nonce (when empty) are filled in by the signer. bodyHash is
+// BodyHash of the body for control requests and "" otherwise.
 func (s *Signer) Sign(c Claim, method, uri, bodyHash string) string {
 	c.Edge = s.edge
 	c.Issued = s.now()
+	if c.Nonce == "" {
+		c.Nonce = s.nextNonce()
+	}
 	fields := encodeFields(c)
 	sig := mac(s.key, fields, method, uri, bodyHash)
 	return fields + ";s=" + base64.RawURLEncoding.EncodeToString(sig)
@@ -177,7 +212,7 @@ func (s *Signer) Sign(c Claim, method, uri, bodyHash string) string {
 // encodeFields writes every field except the signature, in fixed order.
 func encodeFields(c Claim) string {
 	var b strings.Builder
-	b.Grow(128)
+	b.Grow(160)
 	b.WriteString("v=1;e=")
 	b.WriteString(c.Edge)
 	b.WriteString(";t=")
@@ -196,6 +231,10 @@ func encodeFields(c Claim) string {
 	b.WriteString(c.Class.String())
 	b.WriteString(";p=")
 	b.WriteString(c.Proto)
+	if c.Nonce != "" {
+		b.WriteString(";n=")
+		b.WriteString(c.Nonce)
+	}
 	return b.String()
 }
 
@@ -215,9 +254,12 @@ func mac(key []byte, fields, method, uri, bodyHash string) []byte {
 // Verifier checks claims. It accepts the current secret and, during a
 // rotation, the previous one. Safe for concurrent use.
 type Verifier struct {
-	keys    [][]byte
-	maxSkew time.Duration
-	now     func() time.Time
+	keys         [][]byte
+	maxSkew      time.Duration
+	now          func() time.Time
+	replayGuard  atomic.Bool
+	requireNonce atomic.Bool
+	replay       *replayCache
 }
 
 // NewVerifier returns a verifier accepting claims signed with any of
@@ -227,7 +269,11 @@ func NewVerifier(maxSkew time.Duration, secrets ...[]byte) (*Verifier, error) {
 	if maxSkew <= 0 {
 		maxSkew = DefaultMaxSkew
 	}
-	v := &Verifier{maxSkew: maxSkew, now: time.Now}
+	v := &Verifier{
+		maxSkew: maxSkew,
+		now:     time.Now,
+		replay:  newReplayCache(),
+	}
 	for _, s := range secrets {
 		if len(s) == 0 {
 			continue
@@ -243,8 +289,16 @@ func NewVerifier(maxSkew time.Duration, secrets ...[]byte) (*Verifier, error) {
 	return v, nil
 }
 
+// SetReplayGuard enables or disables single-use nonce replay rejection and
+// whether claims without an n= nonce are refused. Safe for concurrent use.
+func (v *Verifier) SetReplayGuard(enabled, requireNonce bool) {
+	v.replayGuard.Store(enabled)
+	v.requireNonce.Store(requireNonce)
+}
+
 // Verify parses header and checks its signature against method, uri and
-// bodyHash and its timestamp against the clock.
+// bodyHash, its timestamp against the clock, and (when enabled) single-use
+// replay protection on its nonce.
 func (v *Verifier) Verify(header, method, uri, bodyHash string) (Claim, error) {
 	if header == "" {
 		return Claim{}, ErrMissing
@@ -263,19 +317,43 @@ func (v *Verifier) Verify(header, method, uri, bodyHash string) (Claim, error) {
 	if !ok {
 		return Claim{}, ErrSignature
 	}
-	d := v.now().Sub(c.Issued)
+	now := v.now()
+	d := now.Sub(c.Issued)
 	if d < 0 {
 		d = -d
 	}
 	if d > v.maxSkew {
 		return Claim{}, ErrSkew
 	}
+	if v.requireNonce.Load() && c.Nonce == "" {
+		return Claim{}, ErrNonceRequired
+	}
+	if v.replayGuard.Load() && c.Nonce != "" {
+		ttlMs := (2 * v.maxSkew).Milliseconds()
+		if v.replay.seenOrRecord(c.Edge, c.Nonce, now.UnixMilli(), ttlMs) {
+			return Claim{}, ErrReplay
+		}
+	}
 	return c, nil
 }
 
+func validNonce(s string) bool {
+	if len(s) < 16 || len(s) > 32 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
 // parse splits a header into its claim, the signed field string and the
-// signature. It accepts exactly the form Sign writes: every key once, in
-// order. Anything else is ErrMalformed.
+// signature. It accepts exactly the canonical form Sign writes (with or
+// without the optional trailing n= nonce): every key once, in order.
+// Anything else is ErrMalformed.
 func parse(h string) (Claim, string, []byte, error) {
 	var c Claim
 	if len(h) > maxHeaderLen {
@@ -291,11 +369,11 @@ func parse(h string) (Claim, string, []byte, error) {
 		return c, "", nil, ErrMalformed
 	}
 	parts := strings.Split(fields, ";")
-	keys := [...]string{"v", "e", "t", "c", "r", "f", "k", "p"}
-	if len(parts) != len(keys) {
+	keys := [...]string{"v", "e", "t", "c", "r", "f", "k", "p", "n"}
+	if len(parts) != 8 && len(parts) != 9 {
 		return c, "", nil, ErrMalformed
 	}
-	vals := make([]string, len(keys))
+	vals := make([]string, len(parts))
 	for j, p := range parts {
 		k, val, ok := strings.Cut(p, "=")
 		if !ok || k != keys[j] {
@@ -339,6 +417,12 @@ func parse(h string) (Claim, string, []byte, error) {
 		c.Proto = vals[7]
 	default:
 		return c, "", nil, ErrMalformed
+	}
+	if len(vals) == 9 {
+		if !validNonce(vals[8]) {
+			return c, "", nil, ErrMalformed
+		}
+		c.Nonce = vals[8]
 	}
 	// The signed string must be exactly what Sign would write for this
 	// claim, so two encodings of one claim never both verify.

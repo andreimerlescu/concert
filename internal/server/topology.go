@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -21,6 +22,7 @@ import (
 	"github.com/andreimerlescu/concert/internal/bench"
 	"github.com/andreimerlescu/concert/internal/capacity"
 	"github.com/andreimerlescu/concert/internal/hop"
+	"github.com/andreimerlescu/concert/internal/mailer"
 	"github.com/gin-gonic/gin"
 )
 
@@ -231,6 +233,7 @@ func newTopology(cfg config) (*topology, error) {
 	if t.verifier, err = hop.NewVerifier(cfg.hopMaxSkew, cfg.hopSecret, cfg.hopSecretPrev); err != nil {
 		return nil, err
 	}
+	t.verifier.SetReplayGuard(cfg.hopReplayGuard, cfg.hopRequireNonce)
 	switch cfg.role {
 	case roleEdge:
 		t.edge = newEdgeState(cfg)
@@ -311,19 +314,30 @@ func (g *generation) identifyHop(c *gin.Context, ip netip.Addr) netip.Addr {
 		return ip
 	}
 	if strings.HasPrefix(r.URL.Path, "/_room/hop/") {
-		// Control requests bind their body; the handler verifies them.
+		// Control requests bind their body; the handler verifies them (and mTLS).
 		c.Set(ctxHopRaw, raw)
+		return ip
+	}
+	if g.cfg.hopRequireMTLS && (r.TLS == nil || len(r.TLS.VerifiedChains) == 0) {
+		t.leaf.rejected.Add(1)
+		t.leaf.mtlsRejected.Add(1)
+		if t.leaf.rejectLog.Add(1) <= 20 {
+			log.Printf("hop: rejected claim from %s for %s %s: missing verified mTLS client certificate", peer, r.Method, clip(r.URL.Path, 128))
+		}
 		return ip
 	}
 	claim, err := t.verifier.Verify(raw, r.Method, r.RequestURI, "")
 	if err != nil || claim.Class == hop.ClassControl {
 		t.leaf.rejected.Add(1)
+		if errors.Is(err, hop.ErrReplay) {
+			t.leaf.replayed.Add(1)
+		}
 		if t.leaf.rejectLog.Add(1) <= 20 {
 			log.Printf("hop: rejected claim from %s for %s %s: %v", peer, r.Method, clip(r.URL.Path, 128), err)
 		}
 		return ip
 	}
-	t.leaf.sawEdge(claim.Edge, time.Now())
+	t.leaf.sawEdgeTraffic(claim.Edge, time.Now())
 	t.leaf.accepted.Add(1)
 	c.Set(ctxHopIn, claim)
 	c.Request = r.WithContext(withHopIn(r.Context(), claim))
@@ -331,6 +345,30 @@ func (g *generation) identifyHop(c *gin.Context, ip netip.Addr) netip.Addr {
 }
 
 // ─── leaf state ──────────────────────────────────────────────────────────────
+
+type edgeActivity struct {
+	lastSeen       time.Time
+	reportedDemand float64 // smoothed demand (in_flight + live_queue) from edge poll
+	ewmaHits       float64 // exponentially decayed hop request count (30s tau)
+	lastHitAt      time.Time
+}
+
+const edgeDemandDecaySec = 30.0
+
+func (ea *edgeActivity) decayedHits(now time.Time) float64 {
+	if ea.ewmaHits <= 0 || ea.lastHitAt.IsZero() {
+		return 0
+	}
+	dt := now.Sub(ea.lastHitAt).Seconds()
+	if dt <= 0 {
+		return ea.ewmaHits
+	}
+	v := ea.ewmaHits * math.Exp(-dt/edgeDemandDecaySec)
+	if v < 1e-4 {
+		return 0
+	}
+	return v
+}
 
 // leafState is a leaf's long-lived tier state.
 type leafState struct {
@@ -341,21 +379,29 @@ type leafState struct {
 	capFile   *capacity.File
 
 	edgesMu sync.Mutex
-	edges   map[string]time.Time // edge node ID → last seen
+	edges   map[string]*edgeActivity // edge node ID → recent activity & demand
 
 	bans banMirror
 
-	accepted    atomic.Int64 // verified hop requests
-	rejected    atomic.Int64 // claims refused (bad signature, skew, peer)
-	backpressed atomic.Int64 // hop requests refused for capacity
-	rejectLog   atomic.Int64
+	accepted       atomic.Int64 // verified hop requests
+	rejected       atomic.Int64 // claims refused (bad signature, skew, peer, replay, mTLS)
+	replayed       atomic.Int64 // claims refused specifically as replayed single-use nonces
+	mtlsRejected   atomic.Int64 // claims refused due to missing verified mTLS client cert
+	backpressed    atomic.Int64 // hop requests refused for capacity
+	rebenchTotal   atomic.Int64 // completed drained re-benchmarks
+	rebenchmarking atomic.Bool  // true while drained for on-demand re-benchmark
+	rejectLog      atomic.Int64
 
 	monitor silenceMonitor
 }
 
 func newLeafState(cfg config) *leafState {
-	l := &leafState{edges: map[string]time.Time{}}
+	l := &leafState{edges: map[string]*edgeActivity{}}
 	l.bans.perEdge = map[string]*edgeBans{}
+	if cfg.dataDir != "" {
+		l.bans.path = filepath.Join(cfg.dataDir, mirrorFileName)
+		l.bans.load()
+	}
 	n, src, file := hostCapacity(cfg)
 	l.gate = capacity.NewGate(n)
 	l.capSource, l.capFile = src, file
@@ -392,29 +438,87 @@ func (l *leafState) applyConfig(cfg config) {
 	}
 }
 
+func (l *leafState) edgeEntryLocked(edge string, now time.Time) *edgeActivity {
+	ea := l.edges[edge]
+	if ea == nil {
+		ea = &edgeActivity{}
+		l.edges[edge] = ea
+	}
+	ea.lastSeen = now
+	return ea
+}
+
 func (l *leafState) sawEdge(edge string, now time.Time) {
+	if edge == "" {
+		return
+	}
 	l.edgesMu.Lock()
-	l.edges[edge] = now
+	l.edgeEntryLocked(edge, now)
+	l.edgesMu.Unlock()
+}
+
+func (l *leafState) sawEdgeTraffic(edge string, now time.Time) {
+	if edge == "" {
+		return
+	}
+	l.edgesMu.Lock()
+	ea := l.edgeEntryLocked(edge, now)
+	ea.ewmaHits = ea.decayedHits(now) + 1.0
+	ea.lastHitAt = now
+	l.edgesMu.Unlock()
+}
+
+func (l *leafState) sawEdgePoll(edge string, demand int64, now time.Time) {
+	if edge == "" {
+		return
+	}
+	if demand < 0 {
+		demand = 0
+	}
+	d := float64(demand)
+	l.edgesMu.Lock()
+	ea := l.edgeEntryLocked(edge, now)
+	if d >= ea.reportedDemand {
+		// Snap upward promptly when a surge arrives at this edge.
+		ea.reportedDemand = d
+	} else {
+		// Smooth downward so brief lulls do not thrash shares.
+		ea.reportedDemand = 0.5*ea.reportedDemand + 0.5*d
+		if ea.reportedDemand < 0.05 {
+			ea.reportedDemand = 0
+		}
+	}
 	l.edgesMu.Unlock()
 }
 
 // edgesSeen counts edges heard from in the last minute, at least 1, and
 // forgets older ones.
 func (l *leafState) edgesSeen(now time.Time) int {
+	n, _ := l.edgeShares(l.gate.Cap(), now)
+	return n
+}
+
+// edgeShares prunes stale edges (>1m) and returns the active edge count (at
+// least 1) together with each active edge's demand-weighted share of hostCap.
+func (l *leafState) edgeShares(hostCap int, now time.Time) (int, map[string]int) {
 	l.edgesMu.Lock()
 	defer l.edgesMu.Unlock()
-	n := 0
-	for id, at := range l.edges {
-		if now.Sub(at) > time.Minute {
+	weights := make(map[string]float64, len(l.edges))
+	for id, ea := range l.edges {
+		if now.Sub(ea.lastSeen) > time.Minute {
 			delete(l.edges, id)
 			continue
 		}
-		n++
+		w := ea.decayedHits(now)
+		if ea.reportedDemand > w {
+			w = ea.reportedDemand
+		}
+		weights[id] = w
 	}
-	if n < 1 {
-		n = 1
+	if len(weights) == 0 {
+		return 1, nil
 	}
-	return n
+	return len(weights), hop.AllocateShares(hostCap, weights)
 }
 
 // gateClass is where a hop request waits in the host gate: the edge's lane
@@ -465,6 +569,10 @@ func (g *generation) hopFastPath(c *gin.Context) {
 		}
 		defer func() { _ = g.assets.global.Release() }()
 		g.a.stats.assetServed.Add(1)
+		if g.tryStatic(c, true) {
+			c.Abort()
+			return
+		}
 	case hop.ClassStream:
 		if !g.streams.sem.TryAcquire() {
 			g.a.stats.streamThrottled.Add(1)
@@ -561,13 +669,16 @@ func (a *app) tierResponse(next func(*http.Response) error) func(*http.Response)
 	switch {
 	case t.isEdge():
 		return func(resp *http.Response) error {
-			resp.Header.Del(hop.BackpressureHeader)
-			resp.Header.Del(hop.NodeHeader)
+			stripTierHeaders(resp.Header)
 			stripConcertSetCookies(resp.Header)
 			return next(resp)
 		}
 	case t.isLeaf():
 		return func(resp *http.Response) error {
+			// Only the leaf itself may signal backpressure: an
+			// application's 503 carrying the header was already served,
+			// and the edge would send the request again elsewhere.
+			stripTierHeaders(resp.Header)
 			if resp.Request != nil {
 				if _, ok := hopInFrom(resp.Request.Context()); ok {
 					resp.Header.Set(hop.NodeHeader, t.node)
@@ -577,7 +688,17 @@ func (a *app) tierResponse(next func(*http.Response) error) func(*http.Response)
 			return next(resp)
 		}
 	}
-	return next
+	return func(resp *http.Response) error {
+		stripTierHeaders(resp.Header)
+		return next(resp)
+	}
+}
+
+// stripTierHeaders removes the headers only Concert's tiers may set from an
+// application's response.
+func stripTierHeaders(h http.Header) {
+	h.Del(hop.BackpressureHeader)
+	h.Del(hop.NodeHeader)
 }
 
 // stripConcertSetCookies removes Set-Cookie headers naming a Concert cookie.
@@ -655,11 +776,159 @@ func (a *app) benchOnStart(ctx context.Context) {
 	}
 	reportPath := filepath.Join(cfg.dataDir, "bench-report.json")
 	if b, err := json.MarshalIndent(rep, "", "  "); err == nil {
-		_ = os.WriteFile(reportPath, append(b, '\n'), 0o600)
+		if err := writeFileAtomic(reportPath, append(b, '\n')); err != nil {
+			log.Printf("bench: cannot save %s: %v", reportPath, err)
+		}
 	}
 	if err := bench.SaveCapacity(path, rep, reportPath); err != nil {
 		log.Printf("bench: %v", err)
 		return
 	}
 	a.topo.leaf.applyConfig(cfg)
+}
+
+// rebenchLeaf drains a leaf's active slots, runs the lemmings capacity
+// benchmark against its local upstream, atomically persists bench-report.json
+// and capacity.json (when -data-dir is set), updates the host gate, and
+// rejoins traffic. Always clears the draining/rebenchmarking flag on return.
+func (a *app) rebenchLeaf(ctx context.Context, drainWait time.Duration) (hop.RebenchResult, int, error) {
+	var res hop.RebenchResult
+	if !a.topo.isLeaf() {
+		return res, http.StatusBadRequest, errors.New("re-benchmarking is only supported on leaf nodes (or from an edge targeting a leaf)")
+	}
+	l := a.topo.leaf
+	if !l.rebenchmarking.CompareAndSwap(false, true) {
+		return res, http.StatusConflict, errors.New("a re-benchmark is already running on this leaf")
+	}
+	defer l.rebenchmarking.Store(false)
+
+	if drainWait <= 0 {
+		drainWait = 5 * time.Second
+	}
+	if drainWait > 30*time.Second {
+		drainWait = 30 * time.Second
+	}
+
+	// Wait briefly for in-flight hop/direct requests to drain while edges route
+	// new traffic to sibling leaves (since LeafState.Draining is now true).
+	deadline := time.Now().Add(drainWait)
+	for time.Now().Before(deadline) {
+		inUse := l.gate.InUse(capacity.HopPriority) + l.gate.InUse(capacity.Hop) + l.gate.InUse(capacity.Direct)
+		if inUse == 0 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return res, http.StatusRequestTimeout, ctx.Err()
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+
+	cfg := a.current().cfg
+	prevCap := l.gate.Cap()
+	target := *cfg.target
+	if target.Path == "" {
+		target.Path = "/"
+	}
+	log.Printf("bench: drained re-benchmark on %s measuring %s (p95 <= %s, max %d lemmings)",
+		a.topo.node, target.Redacted(), cfg.benchP95, cfg.benchMaxLemmings)
+	opts := bench.Options{
+		Target:   &target,
+		P95Limit: cfg.benchP95,
+		Max:      cfg.benchMaxLemmings,
+		Header:   http.Header{"User-Agent": {"concert-bench/" + BinaryVersion() + " (leaf " + a.topo.node + ")"}},
+		Logf:     log.Printf,
+	}
+	benchStartTuning(&opts)
+	rep, err := bench.Run(ctx, opts)
+	if err != nil {
+		return res, http.StatusBadGateway, fmt.Errorf("benchmark failed: %w", err)
+	}
+	if rep == nil || rep.HostCap < 1 {
+		verdict := "no capacity measured"
+		if rep != nil && rep.Verdict != "" {
+			verdict = rep.Verdict
+		}
+		return res, http.StatusBadGateway, fmt.Errorf("benchmark did not measure usable capacity: %s", verdict)
+	}
+
+	now := time.Now().UTC()
+	var capFile capacity.File
+	var reportPath string
+	if cfg.dataDir != "" {
+		reportPath = filepath.Join(cfg.dataDir, "bench-report.json")
+		if b, merr := json.MarshalIndent(rep, "", "  "); merr == nil {
+			if werr := writeFileAtomic(reportPath, append(b, '\n')); werr != nil {
+				log.Printf("bench: cannot save %s: %v", reportPath, werr)
+			}
+		}
+		capPath := capacity.Path(cfg.dataDir)
+		if serr := bench.SaveCapacity(capPath, rep, reportPath); serr != nil {
+			return res, http.StatusInternalServerError, fmt.Errorf("save capacity.json: %w", serr)
+		}
+		if loaded, lerr := capacity.Load(capPath); lerr == nil {
+			capFile = loaded
+		}
+	}
+	if capFile.HostCap == 0 {
+		capFile = capacity.File{
+			At:       now,
+			Target:   target.Redacted(),
+			HostCap:  rep.HostCap,
+			Lemmings: rep.Lemmings,
+			P95Ms:    rep.P95Ms,
+			LimitMs:  float64(cfg.benchP95.Milliseconds()),
+			Pages:    rep.Pages,
+			Safety:   rep.Safety,
+			Report:   reportPath,
+		}
+	}
+
+	if cfg.hostCap > 0 {
+		// Explicit -host-cap flag stays authoritative; still record benchmark metadata.
+		l.capMu.Lock()
+		l.capFile = &capFile
+		l.capMu.Unlock()
+	} else {
+		l.capMu.Lock()
+		l.capSource = "bench"
+		l.capFile = &capFile
+		l.capMu.Unlock()
+		if l.gate.Cap() != rep.HostCap {
+			l.gate.SetCap(rep.HostCap)
+		}
+	}
+	l.rebenchTotal.Add(1)
+
+	l.capMu.Lock()
+	src := l.capSource
+	l.capMu.Unlock()
+	newCap := l.gate.Cap()
+
+	res = hop.RebenchResult{
+		Node:         a.topo.node,
+		PreviousCap:  prevCap,
+		NewCap:       newCap,
+		CapSource:    src,
+		Lemmings:     rep.Lemmings,
+		P95Ms:        rep.P95Ms,
+		PagesCovered: rep.Pages,
+		Verdict:      rep.Verdict,
+		At:           now,
+	}
+	a.notifyEvent(mailer.Event{
+		Category:    mailer.CatCapacity,
+		Severity:    mailer.SevInfo,
+		Title:       "Leaf capacity re-benchmarked",
+		Summary:     fmt.Sprintf("Leaf %s completed drained re-benchmark: host capacity %d -> %d (%d lemmings, p95 %.0fms).", a.topo.node, prevCap, newCap, rep.Lemmings, rep.P95Ms),
+		Fingerprint: "rebench:" + a.topo.node,
+		Details: map[string]string{
+			"node":         a.topo.node,
+			"previous_cap": fmt.Sprintf("%d", prevCap),
+			"new_cap":      fmt.Sprintf("%d", newCap),
+			"lemmings":     fmt.Sprintf("%d", rep.Lemmings),
+			"p95_ms":       fmt.Sprintf("%.1f", rep.P95Ms),
+		},
+	})
+	return res, http.StatusOK, nil
 }

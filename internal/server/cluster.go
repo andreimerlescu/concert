@@ -3,7 +3,9 @@ package server
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,6 +47,12 @@ type clusterBanEvent struct {
 	Offenses  int    `json:"offenses,omitempty"`
 }
 
+type emailDedupeItem struct {
+	fingerprint string
+	ttl         time.Duration
+	onAllow     func()
+}
+
 type clusterSync struct {
 	cfg    clusterConfig
 	nodeID string
@@ -53,6 +61,7 @@ type clusterSync struct {
 	onDrop func(netip.Prefix)
 
 	out      chan clusterBanEvent
+	dedupeCh chan emailDedupeItem
 	stop     chan struct{}
 	once     sync.Once
 	wg       sync.WaitGroup
@@ -67,15 +76,16 @@ func newClusterSync(cfg clusterConfig, abuse *abuseRegistry, stats *counters, on
 		cfg.prefix = "concert"
 	}
 	cs := &clusterSync{
-		cfg:    cfg,
-		nodeID: randomHex(8),
-		abuse:  abuse,
-		stats:  stats,
-		onDrop: onDrop,
-		out:    make(chan clusterBanEvent, 1024),
-		stop:   make(chan struct{}),
+		cfg:      cfg,
+		nodeID:   randomHex(8),
+		abuse:    abuse,
+		stats:    stats,
+		onDrop:   onDrop,
+		out:      make(chan clusterBanEvent, 1024),
+		dedupeCh: make(chan emailDedupeItem, 256),
+		stop:     make(chan struct{}),
 	}
-	cs.wg.Add(2)
+	cs.wg.Add(3)
 	go func() {
 		defer cs.wg.Done()
 		cs.publishLoop()
@@ -84,7 +94,86 @@ func newClusterSync(cfg clusterConfig, abuse *abuseRegistry, stats *counters, on
 		defer cs.wg.Done()
 		cs.subscribeLoop()
 	}()
+	go func() {
+		defer cs.wg.Done()
+		cs.emailDedupeLoop()
+	}()
 	return cs
+}
+
+func (cs *clusterSync) emailDedupeKey(fingerprint string) string {
+	sum := sha256.Sum256([]byte(fingerprint))
+	return cs.cfg.prefix + ":email:fp:" + hex.EncodeToString(sum[:16])
+}
+
+// claimEmailAsync deduplicates cluster-shared email alert fingerprints across
+// Redis peers without ever blocking the caller. Fail-open: if Redis is down,
+// slow, or the queue is saturated, onAllow runs locally so alerts are never lost.
+func (cs *clusterSync) claimEmailAsync(fingerprint string, ttl time.Duration, onAllow func()) {
+	if cs == nil || onAllow == nil {
+		if onAllow != nil {
+			onAllow()
+		}
+		return
+	}
+	if ttl < time.Second {
+		ttl = time.Minute
+	}
+	select {
+	case <-cs.stop:
+		onAllow()
+	case cs.dedupeCh <- emailDedupeItem{fingerprint: fingerprint, ttl: ttl, onAllow: onAllow}:
+	default:
+		onAllow()
+	}
+}
+
+func (cs *clusterSync) emailDedupeLoop() {
+	var rc *respConn
+	defer func() {
+		if rc != nil {
+			_ = rc.close()
+		}
+	}()
+	for {
+		select {
+		case <-cs.stop:
+			return
+		case item := <-cs.dedupeCh:
+			if rc == nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				c, err := cs.dial(ctx)
+				cancel()
+				if err != nil {
+					if cs.stats != nil {
+						cs.stats.clusterSyncErrors.Add(1)
+					}
+					item.onAllow()
+					continue
+				}
+				rc = c
+			}
+			ms := strconv.FormatInt(item.ttl.Milliseconds(), 10)
+			val, err := rc.do("SET", cs.emailDedupeKey(item.fingerprint), cs.nodeID, "NX", "PX", ms)
+			if err != nil {
+				if cs.stats != nil {
+					cs.stats.clusterSyncErrors.Add(1)
+				}
+				_ = rc.close()
+				rc = nil
+				item.onAllow() // fail open
+				continue
+			}
+			if val == nil {
+				// Key already claimed by another peer within this window.
+				if cs.stats != nil {
+					cs.stats.emailClusterDeduped.Add(1)
+				}
+				continue
+			}
+			item.onAllow()
+		}
+	}
 }
 
 func (cs *clusterSync) channelName() string {

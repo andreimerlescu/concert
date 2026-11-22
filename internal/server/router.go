@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/andreimerlescu/concert/internal/hop"
+	"github.com/andreimerlescu/concert/internal/static"
 	"github.com/gin-gonic/gin"
 )
 
@@ -69,10 +70,15 @@ func buildRouter(g *generation) (engine *gin.Engine, err error) {
 	registerOps(r, g)
 	registerHopControl(r, g)
 	registerConcertRoutes(r, g)
-	registerPaths(r, parsePaths(cfg.bypass), g.forwardAs(hop.ClassBypass))
-	registerPaths(r, parsePaths(cfg.assets), g.assets.private, g.forwardAs(hop.ClassAsset))
-	registerPaths(r, parsePaths(cfg.assetPublic), g.assets.public, g.forwardAs(hop.ClassAsset))
+	registerPaths(r, parsePaths(cfg.bypass), g.serveStaticOrForward(false, hop.ClassBypass))
+	registerPaths(r, parsePaths(cfg.assets), g.assets.private, g.serveStaticOrForward(true, hop.ClassAsset))
+	registerPaths(r, parsePaths(cfg.assetPublic), g.assets.public, g.serveStaticOrForward(true, hop.ClassAsset))
 	registerPaths(r, parsePaths(cfg.streamPaths), g.streams.handle, g.forwardAs(hop.ClassStream))
+
+	// ---- Offload remaining mounted/root static files before the waiting room. ----
+	if g.static != nil {
+		r.Use(g.staticOffload)
+	}
 
 	// ---- Run ahead of room's middleware on gated requests only. ----
 	// The priority gate comes first, so its lane requests and refused forms
@@ -80,7 +86,7 @@ func buildRouter(g *generation) (engine *gin.Engine, err error) {
 	r.Use(g.priorityGate)
 	r.Use(g.agentGate) // keyed places for Concert-Session clients; see agent.go
 	if cfg.apiJSON {
-		r.Use(apiQueueResponses(cfg.retryAfter))
+		r.Use(apiQueueResponses(g.a, cfg.retryAfter))
 	}
 
 	// ---- Attaches room's middleware and GET /queue/status. ----
@@ -97,6 +103,70 @@ func buildRouter(g *generation) (engine *gin.Engine, err error) {
 func registerPaths(r *gin.Engine, rules []pathRule, handlers ...gin.HandlerFunc) {
 	for _, rule := range rules {
 		r.Any(rule.pattern(), handlers...)
+	}
+}
+
+// tryStatic attempts to serve c directly from local static roots/mounts.
+// Returns true when the response was written or aborted (200/206/304/404) so
+// the caller must not forward upstream.
+func (g *generation) tryStatic(c *gin.Context, authoritative bool) bool {
+	if g.static == nil {
+		return false
+	}
+	switch g.static.Serve(c.Writer, c.Request, authoritative) {
+	case static.ResultServed:
+		g.a.stats.staticServed.Add(1)
+		c.Set(ctxAdmitted, true)
+		return true
+	case static.ResultNotFound:
+		g.a.stats.staticNotFound.Add(1)
+		c.AbortWithStatus(http.StatusNotFound)
+		return true
+	case static.ResultForbidden:
+		c.AbortWithStatus(http.StatusNotFound)
+		return true
+	default:
+		return false
+	}
+}
+
+func (g *generation) serveStaticOrForward(authoritative bool, class hop.Class) gin.HandlerFunc {
+	fwd := g.forwardAs(class)
+	return func(c *gin.Context) {
+		if g.tryStatic(c, authoritative) {
+			return
+		}
+		fwd(c)
+	}
+}
+
+// staticOffload serves requests targeting explicit -static-mounts prefixes or
+// existing safe static files inside -static-root (plus blocked dotfiles) under
+// Concert's global asset cap, before they can consume a waiting-room slot or
+// wake up the upstream / php-fpm.
+func (g *generation) staticOffload(c *gin.Context) {
+	if g.static == nil {
+		return
+	}
+	p := c.Request.URL.Path
+	if strings.HasPrefix(p, "/_room") || strings.HasPrefix(p, "/_concert") || p == "/queue/status" || isTicketStatus(p) {
+		return
+	}
+	inMount := g.static.MatchMount(p)
+	if !inMount && !g.static.HasRootStaticFile(c.Request) {
+		return
+	}
+	if !acquire(c.Request.Context(), g.assets.global, g.cfg.assetWait) {
+		g.a.stats.assetGlobalThrottled.Add(1)
+		c.Header("Retry-After", "1")
+		c.AbortWithStatus(http.StatusServiceUnavailable)
+		return
+	}
+	handled := g.tryStatic(c, inMount)
+	_ = g.assets.global.Release()
+	if handled {
+		g.a.stats.assetServed.Add(1)
+		c.Abort()
 	}
 }
 
@@ -147,11 +217,6 @@ func (g *generation) gated(c *gin.Context) {
 	g.forwardPage(c)
 }
 
-// forwardTo marks the request as admitted and hands it to the proxy.
-func forwardTo(proxy http.Handler) gin.HandlerFunc {
-	return forwardToPool(proxy, nil)
-}
-
 // proxyForward marks the request as admitted, picks its upstream, attaches
 // an edge's claim and hands it to the proxy.
 func (g *generation) proxyForward(c *gin.Context) {
@@ -159,14 +224,6 @@ func (g *generation) proxyForward(c *gin.Context) {
 	req := selectBackendForRequest(c.Request, g.upstreams)
 	req = g.edgeClaim(c, req)
 	g.proxy.ServeHTTP(c.Writer, req)
-}
-
-func forwardToPool(proxy http.Handler, pool *upstreamPool) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		c.Set(ctxAdmitted, true)
-		req := selectBackendForRequest(c.Request, pool)
-		proxy.ServeHTTP(c.Writer, req)
-	}
 }
 
 func janitorInterval(d time.Duration) time.Duration {

@@ -11,6 +11,8 @@ import (
 	"os"
 	"strings"
 
+	"github.com/andreimerlescu/concert/internal/mailer"
+	"github.com/andreimerlescu/concert/internal/static"
 	"github.com/andreimerlescu/room"
 	"github.com/andreimerlescu/sema"
 	"github.com/gin-gonic/gin"
@@ -46,6 +48,7 @@ type generation struct {
 	banRules  []pathRule
 	untracked []pathRule // paths the portal's queue view ignores
 	assets    *assetGuard
+	static    *static.Server
 	streams   *streamGuard
 	lane      *rankedSem // priority lane; see priority.go
 	upstreams *upstreamPool
@@ -84,6 +87,7 @@ func (a *app) buildGeneration(next config, prev *generation) (*generation, error
 	g.untracked = append(g.untracked, parsePaths(next.bypass)...)
 	g.untracked = append(g.untracked, parsePaths(next.streamPaths)...)
 	g.untracked = append(g.untracked, pathRule{path: "/_room", prefix: true})
+	g.untracked = append(g.untracked, pathRule{path: mailer.UnsubscribeMainPath})
 
 	if prev != nil && sameProxy(prev.cfg, next) {
 		g.proxy = prev.proxy
@@ -92,6 +96,16 @@ func (a *app) buildGeneration(next config, prev *generation) (*generation, error
 		proxy, pool, err := newEnterpriseProxy(next, a.stats, a.tierResponse(a.prio.grants.modifyResponse), a.topo)
 		if err != nil {
 			return nil, err
+		}
+		pool.onCircuitOpen = func(target, reason string) {
+			a.notifyEvent(mailer.Event{
+				Category:    mailer.CatSilence,
+				Severity:    mailer.SevCritical,
+				Title:       "Upstream circuit breaker opened",
+				Summary:     fmt.Sprintf("Backend %s circuit breaker opened after repeated failures (%s).", target, reason),
+				Fingerprint: "cb:" + target,
+				Details:     map[string]string{"backend": target, "reason": reason},
+			})
 		}
 		g.proxy = proxy
 		g.upstreams = pool
@@ -123,6 +137,24 @@ func (a *app) buildGeneration(next config, prev *generation) (*generation, error
 		protoHeader: next.clientProtoHeader,
 		stats:       a.stats,
 		strike:      g.strike,
+	}
+
+	if prev != nil && sameStatic(prev.cfg, next) {
+		g.static = prev.static
+	} else {
+		st, serr := static.New(static.Config{
+			Root:          next.staticRoot,
+			Mounts:        next.parsedStaticMounts,
+			AllowExt:      next.parsedStaticAllowExt,
+			CacheControl:  next.staticCacheControl,
+			Fallback:      next.staticFallback,
+			Compress:      next.compress,
+			ServeDirIndex: !next.hasFastCGI,
+		})
+		if serr != nil {
+			return nil, serr
+		}
+		g.static = st
 	}
 
 	var streamSem sema.Semaphore
@@ -164,7 +196,21 @@ func sameProxy(a, b config) bool {
 		a.upstreamCA == b.upstreamCA &&
 		a.upstreamClientCert == b.upstreamClientCert &&
 		a.upstreamClientKey == b.upstreamClientKey &&
-		a.upstreamRetries == b.upstreamRetries
+		a.upstreamRetries == b.upstreamRetries &&
+		a.staticRoot == b.staticRoot &&
+		a.fcgiIndex == b.fcgiIndex &&
+		a.fcgiDenyPaths == b.fcgiDenyPaths &&
+		a.compress == b.compress
+}
+
+func sameStatic(a, b config) bool {
+	return a.staticRoot == b.staticRoot &&
+		a.staticMounts == b.staticMounts &&
+		a.staticAllowExt == b.staticAllowExt &&
+		a.staticCacheControl == b.staticCacheControl &&
+		a.staticFallback == b.staticFallback &&
+		a.compress == b.compress &&
+		a.hasFastCGI == b.hasFastCGI
 }
 
 func sameUserPools(a, b config) bool {
@@ -223,12 +269,20 @@ func (a *app) commit(g *generation, lp *listenPlan) error {
 	roomErr := applyRoom(a.room, cfg, a.edgeCap(cfg), g.html, a.price)
 	if a.topo.isLeaf() {
 		a.topo.leaf.applyConfig(cfg)
+		if a.topo.verifier != nil {
+			a.topo.verifier.SetReplayGuard(cfg.hopReplayGuard, cfg.hopRequireNonce)
+		}
 	}
 	a.admit.configure(cfg.admitTTL, cfg.cookiePath, cfg.cookieDomain, cfg.secureCookie)
 	a.abuse.setParams(abuseParamsFrom(cfg))
 	a.setPricing(cfg.rate, cfg.surge)
 	if a.history != nil {
 		a.history.setRetention(cfg.historyRetention)
+	}
+	if a.mailer != nil {
+		if mcfg, err := cfg.mailerConfig(); err == nil {
+			a.mailer.UpdateConfig(mcfg)
+		}
 	}
 	if prev == nil || prev.assets.users != g.assets.users {
 		g.assets.users.startJanitor(janitorInterval(cfg.admitTTL), cfg.admitTTL)
@@ -243,6 +297,9 @@ func (a *app) commit(g *generation, lp *listenPlan) error {
 	if prev != nil {
 		if prev.assets.users != g.assets.users {
 			prev.assets.users.close()
+		}
+		if prev.static != nil && prev.static != g.static {
+			_ = prev.static.Close()
 		}
 		if prev.proxy != g.proxy {
 			prev.upstreams.close()

@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/netip"
 	"net/url"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/andreimerlescu/concert/internal/fcgi"
+	"github.com/andreimerlescu/concert/internal/static"
 	"github.com/andreimerlescu/goenv/env"
 )
 
@@ -62,6 +65,22 @@ type config struct {
 	clientProtoHeader string
 	accessLogEnabled  bool
 
+	// Static file offload, compression, and FastCGI (php-fpm); see internal/static and internal/fcgi.
+	staticRoot         string
+	staticMounts       string
+	staticAllowExt     string
+	staticCacheControl string
+	staticFallback     bool
+	compress           bool
+	fcgiIndex          string
+	fcgiDenyPaths      string
+
+	// Parsed static & FastCGI config populated by normalize().
+	parsedStaticMounts   []static.Mount
+	parsedStaticAllowExt []string
+	parsedFCGIDenyPaths  []string
+	hasFastCGI           bool
+
 	// Long-lived WebSocket and SSE paths; see stream.go. They skip the
 	// waiting room but need an admission pass and a slot under streamCap.
 	streamPaths string
@@ -83,14 +102,17 @@ type config struct {
 
 	// Let's Encrypt & Enterprise TLS; see tls.go. TLS on -listen is enabled
 	// when tlsDomains names at least one host OR tlsCert+tlsKey are set.
-	tlsDomains    string
-	tlsEmail      string
-	tlsCacheDir   string
-	tlsStaging    bool
-	tlsCert       string
-	tlsKey        string
-	tlsMinVersion string
-	hstsMaxAge    int
+	tlsDomains           string
+	tlsEmail             string
+	tlsCacheDir          string
+	tlsStaging           bool
+	tlsCert              string
+	tlsKey               string
+	tlsClientCA          string
+	tlsRequireClientCert bool
+	tlsMinVersion        string
+	hstsMaxAge           int
+	tlsHTTPListen        string
 
 	// Upstream resilience & mTLS; see upstream.go.
 	upstreamHealthPath     string
@@ -124,6 +146,9 @@ type config struct {
 	hopPeers         string        // leaf: CIDRs allowed to present hop claims
 	hopMaxSkew       time.Duration // clock skew a hop claim may carry
 	hopWait          time.Duration // leaf: how long a hop page request waits for a host slot
+	hopReplayGuard   bool          // leaf: reject replayed Concert-Hop nonces within 2*maxSkew
+	hopRequireNonce  bool          // leaf: reject legacy v0.2.0 Concert-Hop claims without a nonce
+	hopRequireMTLS   bool          // leaf: require verified TLS client cert on hop claims and control plane
 	hopLeaves        string        // edge: leaf control URLs; empty means the upstreams
 	hopPoll          time.Duration // edge: how often leaves are polled
 	hopAutoCap       bool          // edge: size the room from what the leaves report
@@ -150,6 +175,10 @@ type config struct {
 	// portal holds the admin portal settings; see portal.go. Its flags are
 	// declared with every other flag, from settingDefs in settings.go.
 	portal portalConfig
+
+	// email holds administrator email delivery, cadence, and compliance
+	// settings; see mailer.go and internal/mailer.
+	email emailConfig
 
 	// historyLog is where the portal's request history is written and
 	// restored from; see history_log.go. Empty means history.jsonl in
@@ -216,6 +245,9 @@ func parseConfig(fs *flag.FlagSet, args []string) (config, bool, error) {
 	cfg.redisPassword = envOrFile("CONCERT_REDIS_PASSWORD", "")
 	cfg.hopSecret = []byte(envOrFile("CONCERT_HOP_SECRET", ""))
 	cfg.hopSecretPrev = []byte(envOrFile("CONCERT_HOP_SECRET_PREV", ""))
+	cfg.email.smtpPass = envOrFile("CONCERT_SMTP_PASS", "")
+	cfg.email.resendAPIKey = envOrFile("CONCERT_RESEND_API_KEY", "")
+	cfg.email.sendPandaAPIKey = envOrFile("CONCERT_SENDPANDA_API_KEY", "")
 	cfg.accessLog = os.Stdout
 
 	if *showVersion {
@@ -238,9 +270,48 @@ func (c *config) normalize() error {
 	}
 	c.targets = targets
 	c.target = targets[0]
+	c.hasFastCGI = false
+	for _, u := range targets {
+		if fcgi.IsFastCGI(u) {
+			c.hasFastCGI = true
+		}
+	}
 
 	if err := c.normalizeTopology(); err != nil {
 		return err
+	}
+	if c.hasFastCGI && c.role == roleEdge {
+		return errors.New("edge nodes cannot use fcgi:// or fcgi+unix:// upstreams directly; run php-fpm behind a standalone or leaf node")
+	}
+	if strings.TrimSpace(c.staticRoot) != "" {
+		info, serr := os.Stat(strings.TrimSpace(c.staticRoot))
+		if serr != nil || !info.IsDir() {
+			return fmt.Errorf("invalid -static-root %q: must be an existing directory", c.staticRoot)
+		}
+	} else if c.hasFastCGI {
+		return errors.New("-static-root is required when -upstream uses fcgi:// or fcgi+unix://")
+	}
+	if c.parsedStaticMounts, err = static.ParseMounts(c.staticMounts); err != nil {
+		return err
+	}
+	if c.parsedStaticAllowExt, err = static.ParseAllowExt(c.staticAllowExt); err != nil {
+		return err
+	}
+	c.parsedFCGIDenyPaths = nil
+	for _, part := range strings.Split(c.fcgiDenyPaths, ",") {
+		p := strings.TrimSpace(part)
+		if p != "" {
+			if !strings.HasPrefix(p, "/") {
+				return fmt.Errorf("invalid -fcgi-deny-paths entry %q: must start with /", p)
+			}
+			c.parsedFCGIDenyPaths = append(c.parsedFCGIDenyPaths, p)
+		}
+	}
+	if strings.TrimSpace(c.fcgiIndex) == "" {
+		c.fcgiIndex = "index.php"
+	}
+	if strings.Contains(c.fcgiIndex, "..") || strings.ContainsAny(c.fcgiIndex, "\\\x00\r\n") {
+		return fmt.Errorf("invalid -fcgi-index %q", c.fcgiIndex)
 	}
 
 	if c.upstreamCBFailures < 0 {
@@ -321,6 +392,16 @@ func (c *config) normalize() error {
 	if len(c.tlsHosts) > 0 && c.tlsCert != "" {
 		return errors.New("-tls-cert/-tls-key cannot be combined with -tls-domains")
 	}
+	hasTLS := len(c.tlsHosts) > 0 || c.tlsCert != ""
+	if c.tlsRequireClientCert && strings.TrimSpace(c.tlsClientCA) == "" {
+		return errors.New("-tls-require-client-cert requires -tls-client-ca")
+	}
+	if strings.TrimSpace(c.tlsClientCA) != "" && !hasTLS {
+		return errors.New("-tls-client-ca requires TLS (-tls-cert/-tls-key or -tls-domains)")
+	}
+	if c.hopRequireMTLS && c.role == roleLeaf && (!hasTLS || strings.TrimSpace(c.tlsClientCA) == "") {
+		return errors.New("-hop-require-mtls requires TLS and -tls-client-ca on leaf nodes")
+	}
 	if len(c.tlsHosts) > 0 {
 		if strings.TrimSpace(c.tlsCacheDir) == "" {
 			return errors.New("-tls-cache is required with -tls-domains")
@@ -331,6 +412,17 @@ func (c *config) normalize() error {
 	}
 	if c.hstsMaxAge < 0 {
 		return fmt.Errorf("invalid -hsts-max-age %d: must not be negative", c.hstsMaxAge)
+	}
+	if hl := strings.TrimSpace(c.tlsHTTPListen); hl != "" {
+		if !hasTLS {
+			return errors.New("-tls-http-listen requires TLS (-tls-domains or -tls-cert/-tls-key)")
+		}
+		if _, _, serr := net.SplitHostPort(hl); serr != nil {
+			return fmt.Errorf("invalid -tls-http-listen %q: must look like :80 or 127.0.0.1:8080", hl)
+		}
+		if samePort(hl, c.listen) {
+			return fmt.Errorf("-tls-http-listen %q cannot share the same port as -listen %q", hl, c.listen)
+		}
 	}
 
 	if len(c.admitSecret) == 0 {
@@ -392,6 +484,9 @@ func (c *config) normalize() error {
 	if err := c.portal.normalize(); err != nil {
 		return err
 	}
+	if err := c.normalizeEmail(); err != nil {
+		return err
+	}
 
 	if c.hardened {
 		if err := c.validateHardened(); err != nil {
@@ -426,6 +521,9 @@ func (c *config) validateHardened() error {
 	}
 	if c.portal.enabled() && c.portal.tlsCert == "" && !c.portal.secureCookie && len(c.portal.trustedProxies) == 0 {
 		errs = append(errs, "admin portal requires -portal-tls-cert/-portal-tls-key or -portal-secure-cookie behind a trusted TLS proxy")
+	}
+	if c.role == roleLeaf && (!c.hopReplayGuard || !c.hopRequireNonce) {
+		errs = append(errs, "leaf nodes require -hop-replay-guard=true and -hop-require-nonce=true in enterprise-hardened mode")
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("enterprise-hardened checks failed: %s", strings.Join(errs, "; "))

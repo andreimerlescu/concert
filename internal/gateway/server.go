@@ -18,12 +18,14 @@ import (
 )
 
 // Server runs the chain operations inside Concert: "/supported", "/verify",
-// "/settle", "/nft/verify" and "/solana/prepare", each taking and returning
-// JSON (see Handle).
+// "/settle", "/reconcile", "/nft/verify" and "/solana/prepare", each taking
+// and returning JSON (see Handle).
 type Server struct {
-	cfg     fastlane.Config
-	chains  map[string]*chain
-	journal *Journal
+	cfg       fastlane.Config
+	networks  map[string]Network
+	allowHTTP bool
+	chains    map[string]*chain
+	journal   *Journal
 
 	queueMu  sync.Mutex
 	queues   map[string]*sync.Mutex
@@ -44,7 +46,11 @@ func newServer(cfg fastlane.Config, networks map[string]Network, journal *Journa
 	if err != nil {
 		return nil, err
 	}
-	return &Server{cfg: cfg, chains: chains, journal: journal, queues: map[string]*sync.Mutex{}}, nil
+	netCopy := make(map[string]Network, len(networks))
+	for k, v := range networks {
+		netCopy[k] = v
+	}
+	return &Server{cfg: cfg, networks: netCopy, allowHTTP: allowHTTP, chains: chains, journal: journal, queues: map[string]*sync.Mutex{}}, nil
 }
 
 // Close waits for settlements in flight to record their results (each is
@@ -71,6 +77,8 @@ func (s *Server) Handle(ctx context.Context, op string, body []byte) (any, error
 		return s.verify(ctx, body)
 	case "/settle":
 		return s.settle(ctx, body)
+	case "/reconcile":
+		return s.reconcileOnline(ctx, body)
 	case "/nft/verify":
 		return s.nft(ctx, body)
 	case "/solana/prepare":
@@ -222,6 +230,45 @@ func (s *Server) settle(ctx context.Context, body []byte) (any, error) {
 		return nil, err
 	}
 	return res, nil
+}
+
+type reconcileInput struct {
+	ID          string `json:"id"`
+	StellarHash string `json:"stellar_hash,omitempty"`
+}
+
+// reconcileOnline performs read-only on-chain finality verification for an
+// already-journaled pending or unknown authorization while the gateway is
+// running. It acquires the per-network settlement queue lock so it never races
+// against an in-flight settle() call, and never signs, broadcasts, or moves
+// funds.
+func (s *Server) reconcileOnline(ctx context.Context, body []byte) (any, error) {
+	var in reconcileInput
+	if err := json.Unmarshal(body, &in); err != nil {
+		return nil, errors.New("invalid reconcile request")
+	}
+	in.ID = strings.ToLower(strings.TrimSpace(in.ID))
+	in.StellarHash = strings.TrimSpace(in.StellarHash)
+	if !fingerprintRE.MatchString(in.ID) {
+		return nil, errors.New("invalid payment fingerprint: expected 64 lowercase hex characters")
+	}
+	rec, ok := s.journal.Get(in.ID)
+	if !ok {
+		return nil, errors.New("receipt not found")
+	}
+	if rec.State == "settled" && rec.Response != nil {
+		return *rec.Response, nil
+	}
+	var r x402.Requirements
+	if err := json.Unmarshal(rec.Terms, &r); err != nil {
+		return nil, err
+	}
+	s.settling.Add(1)
+	defer s.settling.Done()
+	q := s.queue(r.Network)
+	q.Lock()
+	defer q.Unlock()
+	return reconcile(ctx, s.journal, s.networks, in.ID, in.StellarHash, s.allowHTTP)
 }
 
 type nftInput struct {

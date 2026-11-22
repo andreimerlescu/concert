@@ -568,6 +568,8 @@
                 if (key in d) el.textContent = fmtNum(d[key]);
             });
             setText('stat-occupancy', fmtNum(d.occupancy) + ' / ' + fmtNum(d.cap));
+            const drainBadge = byId('badge-cap-draining');
+            if (drainBadge) drainBadge.classList.toggle('d-none', !d.cap_draining);
             setBar('bar-occupancy', d.occupancy, d.cap);
             setText('stat-queue', fmtNum(d.live_queue_depth));
             setText('stat-queue-depth', fmtNum(d.queue_depth));
@@ -579,10 +581,200 @@
             setText('queue-count', fmtNum(d.live_queue_depth));
             setText('ban-count', fmtNum(d.active_bans));
             setText('visitors-count', fmtNum(d.history_clients));
+            if ('email_queued' in d) {
+                setText('email-queue-count', fmtNum(d.email_queued));
+                const eb = byId('email-queue-count');
+                if (eb) {
+                    eb.classList.remove('text-bg-secondary', 'text-bg-warning', 'text-bg-primary');
+                    eb.classList.add(d.email_paused ? 'text-bg-warning' : d.email_queued > 0 ? 'text-bg-primary' : 'text-bg-secondary');
+                }
+            }
+            renderTierOverview(d);
             setText('updated-at', 'updated ' + new Date().toLocaleTimeString());
         } catch (err) {
             setText('updated-at', 'update failed: ' + err.message);
         }
+    }
+
+    function renderTierOverview(d) {
+        const sec = byId('tier-section');
+        if (!sec) return;
+        const role = d.role || 'standalone';
+        if (role !== 'edge' && role !== 'leaf') {
+            sec.classList.add('d-none');
+            return;
+        }
+        sec.classList.remove('d-none');
+        setText('tier-role-badge', role);
+        setText('tier-node-id', d.node || '');
+        const edgeEl = byId('tier-edge-view');
+        const leafEl = byId('tier-leaf-view');
+        const leafBtn = byId('tier-leaf-rebench-btn');
+
+        if (role === 'edge' && d.edge) {
+            const e = d.edge;
+            edgeEl.classList.remove('d-none');
+            leafEl.classList.add('d-none');
+            leafBtn.classList.add('d-none');
+            setText('edge-leaves-usable', e.leaves_usable != null ? fmtNum(e.leaves_usable) : '–');
+            setText('edge-leaf-slots', e.leaf_slots != null ? fmtNum(e.leaf_slots) : '–');
+            setText('edge-planned-cap', e.planned_cap != null ? fmtNum(e.planned_cap) : '–');
+            setText('edge-backpressure', fmtNum(e.leaf_backpressure_total || 0));
+            setText('edge-retries', fmtNum(e.upstream_retries_total || 0));
+            setText('edge-polls', `${fmtNum(e.leaf_polls_total || 0)} (${fmtNum(e.leaf_poll_errors_total || 0)})`);
+            setText('edge-pushes', `${fmtNum(e.ban_pushes_total || 0)} (${fmtNum(e.ban_push_errors_total || 0)})`);
+
+            const tbody = byId('tier-edge-leaves');
+            tbody.replaceChildren();
+            const leaves = (e.leaves || []).slice().sort((a, b) => String(a.url || '').localeCompare(String(b.url || '')));
+            if (leaves.length === 0) {
+                tbody.append(emptyRowEl(8, 'No leaf nodes polled yet.'));
+            } else {
+                for (const lf of leaves) {
+                    const tr = node('tr');
+                    const tdName = node('td');
+                    tdName.append(node('div', 'fw-semibold small', lf.node || '(unseen)'));
+                    tdName.append(node('div', 'small font-monospace text-body-secondary', lf.url || ''));
+
+                    const tdSt = node('td');
+                    let stText = 'Healthy', stCls = 'text-bg-success';
+                    if (lf.error) { stText = 'Unreachable'; stCls = 'text-bg-danger'; }
+                    else if (lf.rebenchmarking) { stText = 'Calibrating'; stCls = 'text-bg-info'; }
+                    else if (lf.draining) { stText = 'Draining'; stCls = 'text-bg-warning'; }
+                    else if (!lf.usable) { stText = 'Unusable'; stCls = 'text-bg-danger'; }
+                    tdSt.append(node('span', 'badge ' + stCls, stText));
+                    if (lf.error) tdSt.append(node('div', 'small text-danger mt-1', lf.error));
+
+                    const tdCap = node('td', 'text-end small', `${fmtNum(lf.host_cap || 0)} (${lf.cap_source || '–'})`);
+                    const tdShare = node('td', 'text-end fw-semibold small', fmtNum(lf.share || 0));
+                    const tdInF = node('td', 'text-end small', `${fmtNum(lf.hop_in_flight || 0)} hop / ${fmtNum(lf.direct_in_flight || 0)} dir`);
+                    const tdLat = node('td', 'text-end small', lf.latency_ms ? `${Math.round(lf.latency_ms)}ms` : '–');
+
+                    const tdNotes = node('td', 'small');
+                    if (lf.last_silence) {
+                        const s = lf.last_silence;
+                        const active = !s.recovered;
+                        tdNotes.append(node('div', active ? 'text-danger fw-semibold' : 'text-body-secondary',
+                            (active ? 'SILENT: ' : 'Recovered silence: ') + (s.reason || 'app silent')));
+                    }
+                    if (lf.bench) {
+                        tdNotes.append(node('div', 'text-body-secondary',
+                            `Bench: ${lf.bench.lemmings} lemmings · p95 ${Math.round(lf.bench.p95_ms || 0)}ms`));
+                    }
+                    if (!lf.last_silence && !lf.bench) tdNotes.textContent = '–';
+
+                    const tdAct = node('td', 'text-end');
+                    const btn = node('button', 'btn btn-sm btn-outline-primary', 'Re-benchmark');
+                    btn.type = 'button';
+                    btn.disabled = Boolean(lf.rebenchmarking || lf.error);
+                    btn.dataset.action = 'rebench-leaf';
+                    btn.dataset.leaf = lf.node || lf.url || '';
+                    tdAct.append(btn);
+
+                    tr.append(tdName, tdSt, tdCap, tdShare, tdInF, tdLat, tdNotes, tdAct);
+                    tbody.append(tr);
+                }
+            }
+            return;
+        }
+
+        if (role === 'leaf' && d.leaf) {
+            const lf = d.leaf;
+            edgeEl.classList.add('d-none');
+            leafEl.classList.remove('d-none');
+            leafBtn.classList.remove('d-none');
+            leafBtn.disabled = Boolean(lf.rebenchmarking);
+
+            setText('leaf-host-cap', `${fmtNum(lf.host_cap || 0)} (${lf.host_cap_source || '–'})`);
+            setText('leaf-hop-inflight', `${fmtNum(lf.hop_in_flight || 0)} (${fmtNum(lf.hop_waiting || 0)})`);
+            setText('leaf-direct-inflight', `${fmtNum(lf.direct_in_flight || 0)} (${fmtNum(lf.direct_waiting || 0)})`);
+            setText('leaf-latency', lf.latency_ms ? `${Math.round(lf.latency_ms)}ms` : '–');
+            setText('leaf-hop-accepted', fmtNum(lf.hop_accepted_total || 0));
+            setText('leaf-hop-rejected', fmtNum(lf.hop_rejected_total || 0));
+            setText('leaf-hop-replayed', fmtNum(lf.hop_replayed_total || 0));
+            setText('leaf-hop-mtls', fmtNum(lf.hop_mtls_rejected_total || 0));
+            setText('leaf-hop-backpressure', fmtNum(lf.hop_backpressure_total || 0));
+
+            const silEl = byId('tier-leaf-silence');
+            if (lf.last_silence) {
+                const s = lf.last_silence;
+                const active = !s.recovered;
+                silEl.className = 'alert mb-3 ' + (active ? 'alert-danger' : 'alert-warning');
+                silEl.textContent = (active ? 'Application silent: ' : 'Previous application silence (recovered): ') +
+                    `${s.reason || 'upstream failing'} · ${s.hop_in_flight || 0} hop + ${s.direct_in_flight || 0} direct of ${s.host_cap || 0} host slots (${fmtTime(s.at)}).`;
+            } else {
+                silEl.className = 'alert alert-danger d-none mb-3';
+                silEl.textContent = '';
+            }
+
+            if (lf.bench) {
+                setText('leaf-bench-summary', `Last benchmark (${fmtTime(lf.bench.at)}): ${lf.bench.lemmings} lemmings · p95 ${Math.round(lf.bench.p95_ms || 0)}ms · ${lf.bench.pages_covered} pages`);
+            } else {
+                setText('leaf-bench-summary', 'No benchmark recorded yet.');
+            }
+
+            const sharesEl = byId('leaf-edge-shares');
+            sharesEl.replaceChildren();
+            const entries = Object.entries(lf.edge_shares || {}).sort((a, b) => a[0].localeCompare(b[0]));
+            if (entries.length === 0) {
+                sharesEl.append(node('li', 'list-group-item px-0 py-1 text-body-secondary', 'No active edges polling.'));
+            } else {
+                for (const [edgeId, slots] of entries) {
+                    const li = node('li', 'list-group-item d-flex justify-content-between px-0 py-1');
+                    li.append(node('span', 'font-monospace', edgeId), node('span', 'fw-semibold', `${fmtNum(slots)} slots`));
+                    sharesEl.append(li);
+                }
+            }
+        }
+    }
+
+    async function runRebench(leaf, force) {
+        const body = leaf ? { leaf, force: Boolean(force) } : { force: Boolean(force) };
+        const res = await api('POST', '/api/topology/rebench', body);
+        toast(`Re-benchmark complete on ${res.node}: host cap ${res.previous_cap} → ${res.new_cap} (${res.lemmings} lemmings, p95 ${Math.round(res.p95_ms || 0)}ms).`);
+        refreshOverview();
+    }
+
+    if (byId('tier-leaf-rebench-btn')) {
+        byId('tier-leaf-rebench-btn').addEventListener('click', async () => {
+            if (!window.confirm('Drain this leaf and run a live lemmings benchmark against its upstream?')) return;
+            const btn = byId('tier-leaf-rebench-btn');
+            btn.disabled = true;
+            try {
+                await runRebench('', false);
+            } catch (err) {
+                toast(err.message, 'danger');
+            } finally {
+                btn.disabled = false;
+            }
+        });
+    }
+
+    if (byId('tier-edge-leaves')) {
+        byId('tier-edge-leaves').addEventListener('click', async (ev) => {
+            const btn = ev.target.closest('button[data-action="rebench-leaf"]');
+            if (!btn) return;
+            const leaf = btn.dataset.leaf;
+            btn.disabled = true;
+            try {
+                await runRebench(leaf, false);
+            } catch (err) {
+                if (String(err.message || '').includes('last usable leaf')) {
+                    if (window.confirm(`${err.message}\n\nDrain ${leaf} anyway (this will briefly pause site traffic)?`)) {
+                        try {
+                            await runRebench(leaf, true);
+                            return;
+                        } catch (err2) {
+                            toast(err2.message, 'danger');
+                            return;
+                        }
+                    }
+                }
+                toast(err.message, 'danger');
+            } finally {
+                btn.disabled = false;
+            }
+        });
     }
 
     // ── Ban modal ──────────────────────────────────────────────────────────
@@ -1451,6 +1643,468 @@
         }
     });
 
+    // ── Email delivery ─────────────────────────────────────────────────────
+    let emailState = null;
+
+    function selectOrCustom(selectEl, customEl, val) {
+        const str = String(val);
+        const hasOption = [...selectEl.options].some((o) => o.value === str);
+        if (hasOption) {
+            selectEl.value = str;
+            customEl.classList.add('d-none');
+            customEl.value = str;
+        } else {
+            selectEl.value = 'custom';
+            customEl.classList.remove('d-none');
+            customEl.value = str;
+        }
+    }
+
+    function readSelectOrCustom(selectEl, customEl) {
+        return selectEl.value === 'custom' ? Number(customEl.value) : Number(selectEl.value);
+    }
+
+    function syncEmailProviderFields() {
+        const prov = byId('email-provider').value;
+        byId('email-smtp-fields').classList.toggle('d-none', prov !== 'smtp');
+        byId('email-resend-fields').classList.toggle('d-none', prov !== 'resend');
+        byId('email-sendpanda-fields').classList.toggle('d-none', prov !== 'sendpanda');
+    }
+
+    function updateCadencePreview() {
+        const maxEl = byId('email-cadence-max-select');
+        const maxCust = byId('email-cadence-max-custom');
+        const winEl = byId('email-cadence-window-select');
+        const winCust = byId('email-cadence-window-custom');
+        const unitEl = byId('email-cadence-unit');
+        const prev = byId('email-cadence-preview');
+        if (!maxEl || !prev) return;
+
+        maxCust.classList.toggle('d-none', maxEl.value !== 'custom');
+        winCust.classList.toggle('d-none', winEl.value !== 'custom');
+
+        const maxN = readSelectOrCustom(maxEl, maxCust);
+        const winV = readSelectOrCustom(winEl, winCust);
+        const unit = unitEl.value;
+        const mult = unit === 'days' ? 86400 : unit === 'hours' ? 3600 : 60;
+        const winSec = winV * mult;
+
+        prev.classList.remove('text-danger', 'text-body-secondary');
+        if (!Number.isInteger(maxN) || maxN < 1 || maxN > 1000) {
+            prev.classList.add('text-danger');
+            prev.textContent = 'Email count must be a whole number between 1 and 1000.';
+            return;
+        }
+        if (!Number.isInteger(winV) || winV < 1 || winSec < 900 || winSec > 30 * 86400) {
+            prev.classList.add('text-danger');
+            prev.textContent = 'Window must be between 15 minutes and 30 days.';
+            return;
+        }
+        const paceSec = Math.floor(winSec / maxN);
+        if (paceSec < 60) {
+            prev.classList.add('text-danger');
+            prev.textContent = `Schedule paces faster than 1 email/minute (${fmtSeconds(paceSec)}). Reduce count or lengthen window.`;
+            return;
+        }
+        const uLabel = winV === 1 ? unit.replace(/s$/, '') : unit;
+        prev.classList.add('text-body-secondary');
+        prev.textContent = `Enforced schedule: send ${plural(maxN, 'email')} every ${winV} ${uLabel} · paced 1 digest per ${fmtSeconds(paceSec)} · rolling cap ${maxN} per ${fmtSeconds(winSec)}.`;
+    }
+
+    function applySecretBadge(badgeId, clearId, source, canClear) {
+        const b = byId(badgeId);
+        const btn = byId(clearId);
+        if (!b) return;
+        b.className = 'badge border';
+        if (source === 'env') {
+            b.classList.add('text-bg-info');
+            b.textContent = 'env override';
+        } else if (source === 'encrypted_file') {
+            b.classList.add('text-bg-success');
+            b.textContent = 'encrypted file';
+        } else {
+            b.classList.add('text-bg-light');
+            b.textContent = 'not set';
+        }
+        if (btn) btn.classList.toggle('d-none', !(source === 'encrypted_file' && canClear));
+    }
+
+    function renderEmailStatus(d) {
+        emailState = d;
+        const st = d.status || {};
+        const sec = st.secrets || {};
+        const ro = Boolean(d.read_only_settings);
+
+        byId('email-readonly-alert').classList.toggle('d-none', !ro);
+        byId('email-paused-alert').classList.toggle('d-none', !st.paused);
+
+        const noteEl = byId('email-secret-note');
+        if (sec.load_error) {
+            noteEl.textContent = 'Secret vault warning: ' + sec.load_error;
+            noteEl.className = 'alert alert-danger';
+        } else if (!sec.can_persist && sec.persist_note) {
+            noteEl.textContent = sec.persist_note;
+            noteEl.className = 'alert alert-info';
+        } else {
+            noteEl.className = 'alert alert-info d-none';
+            noteEl.textContent = '';
+        }
+
+        const badge = byId('email-provider-badge');
+        badge.className = 'badge';
+        if (!st.enabled) {
+            badge.classList.add('text-bg-secondary');
+            badge.textContent = 'Disabled';
+        } else if (st.paused) {
+            badge.classList.add('text-bg-warning');
+            badge.textContent = String(st.provider || '').toUpperCase() + ' · Paused';
+        } else {
+            badge.classList.add('text-bg-success');
+            badge.textContent = String(st.provider || '').toUpperCase() + ' · Active';
+        }
+
+        const canClear = !ro && Boolean(sec.can_persist);
+        applySecretBadge('email-badge-smtp-pass', 'email-clear-smtp-pass', sec.smtp_pass, canClear);
+        applySecretBadge('email-badge-resend-key', 'email-clear-resend-key', sec.resend_api_key, canClear);
+        applySecretBadge('email-badge-sendpanda-key', 'email-clear-sendpanda-key', sec.sendpanda_api_key, canClear);
+
+        const maxE = (st.cadence && st.cadence.max_emails) || 1;
+        const sentInWin = st.sent_in_window || 0;
+        setText('email-budget-text', `${sentInWin} / ${maxE} sent (${st.cadence_text || ''})`);
+        setBar('email-budget-bar', sentInWin, maxE);
+
+        if (!st.enabled) {
+            setText('email-next-send', 'disabled');
+        } else if (st.paused) {
+            setText('email-next-send', 'paused');
+        } else if (st.backoff_until) {
+            setText('email-next-send', 'backoff until ' + fmtTime(st.backoff_until));
+        } else if (st.next_eligible_at) {
+            setText('email-next-send', fmtTime(st.next_eligible_at));
+        } else {
+            setText('email-next-send', st.queued_total > 0 ? 'due on next tick' : 'ready (queue empty)');
+        }
+
+        const qText = st.overflow_count > 0
+            ? `${fmtNum(st.queued_total)} total (${fmtNum(st.queued_unique)} unique + ${fmtNum(st.overflow_count)} overflow)`
+            : `${fmtNum(st.queued_total)} total (${fmtNum(st.queued_unique)} unique)`;
+        setText('email-queued-summary', qText);
+        setText('email-totals', `${fmtNum(st.sent_total || 0)} / ${fmtNum(st.error_total || 0)}`);
+        setText('email-queue-count', fmtNum(st.queued_total || 0));
+
+        const ld = st.last_delivery;
+        if (!ld) {
+            setText('email-last-delivery', 'none yet');
+        } else if (ld.error) {
+            setText('email-last-delivery', `${fmtTime(ld.at)} · error: ${ld.error}`);
+        } else {
+            setText('email-last-delivery', `${fmtTime(ld.at)} · ${ld.event_count} event(s) to ${ld.recipients} recipient(s)`);
+        }
+
+        const pauseBtn = byId('email-pause-btn');
+        pauseBtn.replaceChildren(
+            node('i', st.paused ? 'bi bi-play-fill' : 'bi bi-pause-fill'),
+            document.createTextNode(st.paused ? ' Resume' : ' Pause')
+        );
+        pauseBtn.classList.toggle('btn-outline-success', Boolean(st.paused));
+        pauseBtn.classList.toggle('btn-outline-warning', !st.paused);
+
+        // Unsubscribed recipients
+        const unsubWrap = byId('email-unsubscribed-wrap');
+        const unsubList = byId('email-unsubscribed-list');
+        const unsubEntries = Object.entries(st.unsubscribed || {});
+        unsubList.replaceChildren();
+        unsubWrap.classList.toggle('d-none', unsubEntries.length === 0);
+        for (const [rcpt, since] of unsubEntries) {
+            const li = node('li', 'list-group-item d-flex align-items-center justify-content-between px-0 py-1');
+            const left = node('div');
+            left.append(node('span', 'font-monospace', rcpt), node('span', 'text-body-secondary ms-2', 'since ' + fmtTime(since)));
+            const btn = node('button', 'btn btn-sm btn-outline-success', 'Re-enable');
+            btn.type = 'button';
+            btn.dataset.action = 'resubscribe';
+            btn.dataset.recipient = rcpt;
+            li.append(left, btn);
+            unsubList.append(li);
+        }
+
+        // Pending events table
+        const tbody = byId('email-queue-rows');
+        tbody.replaceChildren();
+        const pending = st.pending || [];
+        if (pending.length === 0) {
+            tbody.append(emptyRowEl(3, st.enabled ? 'No pending events queued.' : 'Select a provider and save to begin queuing runtime events.'));
+        } else {
+            for (const ev of pending) {
+                const tr = node('tr');
+                const tdSev = node('td');
+                const sevCls = ev.severity === 'critical' ? 'text-bg-danger' : ev.severity === 'warn' ? 'text-bg-warning' : 'text-bg-info';
+                tdSev.append(
+                    node('span', 'badge ' + sevCls + ' text-uppercase me-1', ev.severity || 'info'),
+                    node('span', 'badge text-bg-light border text-uppercase', ev.category || '')
+                );
+                const tdInfo = node('td');
+                tdInfo.append(
+                    node('div', 'fw-semibold small', ev.title || ''),
+                    node('div', 'small text-body-secondary', ev.summary || ''),
+                    node('div', 'small text-body-secondary', 'Last seen: ' + fmtTime(ev.last_at))
+                );
+                const tdCnt = node('td', 'text-end fw-semibold', '×' + fmtNum(ev.count || 1));
+                tr.append(tdSev, tdInfo, tdCnt);
+                tbody.append(tr);
+            }
+        }
+    }
+
+    function populateEmailForm(d) {
+        const c = d.config || {};
+        byId('email-provider').value = c.provider || '';
+        byId('email-smtp-host').value = c.smtp_host || '';
+        byId('email-smtp-port').value = c.smtp_port || 587;
+        byId('email-smtp-tls').value = c.smtp_tls || 'starttls';
+        byId('email-smtp-user').value = c.smtp_user || '';
+        byId('email-smtp-pass').value = '';
+        byId('email-resend-key').value = '';
+        byId('email-resend-url').value = c.resend_base_url || '';
+        byId('email-sendpanda-key').value = '';
+        byId('email-sendpanda-url').value = c.sendpanda_base_url || '';
+        byId('email-from-name').value = c.from_name || 'Concert';
+        byId('email-from-addr').value = c.from_addr || '';
+        byId('email-to').value = c.to_addrs || '';
+        byId('email-dkim-selector').value = c.dkim_selector || '';
+
+        selectOrCustom(byId('email-cadence-max-select'), byId('email-cadence-max-custom'), c.cadence_max || 1);
+        selectOrCustom(byId('email-cadence-window-select'), byId('email-cadence-window-custom'), c.cadence_window || 15);
+        byId('email-cadence-unit').value = c.cadence_unit || 'minutes';
+
+        const cats = c.categories || {};
+        document.querySelectorAll('#email-categories input[data-cat]').forEach((cb) => {
+            cb.checked = Boolean(cats[cb.dataset.cat]);
+        });
+
+        byId('email-org-name').value = c.org_name || '';
+        byId('email-postal-address').value = c.postal_address || '';
+        byId('email-portal-url').value = c.portal_url || '';
+        byId('email-public-base-url').value = c.public_base_url || '';
+        byId('email-privacy-url').value = c.privacy_url || '';
+        byId('email-terms-url').value = c.terms_url || '';
+
+        const ro = Boolean(d.read_only_settings);
+        byId('email-save').disabled = ro;
+        syncEmailProviderFields();
+        updateCadencePreview();
+        renderEmailStatus(d);
+    }
+
+    async function loadEmail(includeForm) {
+        try {
+            const d = await api('GET', '/api/email');
+            if (includeForm) {
+                populateEmailForm(d);
+            } else {
+                renderEmailStatus(d);
+            }
+        } catch (err) {
+            toast('Could not load email settings: ' + err.message, 'danger');
+        }
+    }
+
+    if (byId('email-form')) {
+        byId('email-provider').addEventListener('change', syncEmailProviderFields);
+        byId('email-smtp-tls').addEventListener('change', (ev) => {
+            const port = byId('email-smtp-port');
+            if (ev.target.value === 'tls' && port.value === '587') port.value = '465';
+            if (ev.target.value === 'starttls' && port.value === '465') port.value = '587';
+        });
+
+        ['email-cadence-max-select', 'email-cadence-max-custom', 'email-cadence-window-select', 'email-cadence-window-custom', 'email-cadence-unit']
+            .forEach((id) => {
+                byId(id).addEventListener('change', updateCadencePreview);
+                byId(id).addEventListener('input', updateCadencePreview);
+            });
+
+        byId('email-cadence-presets').addEventListener('click', (ev) => {
+            const btn = ev.target.closest('button[data-max]');
+            if (!btn) return;
+            selectOrCustom(byId('email-cadence-max-select'), byId('email-cadence-max-custom'), Number(btn.dataset.max));
+            selectOrCustom(byId('email-cadence-window-select'), byId('email-cadence-window-custom'), Number(btn.dataset.win));
+            byId('email-cadence-unit').value = btn.dataset.unit;
+            updateCadencePreview();
+        });
+
+        byId('email-reload').addEventListener('click', () => loadEmail(true));
+        byId('email-refresh-btn').addEventListener('click', () => loadEmail(false));
+
+        [
+            ['email-clear-smtp-pass', 'smtp_pass', 'SMTP password'],
+            ['email-clear-resend-key', 'resend_api_key', 'Resend API key'],
+            ['email-clear-sendpanda-key', 'sendpanda_api_key', 'SendPanda API key'],
+        ].forEach(([btnId, field, label]) => {
+            byId(btnId).addEventListener('click', async () => {
+                if (!window.confirm(`Remove the stored ${label} from email-secrets.json?`)) return;
+                try {
+                    const d = await api('DELETE', '/api/email/secrets?field=' + encodeURIComponent(field));
+                    renderEmailStatus(d);
+                    toast(`${label} removed from encrypted vault.`);
+                } catch (err) {
+                    toast(err.message, 'danger');
+                }
+            });
+        });
+
+        byId('email-form').addEventListener('submit', async (ev) => {
+            ev.preventDefault();
+            const cats = {};
+            document.querySelectorAll('#email-categories input[data-cat]').forEach((cb) => {
+                cats[cb.dataset.cat] = cb.checked;
+            });
+            const body = {
+                provider: byId('email-provider').value,
+                smtp_host: byId('email-smtp-host').value.trim(),
+                smtp_port: Number(byId('email-smtp-port').value) || 587,
+                smtp_tls: byId('email-smtp-tls').value,
+                smtp_user: byId('email-smtp-user').value.trim(),
+                resend_base_url: byId('email-resend-url').value.trim(),
+                sendpanda_base_url: byId('email-sendpanda-url').value.trim(),
+                from_name: byId('email-from-name').value.trim(),
+                from_addr: byId('email-from-addr').value.trim(),
+                to_addrs: byId('email-to').value.trim(),
+                dkim_selector: byId('email-dkim-selector').value.trim(),
+                cadence_max: readSelectOrCustom(byId('email-cadence-max-select'), byId('email-cadence-max-custom')),
+                cadence_window: readSelectOrCustom(byId('email-cadence-window-select'), byId('email-cadence-window-custom')),
+                cadence_unit: byId('email-cadence-unit').value,
+                categories: cats,
+                org_name: byId('email-org-name').value.trim(),
+                postal_address: byId('email-postal-address').value.trim(),
+                portal_url: byId('email-portal-url').value.trim(),
+                public_base_url: byId('email-public-base-url').value.trim(),
+                privacy_url: byId('email-privacy-url').value.trim(),
+                terms_url: byId('email-terms-url').value.trim(),
+            };
+            const secrets = {};
+            const smtpPass = byId('email-smtp-pass').value;
+            const resendKey = byId('email-resend-key').value.trim();
+            const spKey = byId('email-sendpanda-key').value.trim();
+            if (smtpPass) secrets.smtp_pass = smtpPass;
+            if (resendKey) secrets.resend_api_key = resendKey;
+            if (spKey) secrets.sendpanda_api_key = spKey;
+            if (Object.keys(secrets).length > 0) body.secrets = secrets;
+
+            const btn = byId('email-save');
+            btn.disabled = true;
+            setText('email-save-status', 'Saving…');
+            try {
+                const d = await api('POST', '/api/email/config', body);
+                populateEmailForm(d);
+                setText('email-save-status', 'Saved at ' + new Date().toLocaleTimeString());
+                toast('Email delivery settings saved and applied.');
+                refreshOverview();
+            } catch (err) {
+                setText('email-save-status', '');
+                toast(err.message, 'danger');
+            } finally {
+                btn.disabled = Boolean(emailState && emailState.read_only_settings);
+            }
+        });
+
+        byId('email-verify-btn').addEventListener('click', async () => {
+            const btn = byId('email-verify-btn');
+            const summaryEl = byId('email-verify-summary');
+            const wrapEl = byId('email-verify-wrap');
+            const tbody = byId('email-verify-rows');
+            btn.disabled = true;
+            summaryEl.className = 'alert alert-info py-2 small';
+            summaryEl.textContent = 'Checking MX, SPF, DMARC, DKIM, and live provider connection…';
+            try {
+                const rep = await api('POST', '/api/email/verify', {});
+                summaryEl.className = 'alert py-2 small ' + (rep.ok ? 'alert-success' : 'alert-danger');
+                summaryEl.textContent = rep.ok
+                    ? `All required DNS & ${String(rep.provider || '').toUpperCase()} connectivity checks passed (${fmtTime(rep.checked_at)}).`
+                    : `One or more DNS or connectivity checks failed (${fmtTime(rep.checked_at)}). Review details below.`;
+                tbody.replaceChildren();
+                for (const chk of (rep.checks || [])) {
+                    const tr = node('tr');
+                    const tdName = node('td');
+                    tdName.append(node('div', 'fw-semibold small', chk.name));
+                    if (chk.target) tdName.append(node('div', 'small font-monospace text-body-secondary text-break', chk.target));
+                    const tdSt = node('td');
+                    const cls = chk.status === 'pass' ? 'text-bg-success' : chk.status === 'warn' ? 'text-bg-warning' : 'text-bg-danger';
+                    tdSt.append(node('span', 'badge ' + cls + ' text-uppercase', chk.status));
+                    const tdRes = node('td');
+                    tdRes.append(node('div', 'small', chk.summary || ''));
+                    if (chk.detail) tdRes.append(node('div', 'small font-monospace text-body-secondary text-break', chk.detail));
+                    tr.append(tdName, tdSt, tdRes);
+                    tbody.append(tr);
+                }
+                wrapEl.classList.remove('d-none');
+            } catch (err) {
+                summaryEl.className = 'alert alert-danger py-2 small';
+                summaryEl.textContent = err.message;
+            } finally {
+                btn.disabled = false;
+            }
+        });
+
+        byId('email-test-btn').addEventListener('click', async () => {
+            const btn = byId('email-test-btn');
+            const resEl = byId('email-test-result');
+            const to = byId('email-test-to').value.trim();
+            btn.disabled = true;
+            resEl.className = 'small text-body-secondary mt-2';
+            resEl.textContent = 'Sending test email…';
+            try {
+                const res = await api('POST', '/api/email/test', { to });
+                resEl.className = 'small text-success mt-2';
+                resEl.textContent = `Test email accepted by ${res.provider}` + (res.message_id ? ` (id: ${res.message_id})` : '') + '.';
+                toast('Test email sent successfully.');
+            } catch (err) {
+                resEl.className = 'small text-danger mt-2';
+                resEl.textContent = 'Test email failed: ' + err.message;
+                toast(err.message, 'danger');
+            } finally {
+                btn.disabled = false;
+            }
+        });
+
+        byId('email-pause-btn').addEventListener('click', async () => {
+            const pausedNow = Boolean(emailState && emailState.status && emailState.status.paused);
+            try {
+                const d = await api('POST', '/api/email/pause', { paused: !pausedNow });
+                renderEmailStatus(d);
+                toast(!pausedNow ? 'Scheduled email digests paused.' : 'Scheduled email digests resumed.');
+                refreshOverview();
+            } catch (err) {
+                toast(err.message, 'danger');
+            }
+        });
+
+        byId('email-unsubscribed-list').addEventListener('click', async (ev) => {
+            const btn = ev.target.closest('button[data-action="resubscribe"]');
+            if (!btn) return;
+            try {
+                const d = await api('POST', '/api/email/pause', { recipient: btn.dataset.recipient, paused: false });
+                renderEmailStatus(d);
+                toast(`Re-enabled alerts for ${btn.dataset.recipient}.`);
+            } catch (err) {
+                toast(err.message, 'danger');
+            }
+        });
+
+        byId('email-flush-btn').addEventListener('click', async () => {
+            const btn = byId('email-flush-btn');
+            btn.disabled = true;
+            try {
+                const res = await api('POST', '/api/email/flush', { bypass_cadence: true });
+                if (res.email) renderEmailStatus(res.email);
+                toast(`Dispatched ${res.delivery.event_count} queued event(s) to ${res.delivery.recipients} recipient(s).`);
+                refreshOverview();
+            } catch (err) {
+                toast(err.message, 'danger');
+            } finally {
+                btn.disabled = false;
+            }
+        });
+    }
+
     // ── Polling ────────────────────────────────────────────────────────────
     // Only the visible tab's table updates, every 3 seconds; relative times
     // in the visible tab tick every second without a request.
@@ -1468,6 +2122,7 @@
             const id = ev.target.getAttribute('data-bs-target').slice(1);
             const t = tables[id];
             if (t) { t.loaded = false; t.refresh(); }
+            if (id === 'tab-email') loadEmail(true);
             if (id === 'tab-settings') loadSettings().then(scheduleSpy);
         });
     });
@@ -1475,7 +2130,9 @@
     setInterval(() => {
         if (document.hidden || portalMoved) return;
         refreshOverview();
-        const t = activeTable();
+        const tab = activeTab();
+        if (tab === 'tab-email') loadEmail(false);
+        const t = tables[tab];
         if (t) t.poll();
     }, 3000);
 

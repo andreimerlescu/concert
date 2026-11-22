@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/netip"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,6 +20,7 @@ import (
 
 	"github.com/andreimerlescu/concert/internal/capacity"
 	"github.com/andreimerlescu/concert/internal/hop"
+	"github.com/andreimerlescu/concert/internal/mailer"
 	"github.com/gin-gonic/gin"
 )
 
@@ -94,8 +98,8 @@ func (t *topology) kickEdge() {
 
 // edgeCap is the room capacity commit should apply: the planned capacity on
 // an edge sizing itself from its leaves (1 before any leaf has reported),
-// otherwise -cap. Never below what the room has in flight; see
-// capacity.SafeShrink.
+// otherwise -cap. room v1.6.0 / sema v1.2.0 preserve in-flight occupancy on
+// shrink and grant no new slots until occupancy falls below the new cap.
 func (a *app) edgeCap(cfg config) int32 {
 	if !a.topo.isEdge() || !cfg.hopAutoCap {
 		return int32(cfg.capacity)
@@ -107,11 +111,7 @@ func (a *app) edgeCap(cfg config) int32 {
 	if n > cfg.capacity {
 		n = cfg.capacity
 	}
-	occupied := 0
-	if a.room != nil {
-		occupied = a.room.Len()
-	}
-	return int32(capacity.SafeShrink(n, occupied))
+	return int32(n)
 }
 
 // edgeReady reports whether an auto-sizing edge has heard from at least one
@@ -208,18 +208,40 @@ func (a *app) edgeRound(ctx context.Context) capacity.Plan {
 			}
 			if err != nil {
 				e.pollErrors.Add(1)
-				if l.err != err.Error() {
+				prevErr := l.err
+				if prevErr != err.Error() {
 					log.Printf("edge: leaf %s: %v", l.url.Redacted(), err)
 				}
 				l.err = err.Error()
 				e.mu.Unlock()
+				if prevErr == "" {
+					a.notifyEvent(mailer.Event{
+						Category:    mailer.CatCapacity,
+						Severity:    mailer.SevWarn,
+						Title:       "Leaf node unreachable",
+						Summary:     fmt.Sprintf("Edge %s failed to poll leaf %s: %v", a.topo.node, l.url.Redacted(), err),
+						Fingerprint: "leaf-down:" + l.url.Redacted(),
+						Details:     map[string]string{"leaf": l.url.Redacted(), "error": err.Error()},
+					})
+				}
 				return
 			}
-			if l.err != "" || l.at.IsZero() {
+			prevErr := l.err
+			if prevErr != "" || l.at.IsZero() {
 				log.Printf("edge: leaf %s (%s) reachable, host capacity %d (%s)", l.url.Redacted(), st.Node, st.HostCap, st.CapSource)
 			}
 			l.state, l.at, l.err = st, asked, ""
 			e.mu.Unlock()
+			if prevErr != "" {
+				a.notifyEvent(mailer.Event{
+					Category:    mailer.CatCapacity,
+					Severity:    mailer.SevInfo,
+					Title:       "Leaf node recovered",
+					Summary:     fmt.Sprintf("Leaf %s (%s) is reachable again with host capacity %d (%s).", l.url.Redacted(), st.Node, st.HostCap, st.CapSource),
+					Fingerprint: "leaf-up:" + l.url.Redacted(),
+					Details:     map[string]string{"leaf": l.url.Redacted(), "node": st.Node, "host_cap": fmt.Sprintf("%d", st.HostCap)},
+				})
+			}
 			if st.BanVersions[a.topo.node] != snap.Version {
 				e.pushes.Add(1)
 				if err := a.pushBans(ctx, client, l.url, snap); err != nil {
@@ -234,14 +256,14 @@ func (a *app) edgeRound(ctx context.Context) capacity.Plan {
 	now := time.Now()
 	e.mu.Lock()
 	reports := make([]capacity.Report, 0, len(e.leaves))
-	shares := map[string]int{}
+	shares := map[string]int64{}
 	for k, l := range e.leaves {
 		r := capacity.Report{Leaf: k, Share: l.state.Share(), Usable: l.state.Usable(), At: l.at}
 		reports = append(reports, r)
 		if r.Usable && !l.at.IsZero() && now.Sub(l.at) <= e.planner.Expire {
-			shares[hostKey(l.url)] = r.Share
+			shares[hostKey(l.url)] = int64(r.Share)
 		} else {
-			shares[hostKey(l.url)] = 0
+			shares[hostKey(l.url)] = leafUnusable
 		}
 	}
 	e.mu.Unlock()
@@ -251,19 +273,43 @@ func (a *app) edgeRound(ctx context.Context) capacity.Plan {
 	e.lastPlan.Store(&plan)
 	if plan.Leaves > 0 && !e.everUsable.Swap(true) {
 		log.Printf("edge: %d leaf(s) usable, %d page slot(s); admitting up to %d", plan.Leaves, plan.Total, plan.Cap)
+	} else if plan.Leaves == 0 && e.everUsable.Load() {
+		a.notifyEvent(mailer.Event{
+			Category:    mailer.CatCapacity,
+			Severity:    mailer.SevCritical,
+			Title:       "All leaf nodes unavailable",
+			Summary:     fmt.Sprintf("Edge %s has 0 usable leaves remaining across %d configured target(s).", a.topo.node, len(urls)),
+			Fingerprint: "edge:no-leaves",
+			Details:     map[string]string{"edge": a.topo.node, "configured_leaves": fmt.Sprintf("%d", len(urls))},
+		})
 	}
 	if cfg.hopAutoCap {
 		target := a.edgeCap(cfg)
 		if cur := a.room.Cap(); target != cur {
 			if err := a.room.SetCap(target); err == nil && (target < cur/2 || target > cur*2 || target == 1) {
 				log.Printf("edge: room capacity %d -> %d (leaves offer %d, lane %d)", cur, target, plan.Total, cfg.effectivePriorityCap())
+				if target < cur/2 || (target == 1 && cur > 1) {
+					a.notifyEvent(mailer.Event{
+						Category:    mailer.CatCapacity,
+						Severity:    mailer.SevWarn,
+						Title:       "Edge room capacity reduced",
+						Summary:     fmt.Sprintf("Edge %s reduced waiting room capacity from %d to %d (%d usable leaves offering %d slots).", a.topo.node, cur, target, plan.Leaves, plan.Total),
+						Fingerprint: "edge:cap-drop",
+						Details: map[string]string{
+							"previous_cap": fmt.Sprintf("%d", cur),
+							"new_cap":      fmt.Sprintf("%d", target),
+							"leaves":       fmt.Sprintf("%d", plan.Leaves),
+							"leaf_slots":   fmt.Sprintf("%d", plan.Total),
+						},
+					})
+				}
 			}
 		}
 	}
 	// Leaves the edge balances across itself get slot-aware routing.
 	if g.upstreams != nil {
 		for _, b := range g.upstreams.backends {
-			b.slots.Store(int64(shares[hostKey(b.target)]))
+			b.slots.Store(shares[hostKey(b.target)])
 		}
 	}
 	return plan
@@ -275,9 +321,13 @@ func hostKey(u *url.URL) string {
 }
 
 // controlRequest signs a ctl claim for method on base+path with body.
+// path may include a query string (e.g. "/_room/hop/state?demand=12"), which
+// is bound into the HMAC via RequestURI.
 func (a *app) controlRequest(ctx context.Context, method string, base *url.URL, path string, body []byte) (*http.Request, error) {
 	u := *base
-	u.Path = strings.TrimSuffix(u.Path, "/") + path
+	p, q, _ := strings.Cut(path, "?")
+	u.Path = strings.TrimSuffix(u.Path, "/") + p
+	u.RawQuery = q
 	req, err := http.NewRequestWithContext(ctx, method, u.String(), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -293,7 +343,15 @@ func (a *app) controlRequest(ctx context.Context, method string, base *url.URL, 
 
 func (a *app) fetchLeafState(ctx context.Context, client *http.Client, base *url.URL) (hop.LeafState, error) {
 	var st hop.LeafState
-	req, err := a.controlRequest(ctx, http.MethodGet, base, hop.StatePath, nil)
+	var demand int64
+	if a.room != nil {
+		demand = int64(a.room.Len()) + a.room.LiveQueueDepth()
+	}
+	path := hop.StatePath
+	if demand > 0 {
+		path = fmt.Sprintf("%s?demand=%d", hop.StatePath, demand)
+	}
+	req, err := a.controlRequest(ctx, http.MethodGet, base, path, nil)
 	if err != nil {
 		return st, err
 	}
@@ -369,8 +427,28 @@ func (a *app) edgeView() gin.H {
 	e.mu.Lock()
 	leaves := make([]gin.H, 0, len(e.leaves))
 	for _, l := range e.leaves {
-		h := gin.H{"url": l.url.Redacted(), "node": l.state.Node, "host_cap": l.state.HostCap,
-			"share": l.state.Share(), "usable": l.state.Usable(), "error": l.err}
+		h := gin.H{
+			"url":              l.url.Redacted(),
+			"node":             l.state.Node,
+			"host_cap":         l.state.HostCap,
+			"cap_source":       l.state.CapSource,
+			"share":            l.state.Share(),
+			"edges_seen":       l.state.EdgesSeen,
+			"hop_in_flight":    l.state.HopInFlight,
+			"direct_in_flight": l.state.DirectInFlight,
+			"latency_ms":       l.state.LatencyMs,
+			"app_healthy":      l.state.AppHealthy,
+			"draining":         l.state.Draining,
+			"rebenchmarking":   l.state.Rebenchmarking,
+			"usable":           l.state.Usable(),
+			"error":            l.err,
+		}
+		if l.state.Bench != nil {
+			h["bench"] = l.state.Bench
+		}
+		if l.state.Silence != nil {
+			h["last_silence"] = l.state.Silence
+		}
 		if !l.at.IsZero() {
 			h["seen"] = l.at.UTC().Format(time.RFC3339)
 		}
@@ -388,6 +466,7 @@ func (a *app) edgeView() gin.H {
 func registerHopControl(r *gin.Engine, g *generation) {
 	r.GET(hop.StatePath, g.hopState)
 	r.POST(hop.BansPath, g.hopBans)
+	r.POST(hop.RebenchPath, g.hopRebench)
 }
 
 // hopControlAuth verifies a control request's claim against its body.
@@ -403,9 +482,18 @@ func (g *generation) hopControlAuth(c *gin.Context, body []byte) (hop.Claim, boo
 		c.AbortWithStatus(http.StatusUnauthorized)
 		return hop.Claim{}, false
 	}
+	if g.cfg.hopRequireMTLS && (c.Request.TLS == nil || len(c.Request.TLS.VerifiedChains) == 0) {
+		t.leaf.rejected.Add(1)
+		t.leaf.mtlsRejected.Add(1)
+		c.AbortWithStatus(http.StatusUnauthorized)
+		return hop.Claim{}, false
+	}
 	claim, err := t.verifier.Verify(raw, c.Request.Method, c.Request.RequestURI, hop.BodyHash(body))
 	if err != nil || claim.Class != hop.ClassControl {
 		t.leaf.rejected.Add(1)
+		if errors.Is(err, hop.ErrReplay) {
+			t.leaf.replayed.Add(1)
+		}
 		c.AbortWithStatus(http.StatusUnauthorized)
 		return hop.Claim{}, false
 	}
@@ -414,29 +502,49 @@ func (g *generation) hopControlAuth(c *gin.Context, body []byte) (hop.Claim, boo
 }
 
 func (g *generation) hopState(c *gin.Context) {
-	if _, ok := g.hopControlAuth(c, nil); !ok {
+	claim, ok := g.hopControlAuth(c, nil)
+	if !ok {
 		return
 	}
+	now := time.Now()
+	var demand int64
+	if raw := c.Query("demand"); raw != "" {
+		if v, err := strconv.ParseInt(raw, 10, 64); err == nil && v > 0 {
+			demand = v
+		}
+	}
+	g.a.topo.leaf.sawEdgePoll(claim.Edge, demand, now)
 	c.Header("Cache-Control", "no-store")
-	c.JSON(http.StatusOK, g.a.leafReport(time.Now()))
+	c.JSON(http.StatusOK, g.a.leafReportFor(claim.Edge, now))
 }
 
 // leafReport is the leaf's hop.LeafState now.
 func (a *app) leafReport(now time.Time) hop.LeafState {
+	return a.leafReportFor("", now)
+}
+
+func (a *app) leafReportFor(edge string, now time.Time) hop.LeafState {
 	g := a.current()
 	l := a.topo.leaf
+	hostCap := l.gate.Cap()
+	edgesSeen, shares := l.edgeShares(hostCap, now)
 	st := hop.LeafState{
 		Node:           a.topo.node,
 		Version:        BinaryVersion(),
 		At:             now.UTC(),
-		HostCap:        l.gate.Cap(),
+		HostCap:        hostCap,
 		HopInFlight:    int64(l.gate.InUse(capacity.HopPriority) + l.gate.InUse(capacity.Hop)),
 		DirectInFlight: int64(l.gate.InUse(capacity.Direct)),
 		QueueDepth:     a.room.LiveQueueDepth(),
 		AppHealthy:     g.upstreams == nil || g.upstreams.healthyCount(now) > 0,
-		Draining:       a.draining.Load(),
-		EdgesSeen:      l.edgesSeen(now),
+		Draining:       a.draining.Load() || l.rebenchmarking.Load(),
+		Rebenchmarking: l.rebenchmarking.Load(),
+		EdgesSeen:      edgesSeen,
+		EdgeShares:     shares,
 		BanVersions:    l.bans.versions(),
+	}
+	if edge != "" && shares != nil {
+		st.YourShare = shares[edge]
 	}
 	l.capMu.Lock()
 	st.CapSource = l.capSource
@@ -470,11 +578,186 @@ func (g *generation) hopBans(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"version": snap.Version, "applied": applied, "lifted": lifted})
 }
 
+func (g *generation) hopRebench(c *gin.Context) {
+	body, err := io.ReadAll(io.LimitReader(c.Request.Body, 4096))
+	if err != nil {
+		c.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+	if _, ok := g.hopControlAuth(c, body); !ok {
+		return
+	}
+	var req struct {
+		DrainWaitSeconds int `json:"drain_wait_seconds"`
+	}
+	if len(body) > 0 {
+		_ = json.Unmarshal(body, &req)
+	}
+	drainWait := time.Duration(req.DrainWaitSeconds) * time.Second
+	res, status, err := g.a.rebenchLeaf(c.Request.Context(), drainWait)
+	if err != nil {
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, res)
+}
+
+// triggerLeafRebench sends a signed drained re-benchmark command from an edge
+// to one configured leaf (matched by URL or node ID). Unless force is true,
+// it refuses to drain the last currently usable leaf so live site capacity
+// cannot accidentally drop to zero.
+func (a *app) triggerLeafRebench(ctx context.Context, leafTarget string, force bool, drainWait time.Duration) (hop.RebenchResult, int, error) {
+	var res hop.RebenchResult
+	if !a.topo.isEdge() {
+		return res, http.StatusBadRequest, errors.New("edge leaf targeting requires -role edge")
+	}
+	leafTarget = strings.TrimSpace(leafTarget)
+	if leafTarget == "" {
+		return res, http.StatusBadRequest, errors.New("leaf URL or node ID is required on edge nodes")
+	}
+	e := a.topo.edge
+	var targetURL *url.URL
+	var targetUsable bool
+	usableCount := 0
+	e.mu.Lock()
+	for _, l := range e.leaves {
+		u := l.state.Usable() && l.err == "" && !l.at.IsZero()
+		if u {
+			usableCount++
+		}
+		if l.url.Redacted() == leafTarget || l.url.String() == leafTarget || (l.state.Node != "" && l.state.Node == leafTarget) {
+			cp := *l.url
+			targetURL = &cp
+			targetUsable = u
+		}
+	}
+	e.mu.Unlock()
+
+	if targetURL == nil {
+		return res, http.StatusNotFound, fmt.Errorf("leaf %q is not in this edge's configured leaves", leafTarget)
+	}
+	if targetUsable && usableCount <= 1 && !force {
+		return res, http.StatusConflict, errors.New("refusing to drain the last usable leaf; pass force=true to override")
+	}
+
+	g := a.current()
+	timeout := max(2*time.Minute, g.cfg.benchP95*20)
+	client := g.controlClient(timeout)
+	body, _ := json.Marshal(map[string]int{"drain_wait_seconds": int(drainWait.Seconds())})
+	req, err := a.controlRequest(ctx, http.MethodPost, targetURL, hop.RebenchPath, body)
+	if err != nil {
+		return res, http.StatusInternalServerError, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return res, http.StatusBadGateway, fmt.Errorf("contact leaf %s: %w", targetURL.Redacted(), err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxStateBody))
+	if resp.StatusCode != http.StatusOK {
+		var errObj struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(raw, &errObj) == nil && errObj.Error != "" {
+			return res, resp.StatusCode, errors.New(errObj.Error)
+		}
+		return res, resp.StatusCode, fmt.Errorf("leaf returned HTTP %d", resp.StatusCode)
+	}
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return res, http.StatusBadGateway, fmt.Errorf("decode re-benchmark result: %w", err)
+	}
+	// Immediately refresh leaf state so the edge absorbs the new host capacity.
+	pollCtx, cancel := context.WithTimeout(context.Background(), g.cfg.hopPoll)
+	a.edgeRound(pollCtx)
+	cancel()
+	return res, http.StatusOK, nil
+}
+
 // banMirror tracks, per edge, the bans a leaf applied because that edge
 // listed them, so it can lift exactly those when the edge stops listing them.
+//
+// With -data-dir the record is kept in hop-bans.json beside bans.json.
+// bans.json keeps the bans across a restart; without this record a
+// restarted leaf would hold the edge's bans as its own and never lift them.
+// The applied version is not kept, so an edge pushes its list again after a
+// leaf restarts.
 type banMirror struct {
 	mu      sync.Mutex
 	perEdge map[string]*edgeBans
+	path    string // hop-bans.json, or "" without -data-dir
+}
+
+// mirrorFileName is the leaf's record of mirrored bans in -data-dir.
+const (
+	mirrorFileName    = "hop-bans.json"
+	mirrorFileVersion = 1
+)
+
+type mirrorFile struct {
+	Version int                     `json:"version"`
+	Edges   map[string]mirrorRecord `json:"edges"`
+}
+
+type mirrorRecord struct {
+	At      time.Time        `json:"at"`
+	Applied map[string]int64 `json:"applied"` // ban target → until (unix nanos, banForever)
+}
+
+// load restores the record at m.path. A missing file is an empty record. An
+// unreadable or corrupt one is logged and ignored: the bans themselves are
+// in bans.json, and an empty record only means the leaf lifts nothing it
+// cannot prove an edge applied.
+func (m *banMirror) load() {
+	if m.path == "" {
+		return
+	}
+	data, err := os.ReadFile(m.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	var f mirrorFile
+	if err == nil {
+		err = json.Unmarshal(data, &f)
+	}
+	if err == nil && f.Version > mirrorFileVersion {
+		err = fmt.Errorf("written by a newer concert (version %d)", f.Version)
+	}
+	if err != nil {
+		log.Printf("leaf: ignoring %s: %v; bans mirrored before this start are kept as the leaf's own", m.path, err)
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for edge, r := range f.Edges {
+		if !hop.ValidNodeID(edge) {
+			continue
+		}
+		eb := &edgeBans{at: r.At, applied: map[string]int64{}}
+		for key, until := range r.Applied {
+			if t, err := parseBanTarget(key); err == nil && t.String() == key {
+				eb.applied[key] = until
+			}
+		}
+		m.perEdge[edge] = eb
+	}
+}
+
+// saveLocked writes the record. Called with m.mu held, after bans.json.
+func (m *banMirror) saveLocked() {
+	if m.path == "" {
+		return
+	}
+	f := mirrorFile{Version: mirrorFileVersion, Edges: make(map[string]mirrorRecord, len(m.perEdge))}
+	for edge, eb := range m.perEdge {
+		f.Edges[edge] = mirrorRecord{At: eb.at, Applied: eb.applied}
+	}
+	data, err := json.MarshalIndent(f, "", "  ")
+	if err == nil {
+		err = writeFileAtomic(m.path, append(data, '\n'))
+	}
+	if err != nil {
+		log.Printf("leaf: cannot save %s: %v", m.path, err)
+	}
 }
 
 type edgeBans struct {
@@ -586,6 +869,8 @@ func (a *app) mirrorBans(snap hop.BanSnapshot, now time.Time) (applied, lifted i
 		a.saveBansNow()
 		log.Printf("leaf: mirrored edge %s bans: %d applied, %d lifted (%d listed)", snap.Edge, applied, lifted, len(snap.Bans))
 	}
+	// Edges push only when a leaf's version differs, so this write is rare.
+	m.saveLocked()
 	return applied, lifted
 }
 
@@ -593,18 +878,29 @@ func (a *app) mirrorBans(snap hop.BanSnapshot, now time.Time) (applied, lifted i
 func (a *app) leafView(now time.Time) gin.H {
 	l := a.topo.leaf
 	st := a.leafReport(now)
-	return gin.H{
-		"host_cap":               st.HostCap,
-		"host_cap_source":        st.CapSource,
-		"hop_in_flight":          st.HopInFlight,
-		"direct_in_flight":       st.DirectInFlight,
-		"hop_waiting":            l.gate.Waiting(capacity.HopPriority) + l.gate.Waiting(capacity.Hop),
-		"direct_waiting":         l.gate.Waiting(capacity.Direct),
-		"hop_accepted_total":     l.accepted.Load(),
-		"hop_rejected_total":     l.rejected.Load(),
-		"hop_backpressure_total": l.backpressed.Load(),
-		"edges_seen":             st.EdgesSeen,
-		"app_healthy":            st.AppHealthy,
-		"last_silence":           st.Silence,
+	out := gin.H{
+		"host_cap":                st.HostCap,
+		"host_cap_source":         st.CapSource,
+		"hop_in_flight":           st.HopInFlight,
+		"direct_in_flight":        st.DirectInFlight,
+		"hop_waiting":             l.gate.Waiting(capacity.HopPriority) + l.gate.Waiting(capacity.Hop),
+		"direct_waiting":          l.gate.Waiting(capacity.Direct),
+		"hop_accepted_total":      l.accepted.Load(),
+		"hop_rejected_total":      l.rejected.Load(),
+		"hop_replayed_total":      l.replayed.Load(),
+		"hop_mtls_rejected_total": l.mtlsRejected.Load(),
+		"hop_backpressure_total":  l.backpressed.Load(),
+		"edges_seen":              st.EdgesSeen,
+		"edge_shares":             st.EdgeShares,
+		"app_healthy":             st.AppHealthy,
+		"draining":                st.Draining,
+		"rebenchmarking":          st.Rebenchmarking,
+		"rebench_total":           l.rebenchTotal.Load(),
+		"latency_ms":              st.LatencyMs,
+		"last_silence":            st.Silence,
 	}
+	if st.Bench != nil {
+		out["bench"] = st.Bench
+	}
+	return out
 }

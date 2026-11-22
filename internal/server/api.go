@@ -1,22 +1,20 @@
 package server
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
-	"net/http/httputil"
 	"net/netip"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/andreimerlescu/concert/internal/mailer"
 	"github.com/andreimerlescu/room"
 	"github.com/gin-gonic/gin"
 )
@@ -28,7 +26,7 @@ import (
 //
 // Keyed requests (agents; see agent.go) are not cookie clients: agentGate
 // shapes their responses, with no cookies, whatever -api-json says.
-func apiQueueResponses(retryAfter int) gin.HandlerFunc {
+func apiQueueResponses(a *app, retryAfter int) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c.FullPath() != "" || wantsHTML(c.Request) || c.GetString(ctxAgentKey) != "" {
 			c.Next()
@@ -36,6 +34,7 @@ func apiQueueResponses(retryAfter int) gin.HandlerFunc {
 		}
 		c.Writer = &apiQueueWriter{
 			ResponseWriter: c.Writer,
+			a:              a,
 			c:              c,
 			retryAfter:     retryAfter,
 		}
@@ -53,6 +52,7 @@ func wantsHTML(r *http.Request) bool {
 // streaming, flushing, and connection hijacking for upgrades.
 type apiQueueWriter struct {
 	gin.ResponseWriter
+	a          *app
 	c          *gin.Context
 	retryAfter int
 	decided    bool
@@ -139,6 +139,15 @@ func (w *apiQueueWriter) translate(code int) (int, []byte) {
 		})
 	case http.StatusServiceUnavailable:
 		// Breaker tripped or admission timed out.
+		if w.a != nil {
+			w.a.notifyEvent(mailer.Event{
+				Category:    mailer.CatQueue,
+				Severity:    mailer.SevCritical,
+				Title:       "Waiting room refused request (503)",
+				Summary:     "Waiting room queue-full breaker or admission timeout returned 503 Service Unavailable.",
+				Fingerprint: "queue:breaker-503",
+			})
+		}
 		return http.StatusServiceUnavailable, mustJSON(gin.H{
 			"queued":              false,
 			"error":               "waiting room is full",
@@ -155,78 +164,6 @@ func mustJSON(v any) []byte {
 		return []byte(`{"error":"internal"}`)
 	}
 	return b
-}
-
-// ─── reverse proxy ───────────────────────────────────────────────────────────
-
-// newProxy builds the reverse proxy to the origin. modify runs on every
-// origin response; concert uses it to turn Concert-Priority into a grant
-// (see priority.go).
-func newProxy(target *url.URL, preserveHost bool, headerTimeout time.Duration, trusted []netip.Prefix,
-	modify func(*http.Response) error) *httputil.ReverseProxy {
-	transport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout:   5 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          512,
-		MaxIdleConnsPerHost:   256,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: time.Second,
-		ResponseHeaderTimeout: headerTimeout,
-	}
-
-	return &httputil.ReverseProxy{
-		Transport: transport,
-		// -1 flushes immediately, which keeps SSE and chunked responses live.
-		FlushInterval: -1,
-		// Turns the origin's Concert-Priority header into a signed grant and
-		// keeps the header from reaching browsers.
-		ModifyResponse: modify,
-		Rewrite: func(pr *httputil.ProxyRequest) {
-			pr.SetURL(target)
-
-			// Rewrite strips inbound X-Forwarded-* before this runs. Restore
-			// the chain from trusted proxies so SetXForwarded appends to it;
-			// from anyone else it is client-controlled and discarded.
-			// SetXForwarded also sets X-Forwarded-Proto from the inbound
-			// connection, so an origin behind concert's own TLS sees https.
-			ra, ok := remoteAddr(pr.In)
-			fromTrusted := ok && containsAddr(trusted, ra)
-			if fromTrusted {
-				if v := pr.In.Header.Values("X-Forwarded-For"); len(v) > 0 {
-					pr.Out.Header["X-Forwarded-For"] = append([]string(nil), v...)
-				}
-			}
-			pr.SetXForwarded()
-			if fromTrusted {
-				if p := pr.In.Header.Get("X-Forwarded-Proto"); p != "" {
-					pr.Out.Header.Set("X-Forwarded-Proto", p)
-				}
-			}
-
-			if preserveHost {
-				pr.Out.Host = pr.In.Host
-				pr.Out.Header.Set("X-Forwarded-Host", pr.In.Host)
-			}
-			stripCookies(pr.Out, proxyCookies...)
-			for _, name := range []string{"PAYMENT-SIGNATURE", "PAYMENT-REQUIRED", "PAYMENT-RESPONSE", "Concert-Session", "X-Concert-CSRF"} {
-				pr.Out.Header.Del(name)
-			}
-		},
-		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
-			if errors.Is(err, context.Canceled) {
-				return // client hung up; nothing to report
-			}
-			log.Printf("upstream error %s %s: %v", req.Method, req.URL.Path, err)
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			w.WriteHeader(http.StatusBadGateway)
-			_, _ = w.Write([]byte("upstream unavailable\n"))
-		},
-	}
 }
 
 func stripCookies(req *http.Request, names ...string) {
@@ -256,6 +193,7 @@ func (p *portal) apiOverview(c *gin.Context) {
 	h := gin.H{
 		"cap":                          wr.Cap(),
 		"occupancy":                    wr.Len(),
+		"cap_draining":                 wr.Len() > int(wr.Cap()),
 		"queue_depth":                  wr.QueueDepth(),
 		"live_queue_depth":             wr.LiveQueueDepth(),
 		"max_queue_depth":              wr.MaxQueueDepth(),
@@ -273,6 +211,10 @@ func (p *portal) apiOverview(c *gin.Context) {
 		"asset_denied_total":           stats.assetDenied.Load(),
 		"asset_user_throttled_total":   stats.assetUserThrottled.Load(),
 		"asset_global_throttled_total": stats.assetGlobalThrottled.Load(),
+		"static_served_total":          stats.staticServed.Load(),
+		"static_not_found_total":       stats.staticNotFound.Load(),
+		"fcgi_requests_total":          stats.fcgiRequests.Load(),
+		"fcgi_denied_total":            stats.fcgiDenied.Load(),
 		"stream_cap":                   g.streams.sem.Cap(),
 		"stream_active":                g.streams.sem.Len(),
 		"stream_served_total":          stats.streamServed.Load(),
@@ -300,7 +242,147 @@ func (p *portal) apiOverview(c *gin.Context) {
 	for k, v := range g.agentView() {
 		h[k] = v
 	}
+	if a.mailer != nil {
+		st := a.mailer.Status()
+		h["email_enabled"] = st.Enabled
+		h["email_paused"] = st.Paused
+		h["email_queued"] = st.QueuedTotal
+		h["email_sent_total"] = st.SentTotal
+		h["email_errors_total"] = st.ErrorTotal
+	}
+	if a.topo != nil {
+		h["role"] = a.topo.role
+		h["node"] = a.topo.node
+		switch {
+		case a.topo.isEdge():
+			h["edge"] = a.edgeView()
+		case a.topo.isLeaf():
+			h["leaf"] = a.leafView(time.Now())
+		}
+	}
 	c.JSON(http.StatusOK, h)
+}
+
+func (p *portal) apiTopologyRebench(c *gin.Context) {
+	handleRebench(c, p.a, portalPrincipal(c), "portal")
+}
+
+func handleRebench(c *gin.Context, a *app, actor principal, source string) {
+	var body struct {
+		Leaf             string `json:"leaf"`
+		Force            bool   `json:"force"`
+		DrainWaitSeconds int    `json:"drain_wait_seconds"`
+	}
+	if c.Request.ContentLength != 0 {
+		if err := json.NewDecoder(io.LimitReader(c.Request.Body, 4096)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid JSON payload"})
+			return
+		}
+	}
+	drainWait := time.Duration(body.DrainWaitSeconds) * time.Second
+	var (
+		res    any
+		status int
+		err    error
+		target string
+	)
+	switch {
+	case a.topo.isLeaf():
+		target = a.topo.node
+		res, status, err = a.rebenchLeaf(c.Request.Context(), drainWait)
+	case a.topo.isEdge():
+		target = body.Leaf
+		res, status, err = a.triggerLeafRebench(c.Request.Context(), body.Leaf, body.Force, drainWait)
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "drained re-benchmarking is only available on edge or leaf nodes"})
+		return
+	}
+	if err != nil {
+		a.recordAudit(auditEvent{
+			Actor:    actor.Actor,
+			Role:     actor.Role.String(),
+			Source:   source,
+			Action:   "topology.rebench",
+			Target:   target,
+			Outcome:  "error",
+			ClientIP: actor.IP.String(),
+			Details:  map[string]any{"force": body.Force, "error": err.Error()},
+		})
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+	a.recordAudit(auditEvent{
+		Actor:    actor.Actor,
+		Role:     actor.Role.String(),
+		Source:   source,
+		Action:   "topology.rebench",
+		Target:   target,
+		Outcome:  "allow",
+		ClientIP: actor.IP.String(),
+		Details:  map[string]any{"force": body.Force},
+	})
+	c.JSON(http.StatusOK, res)
+}
+
+func (p *portal) apiFastlaneReconcile(c *gin.Context) {
+	handleFastlaneReconcile(c, p.a, portalPrincipal(c), "portal")
+}
+
+func handleFastlaneReconcile(c *gin.Context, a *app, actor principal, source string) {
+	if a.fastlane == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "fast lane is not enabled"})
+		return
+	}
+	var body struct {
+		Fingerprint string `json:"fingerprint"`
+		StellarHash string `json:"stellar_hash"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	fp := strings.ToLower(strings.TrimSpace(body.Fingerprint))
+	if fp == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "fingerprint is required"})
+		return
+	}
+	res, err := a.fastlane.ReconcileOnline(c.Request.Context(), fp, body.StellarHash)
+	if err != nil {
+		a.recordAudit(auditEvent{
+			Actor:    actor.Actor,
+			Role:     actor.Role.String(),
+			Source:   source,
+			Action:   "fastlane.reconcile",
+			Target:   fp,
+			Outcome:  "error",
+			ClientIP: actor.IP.String(),
+			Details:  map[string]any{"error": err.Error()},
+		})
+		status := http.StatusConflict
+		msg := err.Error()
+		if strings.Contains(msg, "invalid payment fingerprint") || strings.Contains(msg, "stellar reconciliation requires") {
+			status = http.StatusBadRequest
+		} else if strings.Contains(msg, "receipt not found") {
+			status = http.StatusNotFound
+		}
+		c.JSON(status, gin.H{"error": msg})
+		return
+	}
+	a.recordAudit(auditEvent{
+		Actor:    actor.Actor,
+		Role:     actor.Role.String(),
+		Source:   source,
+		Action:   "fastlane.reconcile",
+		Target:   fp,
+		Outcome:  "allow",
+		ClientIP: actor.IP.String(),
+		Details:  map[string]any{"network": res.Network, "transaction": res.Transaction, "payer": res.Payer},
+	})
+	c.JSON(http.StatusOK, gin.H{
+		"reconciled": true,
+		"settlement": res,
+		"fastlane":   a.fastlane.Summary(),
+	})
 }
 
 // ─── API: queue ──────────────────────────────────────────────────────────────
@@ -723,6 +805,14 @@ func (p *portal) apiSettingsSave(c *gin.Context) {
 		ClientIP: pr.IP.String(),
 		Details:  map[string]any{"keys": sortedKeys(set)},
 	})
+	p.a.notifyEvent(mailer.Event{
+		Category:    mailer.CatSecurity,
+		Severity:    mailer.SevInfo,
+		Title:       "Portal settings modified",
+		Summary:     fmt.Sprintf("Administrator %s updated settings: %s", pr.Actor, strings.Join(sortedKeys(set), ", ")),
+		Fingerprint: "security:settings:" + pr.Actor,
+		Details:     map[string]string{"actor": pr.Actor, "keys": strings.Join(sortedKeys(set), ", ")},
+	})
 	log.Printf("portal: %s changed settings: %s", portalActor(c), strings.Join(sortedKeys(set), ", "))
 	c.JSON(http.StatusOK, p.settingsView())
 }
@@ -758,6 +848,14 @@ func (p *portal) apiSettingsReset(c *gin.Context) {
 		Outcome:  "allow",
 		ClientIP: pr.IP.String(),
 		Details:  map[string]any{"keys": keys},
+	})
+	p.a.notifyEvent(mailer.Event{
+		Category:    mailer.CatSecurity,
+		Severity:    mailer.SevInfo,
+		Title:       "Portal settings reset",
+		Summary:     fmt.Sprintf("Administrator %s reset settings: %s", pr.Actor, strings.Join(keys, ", ")),
+		Fingerprint: "security:settings-reset:" + pr.Actor,
+		Details:     map[string]string{"actor": pr.Actor, "keys": strings.Join(keys, ", ")},
 	})
 	log.Printf("portal: %s reset settings: %s", portalActor(c), strings.Join(keys, ", "))
 	c.JSON(http.StatusOK, p.settingsView())

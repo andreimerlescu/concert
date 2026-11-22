@@ -84,6 +84,11 @@ func (a *app) renderPrometheusMetrics() string {
 	// Waiting room
 	writePromMetric(&b, "concert_room_cap", "gauge", "Configured maximum concurrent page requests.", wr.Cap())
 	writePromMetric(&b, "concert_room_occupancy", "gauge", "Current in-flight page requests to upstream.", wr.Len())
+	draining := 0
+	if wr.Len() > int(wr.Cap()) {
+		draining = 1
+	}
+	writePromMetric(&b, "concert_room_cap_draining", "gauge", "1 while in-flight occupancy is draining down to a lower capacity.", draining)
 	writePromMetric(&b, "concert_room_queue_depth", "gauge", "Total tickets in queue including recently abandoned.", wr.QueueDepth())
 	writePromMetric(&b, "concert_room_live_queue_depth", "gauge", "Active visitors currently waiting in queue.", wr.LiveQueueDepth())
 	writePromMetric(&b, "concert_room_max_queue_depth", "gauge", "Configured max queue depth breaker (0 = unlimited).", wr.MaxQueueDepth())
@@ -103,6 +108,10 @@ func (a *app) renderPrometheusMetrics() string {
 	fmt.Fprintf(&b, "# HELP concert_assets_throttled_total Asset requests throttled by scope.\n# TYPE concert_assets_throttled_total counter\n")
 	fmt.Fprintf(&b, "concert_assets_throttled_total{scope=\"user\"} %d\n", stats.assetUserThrottled.Load())
 	fmt.Fprintf(&b, "concert_assets_throttled_total{scope=\"global\"} %d\n", stats.assetGlobalThrottled.Load())
+	writePromMetric(&b, "concert_static_served_total", "counter", "Static assets served directly from local disk without hitting upstream.", stats.staticServed.Load())
+	writePromMetric(&b, "concert_static_not_found_total", "counter", "Fast 404 responses for missing authoritative static assets.", stats.staticNotFound.Load())
+	writePromMetric(&b, "concert_fcgi_requests_total", "counter", "Dynamic requests executed against FastCGI (php-fpm) upstreams.", stats.fcgiRequests.Load())
+	writePromMetric(&b, "concert_fcgi_denied_total", "counter", "Requests blocked by FastCGI execution deny rules (403).", stats.fcgiDenied.Load())
 
 	// Streams
 	writePromMetric(&b, "concert_streams_cap", "gauge", "Maximum concurrent WebSocket/SSE stream connections.", g.streams.sem.Cap())
@@ -160,6 +169,24 @@ func (a *app) renderPrometheusMetrics() string {
 	writePromMetric(&b, "concert_cluster_sync_sent_total", "counter", "Total cluster ban sync events published.", stats.clusterSyncSent.Load())
 	writePromMetric(&b, "concert_cluster_sync_received_total", "counter", "Total cluster ban sync events applied from peers.", stats.clusterSyncRecv.Load())
 	writePromMetric(&b, "concert_cluster_sync_errors_total", "counter", "Total cluster state synchronization errors.", stats.clusterSyncErrors.Load())
+
+	var emailQueued int
+	var emailSent, emailErrs int64
+	if a.mailer != nil {
+		emailQueued, emailSent, emailErrs = a.mailer.Metrics()
+	}
+	writePromMetric(&b, "concert_email_queued_events", "gauge", "Pending operational events queued for scheduled administrator email digest.", emailQueued)
+	writePromMetric(&b, "concert_email_sent_total", "counter", "Total administrator digest emails successfully delivered.", emailSent)
+	writePromMetric(&b, "concert_email_errors_total", "counter", "Total administrator digest email delivery failures.", emailErrs)
+	writePromMetric(&b, "concert_email_cluster_deduped_total", "counter", "Shared cluster alert events deduplicated via Redis peer lease.", stats.emailClusterDeduped.Load())
+
+	if a.fastlane != nil {
+		used, maxRec, unresolved := a.fastlane.JournalStats()
+		writePromMetric(&b, "concert_fastlane_records_used", "gauge", "Fast-lane receipt records currently stored in fastlane.jsonl.", used)
+		writePromMetric(&b, "concert_fastlane_records_max", "gauge", "Configured max_records ceiling for fastlane.jsonl.", maxRec)
+		writePromMetric(&b, "concert_fastlane_unresolved", "gauge", "Unresolved fast-lane receipts in pending or unknown state awaiting reconciliation.", unresolved)
+	}
+
 	a.writeTierMetrics(&b)
 
 	readyVal := 1
@@ -202,7 +229,10 @@ func (a *app) writeTierMetrics(b *strings.Builder) {
 		writePromMetric(b, "concert_leaf_direct_in_flight", "gauge", "Direct page requests holding host slots.", l.gate.InUse(capacity.Direct))
 		writePromMetric(b, "concert_leaf_hop_accepted_total", "counter", "Verified hop claims.", l.accepted.Load())
 		writePromMetric(b, "concert_leaf_hop_rejected_total", "counter", "Refused hop claims.", l.rejected.Load())
+		writePromMetric(b, "concert_leaf_hop_replayed_total", "counter", "Hop claims refused as replayed nonces.", l.replayed.Load())
+		writePromMetric(b, "concert_leaf_hop_mtls_rejected_total", "counter", "Hop claims refused for missing verified mTLS client certificate.", l.mtlsRejected.Load())
 		writePromMetric(b, "concert_leaf_hop_backpressure_total", "counter", "Hop requests refused for capacity.", l.backpressed.Load())
+		writePromMetric(b, "concert_leaf_rebench_total", "counter", "Completed drained on-demand capacity re-benchmarks.", l.rebenchTotal.Load())
 		silent := 0
 		if _, r := l.monitor.view(); r != nil && r.Recovered.IsZero() {
 			silent = 1

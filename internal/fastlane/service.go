@@ -93,19 +93,220 @@ type Gateway interface {
 }
 
 type Service struct {
-	cfg         Config
-	key         []byte
-	gateway     Gateway
-	policyToken string
-	http        *http.Client
-	ledger      *ledger
-	mu          sync.Mutex
-	active      map[string]bool
-	challenges  map[string]challenge
-	nfts        map[string]nftLease
-	limits      map[string]*rateWindow
-	work        chan struct{}
-	now         func() time.Time
+	cfg            Config
+	key            []byte
+	gateway        Gateway
+	policyToken    string
+	http           *http.Client
+	ledger         *ledger
+	mu             sync.Mutex
+	active         map[string]bool
+	challenges     map[string]challenge
+	nfts           map[string]nftLease
+	limits         map[string]*rateWindow
+	work           chan struct{}
+	now            func() time.Time
+	onUnknown      func(network, session string)
+	onCapacityWarn func(used, max, pct int)
+	warned80       bool
+	warned95       bool
+}
+
+// ReceiptView is the redacted operator-facing view of an unresolved fast-lane
+// receipt. It omits raw session tokens and signed payment payloads.
+type ReceiptView struct {
+	Fingerprint string    `json:"fingerprint"`
+	State       string    `json:"state"`
+	Network     string    `json:"network"`
+	Scheme      string    `json:"scheme"`
+	Amount      string    `json:"amount"`
+	Asset       string    `json:"asset"`
+	Payer       string    `json:"payer"`
+	Started     time.Time `json:"started"`
+	NeedsHash   bool      `json:"needs_hash,omitempty"`
+}
+
+// SetOnUnknown registers an optional observer called whenever a payment
+// settlement enters the unresolved "unknown" state requiring reconciliation.
+func (s *Service) SetOnUnknown(fn func(network, session string)) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.onUnknown = fn
+	s.mu.Unlock()
+}
+
+// SetOnCapacityWarn registers an optional observer called once when the
+// fast-lane receipt journal crosses 80% (warning) and again at 95% (critical)
+// of MaxRecords. If the journal is already above a threshold at registration
+// time, the callback fires immediately.
+func (s *Service) SetOnCapacityWarn(fn func(used, max, pct int)) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.onCapacityWarn = fn
+	s.mu.Unlock()
+	s.checkCapacityWarn()
+}
+
+func (s *Service) checkCapacityWarn() {
+	if s == nil || s.ledger == nil {
+		return
+	}
+	used, max, _ := s.ledger.stats()
+	if max <= 0 {
+		return
+	}
+	pct := (used * 100) / max
+	if pct < 80 {
+		return
+	}
+	var cb func(used, max, pct int)
+	s.mu.Lock()
+	if pct >= 95 && !s.warned95 {
+		s.warned95 = true
+		s.warned80 = true
+		cb = s.onCapacityWarn
+	} else if pct >= 80 && !s.warned80 {
+		s.warned80 = true
+		cb = s.onCapacityWarn
+	}
+	s.mu.Unlock()
+	if cb != nil {
+		cb(used, max, pct)
+	}
+}
+
+// JournalStats returns current receipt counts for metrics and alerts.
+func (s *Service) JournalStats() (used, max, unresolved int) {
+	if s == nil || s.ledger == nil {
+		return 0, 0, 0
+	}
+	return s.ledger.stats()
+}
+
+// UnresolvedReceipts returns redacted metadata for every receipt currently in
+// state "pending" or "unknown".
+func (s *Service) UnresolvedReceipts() []ReceiptView {
+	if s == nil || s.ledger == nil {
+		return []ReceiptView{}
+	}
+	raw := s.ledger.unresolved()
+	out := make([]ReceiptView, 0, len(raw))
+	for _, r := range raw {
+		out = append(out, ReceiptView{
+			Fingerprint: r.Fingerprint,
+			State:       r.State,
+			Network:     r.Network,
+			Scheme:      r.Requirements.Scheme,
+			Amount:      r.Requirements.Amount,
+			Asset:       r.Requirements.Asset,
+			Payer:       r.Payer,
+			Started:     r.Started,
+			NeedsHash:   chain(r.Network) == "stellar",
+		})
+	}
+	return out
+}
+
+func isHex64(v string) bool {
+	if len(v) != 64 {
+		return false
+	}
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+// ReconcileOnline performs zero-downtime operator reconciliation against final
+// on-chain state while Concert is live. It asks the in-process gateway to run
+// read-only finality checks (serialized under the per-network settlement mutex)
+// and, once finality is confirmed, marks the receipt settled in fastlane.jsonl
+// so the payer's session immediately regains fast-lane eligibility.
+func (s *Service) ReconcileOnline(ctx context.Context, fingerprint, stellarHash string) (Settlement, error) {
+	var none Settlement
+	if s == nil || s.ledger == nil {
+		return none, errors.New("fast lane is not enabled")
+	}
+	fp := strings.ToLower(strings.TrimSpace(fingerprint))
+	stellarHash = strings.TrimSpace(stellarHash)
+	if !isHex64(fp) {
+		return none, errors.New("invalid payment fingerprint: expected 64 lowercase hex characters")
+	}
+	rec, ok := s.ledger.fingerprint(fp)
+	if !ok {
+		return none, errors.New("receipt not found")
+	}
+	if rec.State == "settled" && rec.Response != nil {
+		return *rec.Response, nil
+	}
+	if chain(rec.Network) == "stellar" && stellarHash == "" {
+		return none, errors.New("stellar reconciliation requires the sponsor transaction hash")
+	}
+
+	s.mu.Lock()
+	if s.active[rec.Session] {
+		s.mu.Unlock()
+		return none, errors.New("payment request currently in progress for this session; retry shortly")
+	}
+	s.active[rec.Session] = true
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.active, rec.Session)
+		s.mu.Unlock()
+	}()
+
+	// Re-read after acquiring the session slot in case an in-flight settle just finished.
+	rec, ok = s.ledger.fingerprint(fp)
+	if !ok {
+		return none, errors.New("receipt not found")
+	}
+	if rec.State == "settled" && rec.Response != nil {
+		return *rec.Response, nil
+	}
+
+	reqBody, err := json.Marshal(map[string]string{
+		"id":           fp,
+		"stellar_hash": stellarHash,
+	})
+	if err != nil {
+		return none, err
+	}
+	callCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	rawRes, err := s.gateway.Handle(callCtx, "/reconcile", reqBody)
+	if err != nil {
+		return none, err
+	}
+	b, err := json.Marshal(rawRes)
+	if err != nil {
+		return none, errors.New("invalid reconciliation response")
+	}
+	var settled Settlement
+	if err := json.Unmarshal(b, &settled); err != nil {
+		return none, errors.New("invalid reconciliation JSON")
+	}
+	if !settled.Success || settled.Transaction == "" || settled.Network != rec.Network || settled.Payer != rec.Payer {
+		return none, errors.New("reconciliation result did not match receipt")
+	}
+
+	rec.State = "settled"
+	rec.Transaction = settled.Transaction
+	rec.Settled = s.now().UTC()
+	rec.Expires = rec.Settled.Add(time.Duration(s.cfg.PassSeconds) * time.Second)
+	rec.Response = &settled
+	if err := s.ledger.write(rec); err != nil {
+		return none, err
+	}
+	s.checkCapacityWarn()
+	return settled, nil
 }
 
 func New(c Config, dir string, key []byte, gw Gateway, policyToken string) (*Service, error) {
@@ -169,6 +370,7 @@ func (s *Service) Summary() map[string]any {
 	v["collections"] = s.cfg.Collections
 	v["pass_seconds"] = s.cfg.PassSeconds
 	v["nft_pass_seconds"] = s.cfg.NFTPassSeconds
+	v["unresolved"] = s.UnresolvedReceipts()
 	return v
 }
 
@@ -681,6 +883,7 @@ func (s *Service) payment(w http.ResponseWriter, r *http.Request, id string) {
 			failure(w, 409, "payment_reservation_failed")
 			return
 		}
+		s.checkCapacityWarn()
 	} else {
 		// Retry only the identical authorization. Native chain replay protection
 		// plus the gateway's durable settlement cache prevents another debit.
@@ -699,6 +902,12 @@ func (s *Service) payment(w http.ResponseWriter, r *http.Request, id string) {
 	if e != nil || !settled.Success || settled.Transaction == "" || settled.Network != req.Network || settled.Payer != x.Payer {
 		x.State = "unknown"
 		_ = s.ledger.write(x)
+		s.mu.Lock()
+		cb := s.onUnknown
+		s.mu.Unlock()
+		if cb != nil {
+			cb(x.Network, x.Session)
+		}
 		failure(w, 503, "settlement_unresolved_retry_identical_payment_do_not_pay_again")
 		return
 	}

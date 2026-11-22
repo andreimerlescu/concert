@@ -171,6 +171,20 @@ type Report struct {
 	FirstFailure *Stage `json:"first_failure,omitempty"`
 }
 
+func newTransport(opts *Options) *http.Transport {
+	return &http.Transport{
+		Proxy:                 nil,
+		DialContext:           (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          opts.Max * 2,
+		MaxIdleConnsPerHost:   opts.Max * 2,
+		IdleConnTimeout:       30 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: opts.RequestTimeout,
+		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: opts.Insecure},
+	}
+}
+
 // Run measures opts.Target. It returns a report even when ctx ends early,
 // with the stages completed so far.
 func Run(ctx context.Context, opts Options) (*Report, error) {
@@ -179,17 +193,7 @@ func Run(ctx context.Context, opts Options) (*Report, error) {
 	}
 	transport := opts.Transport
 	if transport == nil {
-		t := &http.Transport{
-			Proxy:                 nil,
-			DialContext:           (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-			ForceAttemptHTTP2:     true,
-			MaxIdleConns:          opts.Max * 2,
-			MaxIdleConnsPerHost:   opts.Max * 2,
-			IdleConnTimeout:       30 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ResponseHeaderTimeout: opts.RequestTimeout,
-			TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: opts.Insecure},
-		}
+		t := newTransport(&opts)
 		defer t.CloseIdleConnections()
 		transport = t
 	}

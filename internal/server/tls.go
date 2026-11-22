@@ -2,8 +2,11 @@ package server
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"strings"
@@ -177,24 +180,66 @@ func newPEMTLSConfig(certFile, keyFile, minVerSpec string) (*tls.Config, error) 
 	}, nil
 }
 
+// applyClientCA attaches a client CA pool to tc when caFile is set.
+// By default it uses tls.VerifyClientCertIfGiven so public browsers can still
+// visit the listener over HTTPS while edge Concert peers presenting client
+// certificates are cryptographically authenticated (see -hop-require-mtls).
+// Setting requireAll upgrades ClientAuth to tls.RequireAndVerifyClientCert.
+func applyClientCA(tc *tls.Config, caFile string, requireAll bool) error {
+	caFile = strings.TrimSpace(caFile)
+	if caFile == "" {
+		return nil
+	}
+	pemData, err := os.ReadFile(caFile)
+	if err != nil {
+		return fmt.Errorf("read -tls-client-ca %s: %w", caFile, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pemData) {
+		return fmt.Errorf("invalid PEM certificates in -tls-client-ca %s", caFile)
+	}
+	tc.ClientCAs = pool
+	if requireAll {
+		tc.ClientAuth = tls.RequireAndVerifyClientCert
+	} else {
+		tc.ClientAuth = tls.VerifyClientCertIfGiven
+	}
+	return nil
+}
+
 // newACMETLSConfig returns the TLS config for the main listener (custom PEM
 // certificate files or Let's Encrypt ACME), or nil when TLS is disabled.
 func newACMETLSConfig(cfg config) (*tls.Config, error) {
+	tc, _, err := newACMETLSConfigWithManager(cfg)
+	return tc, err
+}
+
+// newACMETLSConfigWithManager returns both the listener *tls.Config and, when
+// Let's Encrypt ACME (-tls-domains) is enabled, the *autocert.Manager so a
+// companion -tls-http-listen (:80) server can answer ACME HTTP-01 challenges.
+func newACMETLSConfigWithManager(cfg config) (*tls.Config, *autocert.Manager, error) {
 	if cfg.tlsCert != "" || cfg.tlsKey != "" {
 		if len(cfg.tlsHosts) > 0 {
-			return nil, errors.New("-tls-cert/-tls-key cannot be combined with -tls-domains")
+			return nil, nil, errors.New("-tls-cert/-tls-key cannot be combined with -tls-domains")
 		}
-		return newPEMTLSConfig(cfg.tlsCert, cfg.tlsKey, cfg.tlsMinVersion)
+		tc, err := newPEMTLSConfig(cfg.tlsCert, cfg.tlsKey, cfg.tlsMinVersion)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := applyClientCA(tc, cfg.tlsClientCA, cfg.tlsRequireClientCert); err != nil {
+			return nil, nil, err
+		}
+		return tc, nil, nil
 	}
 	if len(cfg.tlsHosts) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if err := ensureWritableDir(cfg.tlsCacheDir); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	minVer, err := parseTLSMinVersion(cfg.tlsMinVersion)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	m := &autocert.Manager{
@@ -212,7 +257,80 @@ func newACMETLSConfig(cfg config) (*tls.Config, error) {
 	tc := m.TLSConfig()
 	tc.MinVersion = minVer
 	tc.CipherSuites = strongCipherSuites
-	return tc, nil
+	if err := applyClientCA(tc, cfg.tlsClientCA, cfg.tlsRequireClientCert); err != nil {
+		return nil, nil, err
+	}
+	return tc, m, nil
+}
+
+// httpsRedirectHandler answers Let's Encrypt ACME HTTP-01 challenges when mgr
+// is non-nil and redirects all other plain-HTTP requests to HTTPS (301 for
+// GET/HEAD, 308 for other methods) with strict Host validation to prevent open
+// redirects.
+func httpsRedirectHandler(cfg config, mgr *autocert.Manager) http.Handler {
+	allowed := map[string]bool{}
+	for _, h := range cfg.tlsHosts {
+		allowed[h] = true
+	}
+	_, httpsPort, _ := net.SplitHostPort(cfg.listen)
+
+	fallback := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		host, ok := normalizeRedirectHost(r.Host)
+		if !ok {
+			http.Error(w, "invalid Host header", http.StatusBadRequest)
+			return
+		}
+		if len(allowed) > 0 && !allowed[host] {
+			http.Error(w, "host not configured for HTTPS", http.StatusMisdirectedRequest)
+			return
+		}
+		dstHost := host
+		if httpsPort != "" && httpsPort != "443" {
+			dstHost = net.JoinHostPort(host, httpsPort)
+		} else if ip, err := netip.ParseAddr(host); err == nil && ip.Is6() {
+			dstHost = "[" + host + "]"
+		}
+		target := "https://" + dstHost + r.URL.RequestURI()
+		code := http.StatusPermanentRedirect
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			code = http.StatusMovedPermanently
+		}
+		http.Redirect(w, r, target, code)
+	})
+
+	if mgr != nil {
+		return mgr.HTTPHandler(fallback)
+	}
+	return fallback
+}
+
+func normalizeRedirectHost(raw string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || strings.ContainsAny(raw, " \t\r\n/\\@?#") {
+		return "", false
+	}
+	host := raw
+	if h, _, err := net.SplitHostPort(raw); err == nil {
+		host = h
+	} else if strings.HasPrefix(raw, "[") && strings.HasSuffix(raw, "]") {
+		host = raw[1 : len(raw)-1]
+	}
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	if host == "" {
+		return "", false
+	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return host, true
+	}
+	for i := 0; i < len(host); i++ {
+		c := host[i]
+		ok := (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.'
+		if !ok {
+			return "", false
+		}
+	}
+	return host, true
 }
 
 func newPortalTLSConfig(cfg config) (*tls.Config, error) {

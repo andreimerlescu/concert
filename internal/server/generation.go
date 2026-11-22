@@ -233,6 +233,7 @@ func registerOps(r *gin.Engine, g *generation) {
 		out := gin.H{
 			"cap":                          wr.Cap(),
 			"occupancy":                    wr.Len(),
+			"cap_draining":                 wr.Len() > int(wr.Cap()),
 			"queue_depth":                  wr.QueueDepth(),
 			"live_queue_depth":             wr.LiveQueueDepth(),
 			"max_queue_depth":              wr.MaxQueueDepth(),
@@ -247,6 +248,10 @@ func registerOps(r *gin.Engine, g *generation) {
 			"asset_cap":                    assets.global.Cap(),
 			"asset_in_flight":              assets.global.Len(),
 			"asset_users":                  assets.users.count.Load(),
+			"static_served_total":          stats.staticServed.Load(),
+			"static_not_found_total":       stats.staticNotFound.Load(),
+			"fcgi_requests_total":          stats.fcgiRequests.Load(),
+			"fcgi_denied_total":            stats.fcgiDenied.Load(),
 			"asset_user_cap_h1":            cfg.assetUserCapH1,
 			"asset_user_cap_h2":            cfg.assetUserCapH2,
 			"asset_served_total":           stats.assetServed.Load(),
@@ -324,7 +329,29 @@ func registerOps(r *gin.Engine, g *generation) {
 			ClientIP: actor.IP.String(),
 			Details:  map[string]any{"prev_cap": prevCap, "new_cap": wr.Cap()},
 		})
-		c.JSON(http.StatusOK, gin.H{"cap": wr.Cap(), "occupancy": wr.Len()})
+		c.JSON(http.StatusOK, gin.H{
+			"cap":          wr.Cap(),
+			"occupancy":    wr.Len(),
+			"cap_draining": wr.Len() > int(wr.Cap()),
+		})
+	})
+
+	// POST /_room/rebench triggers a drained on-demand capacity benchmark on a
+	// leaf (or from an edge against a named leaf).
+	r.POST("/_room/rebench", func(c *gin.Context) {
+		actor, ok := g.requireRole(c, roleAdmin)
+		if !ok {
+			return
+		}
+		handleRebench(c, a, actor, "api")
+	})
+
+	r.POST("/_room/fastlane/reconcile", func(c *gin.Context) {
+		actor, ok := g.requireRole(c, roleAdmin)
+		if !ok {
+			return
+		}
+		handleFastlaneReconcile(c, a, actor, "api")
 	})
 
 	// POST /_room/promote promotes a queued ticket (by raw room_ticket or

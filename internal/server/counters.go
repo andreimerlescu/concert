@@ -14,6 +14,11 @@ type counters struct {
 	assetUserThrottled   atomic.Int64
 	assetGlobalThrottled atomic.Int64
 
+	staticServed   atomic.Int64
+	staticNotFound atomic.Int64
+	fcgiRequests   atomic.Int64
+	fcgiDenied     atomic.Int64
+
 	streamServed    atomic.Int64
 	streamDenied    atomic.Int64
 	streamThrottled atomic.Int64
@@ -27,10 +32,12 @@ type counters struct {
 	upstream3xx     atomic.Int64
 	upstream4xx     atomic.Int64
 	upstream5xx     atomic.Int64
+	upstreamUnavail atomic.Int64 // 502-504 (excluding edge leaf backpressure): app not answering
 	upstreamErrors  atomic.Int64
 	upstreamLatency durationHistogram
 
-	clusterSyncSent   atomic.Int64
-	clusterSyncRecv   atomic.Int64
-	clusterSyncErrors atomic.Int64
+	clusterSyncSent     atomic.Int64
+	clusterSyncRecv     atomic.Int64
+	clusterSyncErrors   atomic.Int64
+	emailClusterDeduped atomic.Int64
 }

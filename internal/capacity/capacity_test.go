@@ -310,20 +310,6 @@ func TestPlannerHysteresis(t *testing.T) {
 	}
 }
 
-func TestSafeShrink(t *testing.T) {
-	cases := []struct{ target, occ, want int }{
-		{50, 10, 50},
-		{50, 80, 80},
-		{0, 0, 1},
-		{-3, 0, 1},
-	}
-	for _, tc := range cases {
-		if got := SafeShrink(tc.target, tc.occ); got != tc.want {
-			t.Errorf("SafeShrink(%d, %d) = %d, want %d", tc.target, tc.occ, got, tc.want)
-		}
-	}
-}
-
 func TestFileRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := Path(filepath.Join(dir, "data"))

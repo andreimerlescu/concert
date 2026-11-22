@@ -13,8 +13,9 @@ import (
 // Concert reserves, answer only hop-signed requests of ClassControl from
 // -hop-peers, and are never queued.
 const (
-	StatePath = "/_room/hop/state" // GET: the leaf's LeafState
-	BansPath  = "/_room/hop/bans"  // POST: a BanSnapshot from one edge
+	StatePath   = "/_room/hop/state"   // GET: the leaf's LeafState
+	BansPath    = "/_room/hop/bans"    // POST: a BanSnapshot from one edge
+	RebenchPath = "/_room/hop/rebench" // POST: trigger drained leaf re-benchmark
 )
 
 // LeafState is what a leaf reports to every edge that polls it. The edge
@@ -34,13 +35,21 @@ type LeafState struct {
 	DirectInFlight int64 `json:"direct_in_flight"` // direct page requests holding host slots
 	QueueDepth     int64 `json:"queue_depth"`      // direct visitors waiting in the leaf's room
 
-	AppHealthy bool    `json:"app_healthy"` // at least one of the leaf's upstreams is healthy
-	Draining   bool    `json:"draining"`
-	LatencyMs  float64 `json:"latency_ms"` // recent mean upstream response time
+	AppHealthy     bool    `json:"app_healthy"` // at least one of the leaf's upstreams is healthy
+	Draining       bool    `json:"draining"`
+	Rebenchmarking bool    `json:"rebenchmarking,omitempty"`
+	LatencyMs      float64 `json:"latency_ms"` // recent mean upstream response time
 
 	// EdgesSeen is how many distinct edges sent hop traffic or polled in
 	// the last minute, at least 1.
 	EdgesSeen int `json:"edges_seen"`
+
+	// YourShare is this leaf's demand-weighted page-slot allocation for the
+	// polling edge. Zero on legacy v0.2.0 leaves (fall back to HostCap/EdgesSeen).
+	YourShare int `json:"your_share,omitempty"`
+
+	// EdgeShares maps every active edge node ID to its current slot share.
+	EdgeShares map[string]int `json:"edge_shares,omitempty"`
 
 	// BanVersions is the last ban snapshot version applied, per edge.
 	BanVersions map[string]string `json:"ban_versions,omitempty"`
@@ -54,6 +63,12 @@ func (s LeafState) Share() int {
 	if s.HostCap <= 0 {
 		return 0
 	}
+	if s.YourShare > 0 {
+		if s.YourShare > s.HostCap {
+			return s.HostCap
+		}
+		return s.YourShare
+	}
 	n := s.EdgesSeen
 	if n < 1 {
 		n = 1
@@ -63,6 +78,89 @@ func (s LeafState) Share() int {
 		share = 1
 	}
 	return share
+}
+
+// AllocateShares divides hostCap across active edges proportionally to their
+// observed demand weights while guaranteeing every active edge a starvation
+// floor and preserving Σ shares == hostCap (when hostCap >= len(weights)).
+// When all weights are <= 0 (idle edges), capacity splits evenly.
+func AllocateShares(hostCap int, weights map[string]float64) map[string]int {
+	n := len(weights)
+	if hostCap <= 0 || n == 0 {
+		return nil
+	}
+	ids := make([]string, 0, n)
+	var total float64
+	for id, w := range weights {
+		ids = append(ids, id)
+		if w > 0 {
+			total += w
+		}
+	}
+	sort.Strings(ids)
+
+	out := make(map[string]int, n)
+	if n == 1 {
+		out[ids[0]] = hostCap
+		return out
+	}
+	if hostCap < n {
+		for _, id := range ids {
+			out[id] = 1
+		}
+		return out
+	}
+	if total <= 0 {
+		base := hostCap / n
+		rem := hostCap % n
+		for i, id := range ids {
+			out[id] = base
+			if i < rem {
+				out[id]++
+			}
+		}
+		return out
+	}
+
+	// Reserve a starvation-prevention floor (25% of even share, at least 1)
+	// per active edge, then distribute remaining slots by largest remainder.
+	floor := hostCap / (n * 4)
+	if floor < 1 {
+		floor = 1
+	}
+	if maxFloor := hostCap / n; floor > maxFloor {
+		floor = maxFloor
+	}
+	remSlots := hostCap - n*floor
+
+	type frac struct {
+		id  string
+		rem float64
+	}
+	fracs := make([]frac, 0, n)
+	assigned := 0
+	for _, id := range ids {
+		w := weights[id]
+		if w < 0 {
+			w = 0
+		}
+		exact := float64(remSlots) * (w / total)
+		whole := int(exact)
+		out[id] = floor + whole
+		assigned += whole
+		fracs = append(fracs, frac{id: id, rem: exact - float64(whole)})
+	}
+	leftover := remSlots - assigned
+	sort.Slice(fracs, func(i, j int) bool {
+		if fracs[i].rem != fracs[j].rem {
+			return fracs[i].rem > fracs[j].rem
+		}
+		return fracs[i].id < fracs[j].id
+	})
+	for i := 0; i < leftover && i < len(fracs); i++ {
+		out[fracs[i].id]++
+	}
+	return out
 }
 
 // Usable reports whether an edge should plan capacity on this leaf.
@@ -77,6 +175,19 @@ type BenchSummary struct {
 	P95Ms        float64   `json:"p95_ms"`
 	PagesCovered int       `json:"pages_covered"`
 	Target       string    `json:"target"`
+}
+
+// RebenchResult summarizes a completed drained on-demand leaf re-benchmark.
+type RebenchResult struct {
+	Node         string    `json:"node"`
+	PreviousCap  int       `json:"previous_cap"`
+	NewCap       int       `json:"new_cap"`
+	CapSource    string    `json:"cap_source"`
+	Lemmings     int       `json:"lemmings"`
+	P95Ms        float64   `json:"p95_ms"`
+	PagesCovered int       `json:"pages_covered"`
+	Verdict      string    `json:"verdict"`
+	At           time.Time `json:"at"`
 }
 
 // SilenceReport records the load a leaf was carrying when its application

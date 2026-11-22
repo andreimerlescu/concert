@@ -104,9 +104,10 @@ const (
 // Findings are reported but do not fail a stage: they are properties of
 // the site, not of its load.
 const (
-	FindNotFound  = "not_found"     // 404 or 410: a broken link
-	FindClientErr = "client_error"  // other 4xx: auth walls, bad links
-	FindNoRange   = "range_ignored" // media served without byte ranges
+	FindNotFound  = "not_found"        // 404 or 410: a broken link
+	FindClientErr = "client_error"     // other 4xx: auth walls, bad links
+	FindNoRange   = "range_ignored"    // media served without byte ranges
+	FindOffsite   = "offsite_redirect" // a redirect off the target host, not followed
 )
 
 // failKind classifies a transport error.

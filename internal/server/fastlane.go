@@ -17,6 +17,10 @@ var concertWeb embed.FS
 func registerConcertRoutes(r *gin.Engine, g *generation) {
 	r.Any("/_concert/*path", func(c *gin.Context) {
 		path := strings.TrimPrefix(c.Request.URL.Path, fastlane.Prefix)
+		if path == "/email/unsubscribe" {
+			g.a.handleEmailUnsubscribe(c)
+			return
+		}
 		file := ""
 		switch path {
 		case "/", "/access":

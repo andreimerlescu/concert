@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/andreimerlescu/concert/internal/mailer"
 	"github.com/gin-gonic/gin"
 )
 
@@ -161,6 +163,12 @@ func (a *app) erasePrivacyData(ip netip.Addr, includeBans bool) (int, error) {
 	if a.history != nil {
 		removed += a.history.eraseClient(ip)
 	}
+	if a.mailer != nil {
+		removed += a.mailer.EraseIP(ip.Unmap().String())
+		if anon := formatPrivacyIP(ip, true); anon != "" && anon != ip.Unmap().String() {
+			removed += a.mailer.EraseIP(anon)
+		}
+	}
 	if includeBans && a.abuse != nil {
 		if t, err := parseBanTarget(ip.String()); err == nil {
 			if a.abuse.unbanTarget(t) {
@@ -249,6 +257,14 @@ func handlePrivacyExport(c *gin.Context, a *app, actor principal, source string)
 		ClientIP: actor.IP.String(),
 		Details:  map[string]any{"history_found": res.HistoryFound, "requests": len(res.Requests)},
 	})
+	a.notifyEvent(mailer.Event{
+		Category:    mailer.CatSecurity,
+		Severity:    mailer.SevInfo,
+		Title:       "DSAR privacy export executed",
+		Summary:     fmt.Sprintf("Administrator %s exported privacy data via %s (%d request record(s)).", actor.Actor, source, len(res.Requests)),
+		Fingerprint: "security:dsar:export:" + actor.Actor,
+		Details:     map[string]string{"actor": actor.Actor, "source": source},
+	})
 	c.JSON(http.StatusOK, res)
 }
 
@@ -285,6 +301,15 @@ func handlePrivacyErase(c *gin.Context, a *app, actor principal, source string) 
 		Outcome:  "allow",
 		ClientIP: actor.IP.String(),
 		Details:  map[string]any{"removed_records": removed, "include_bans": includeBans},
+	})
+	// Do not include the erased client IP in the notification body (GDPR Art. 17).
+	a.notifyEvent(mailer.Event{
+		Category:    mailer.CatSecurity,
+		Severity:    mailer.SevInfo,
+		Title:       "DSAR privacy erasure executed",
+		Summary:     fmt.Sprintf("Administrator %s completed a DSAR erasure via %s (%d record(s) purged).", actor.Actor, source, removed),
+		Fingerprint: "security:dsar:erase:" + actor.Actor,
+		Details:     map[string]string{"actor": actor.Actor, "source": source, "removed_records": fmt.Sprintf("%d", removed)},
 	})
 	c.JSON(http.StatusOK, gin.H{"erased": ip.String(), "removed_records": removed, "include_bans": includeBans})
 }

@@ -62,7 +62,7 @@ Or build from source:
     cd concert
     make build
 
-`make build` writes static binaries for Linux, macOS and Windows on amd64 and arm64 to `bin/`. Requires Go 1.27.3 or newer (room v1.5.0 declares it).
+`make build` writes static binaries for Linux, macOS and Windows on amd64 and arm64 to `bin/`. Requires Go 1.27.3 or newer (`room v1.6.0` / `sema v1.2.0`).
 
 On RHEL, Alma, Rocky, CentOS Stream or Fedora, `installer.sh` installs a prebuilt binary as a confined systemd service under SELinux enforcing mode, downloads the IPtoASN database for IP details, and schedules its daily refresh. See the comments at the top of the script.
 
@@ -97,7 +97,15 @@ Every option can be set with a flag or an environment variable. A flag overrides
 | Flag | Environment | Default | Description |
 |---|---|---|---|
 | `-listen` | `CONCERT_LISTEN` | `:8080` | Address to listen on (restart to change) |
-| `-upstream` | `CONCERT_UPSTREAM` | `http://127.0.0.1:3000` | Origin to proxy to (`http` or `https`) |
+| `-upstream` | `CONCERT_UPSTREAM` | `http://127.0.0.1:3000` | Origin to proxy to (`http://`, `https://`, `fcgi://host:port`, or `fcgi+unix:///path/to/php-fpm.sock`) |
+| `-static-root` | `CONCERT_STATIC_ROOT` | *(empty)* | Local document root served off disk via `os.Root` (also FastCGI `DOCUMENT_ROOT`; restart to change) |
+| `-static-mounts` | `CONCERT_STATIC_MOUNTS` | *(empty)* | Comma-separated `/prefix=/dir` static asset mounts confined by `os.Root` (restart to change) |
+| `-static-allow-ext` | `CONCERT_STATIC_ALLOW_EXT` | *(empty)* | Extra safe file extensions added to the static allowlist (scripts & secrets stay hard-blocked) |
+| `-static-cache-control` | `CONCERT_STATIC_CACHE_CONTROL` | `public, max-age=3600` | `Cache-Control` header applied to locally served static files |
+| `-static-fallback` | `CONCERT_STATIC_FALLBACK` | `false` | Forward missing mounted/asset static files upstream instead of fast `404` |
+| `-compress` | `CONCERT_COMPRESS` | `true` | On-the-fly stdlib `gzip` (`>= 1 KiB`) for locally served static files and FastCGI responses |
+| `-fcgi-index` | `CONCERT_FCGI_INDEX` | `index.php` | Entrypoint script for FastCGI `try_files` fallback and directory index |
+| `-fcgi-deny-paths` | `CONCERT_FCGI_DENY_PATHS` | `/wp-content/uploads/*,/wp-config.php` | Paths blocked from FastCGI PHP execution (`403`; restart to change) |
 | `-cap` | `CONCERT_CAPACITY` | `434` | Max concurrent page requests allowed through to the origin |
 | `-max-queue` | `CONCERT_MAX_QUEUE` | `369` | Reject new arrivals with 503 beyond this queue depth (0 = unlimited) |
 | `-reaper` | `CONCERT_REAPER` | `36s` | How often abandoned tickets are cleaned up |
@@ -145,6 +153,7 @@ Every option can be set with a flag or an environment variable. A flag overrides
 | `-api-json` | `CONCERT_API_JSON` | `true` | Answer queued non-browser clients with JSON 429 instead of HTML |
 | `-retry-after` | `CONCERT_RETRY_AFTER` | `5` | `Retry-After` seconds sent to queued API clients |
 | `-tls-domains` | `CONCERT_TLS_DOMAINS` | *(empty)* | Hostnames to get Let's Encrypt certificates for; enables TLS on `-listen` |
+| `-tls-http-listen` | `CONCERT_TLS_HTTP_LISTEN` | *(empty)* | Companion plain-HTTP address (e.g. `:80`) for ACME HTTP-01 and HTTPS redirect (restart to change) |
 | `-tls-email` | `CONCERT_TLS_EMAIL` | *(empty)* | ACME contact email |
 | `-tls-cache` | `CONCERT_TLS_CACHE` | `/var/lib/concert/acme` | ACME account key and certificate directory |
 | `-tls-staging` | `CONCERT_TLS_STAGING` | `false` | Use the Let's Encrypt staging directory |
@@ -162,7 +171,7 @@ Every option can be set with a flag or an environment variable. A flag overrides
 | | `NADDR_DATA_POLL` | `30s` | How often `NADDR_DATA` is checked for changes; `off` disables reloading |
 | | `NADDR_ADDR` | *(empty)* | A running naddr service (`host:port` or URL), used when `NADDR_DATA` is empty or unusable |
 
-The settings for running Concert as an edge in front of leaf Concerts (`-role`, `-node-id`, `-hop-*`, `-host-cap`, `-upstream-retries`, `-bench-*` and `CONCERT_HOP_SECRET`) are listed in [docs/TOPOLOGY.md](docs/TOPOLOGY.md#configuration).
+The settings for running Concert as an edge in front of leaf Concerts (`-role`, `-node-id`, `-hop-*`, `-host-cap`, `-upstream-retries`, `-bench-*` and `CONCERT_HOP_SECRET`) are listed in [docs/TOPOLOGY.md](docs/TOPOLOGY.md#configuration). For running WordPress/WooCommerce directly on Concert + `php-fpm` without Caddy, Nginx, or Apache, see [docs/WORDPRESS.md](docs/WORDPRESS.md).
 
 Secrets are environment-only on purpose: command-line arguments are visible in `ps` output and shell history.
 
@@ -194,15 +203,17 @@ The default trusts loopback only. That is safe even when Concert faces the inter
 
 ## Admin portal
 
-Set `CONCERT_PORTAL_PASS` and the portal listens on `-portal-listen` (default `127.0.0.1:8081`) for addresses in `-portal-allow`. It has six tabs:
+Set `CONCERT_PORTAL_PASS` and the portal listens on `-portal-listen` (default `127.0.0.1:8081`) for addresses in `-portal-allow`. It has eight tabs:
 
 | Tab | Shows |
 |---|---|
-| Overview | Page, asset, stream, priority and abuse counters |
+| Overview | Page, asset, stream, priority, abuse, and live Edge/Leaf tier views (with drained re-benchmarking and `draining` shrink badge) |
 | Queue | Visitors waiting in line, with actions to move to the front, remove, or remove and ban |
 | Bans | Active bans and ranges; create, change or lift a ban, temporary or permanent |
 | Visitors | Every client the history recorded, with its requests and the bans covering it |
 | Ban log | Every ban in the history: when it began and ends, what started it, and what the banned network requested while blocked |
+| Fast lane | x402 payment offers, NFT collection rules, receipt journal headroom alerts, and one-click zero-downtime online reconciliation |
+| Email | Administrator email delivery (SMTP, Resend, or SendPanda), DNS & handshake verifier, test delivery, compliance links, cadence scheduler, and queued event digest |
 | Settings | Every setting, where its value comes from, and a form to change it live |
 
 The Queue, Bans, Visitors and Ban log tables are rendered on the server one page at a time (25 rows by default; 50 and 100 are offered) and only the visible tab updates, every 3 seconds. Rows that move within the page slide to their new place, rows arriving are labeled with where they came from, and rows leaving say which page they moved to. Hovering over a table pauses its updates, each tab has a **Live** switch, and `prefers-reduced-motion` turns the motion off. Expanding a row loads its detail once and reloads it only when the row itself changes.
@@ -253,6 +264,12 @@ Concert keeps these files in `-data-dir` (default `/var/lib/concert/data`), crea
 |---|---|
 | `settings.json` | Settings changed in the admin portal or with `POST /_room/cap` |
 | `bans.json` | Every ban, permanent bans, and offense history |
+| `hop-bans.json` | On a leaf: which bans each edge applied, so they are lifted when the edge lifts them |
+| `capacity.json` | On a leaf: host capacity measured by `bench-concert` or `-bench-on-start` |
+| `bench-report.json` | On a leaf: full JSON report from `-bench-on-start` |
+| `silence.jsonl` | On a leaf: silence and recovery reports when the application stops answering (rotated at 16 MiB) |
+| `email-secrets.json` | AES-256-GCM encrypted SMTP password / Resend / SendPanda API keys entered through the portal |
+| `email-queue.json` | Coalesced pending alert events, rolling digest send timestamps, and per-recipient pause state |
 | `queue.snapshot` | The waiting line, saved on shutdown and restored on start |
 | `history.jsonl` | The portal's request history and ban log |
 

@@ -50,8 +50,11 @@ func TestRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify: %v (header %q)", err, h)
 	}
+	if len(c.Nonce) != 16 {
+		t.Fatalf("nonce = %q, want 16 hex chars", c.Nonce)
+	}
 	want := sampleClaim()
-	want.Edge, want.Issued = "edge-1", now
+	want.Edge, want.Issued, want.Nonce = "edge-1", now, c.Nonce
 	if c != want {
 		t.Fatalf("claim = %+v, want %+v", c, want)
 	}

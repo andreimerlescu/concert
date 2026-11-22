@@ -128,12 +128,14 @@ func (c *countingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 func TestRun_CoverageAndFileTypes(t *testing.T) {
 	site := testsite.New(testsite.Options{Pages: 30, Fanout: 4})
 	u := serve(t, site)
-	ct := &countingTransport{base: http.DefaultTransport, hosts: map[string]int{}, paths: map[string]int{}}
 	o := quick(u)
 	o.Start, o.Max = 4, 4
 	o.StageDuration = 1500 * time.Millisecond
 	o.PageHits = 2
 	o.AssetsPerPage = 64
+	base := newTransport(&o)
+	t.Cleanup(base.CloseIdleConnections)
+	ct := &countingTransport{base: base, hosts: map[string]int{}, paths: map[string]int{}}
 	o.Transport = ct
 	rep, err := Run(context.Background(), o)
 	if err != nil {
@@ -343,9 +345,13 @@ func TestCLI(t *testing.T) {
 	site := testsite.New(testsite.Options{PageLimit: 3, PageDelay: 25 * time.Millisecond})
 	u := serve(t, site)
 	dir := t.TempDir()
+	reportPath := filepath.Join(dir, "report.json")
+	if err := os.WriteFile(reportPath, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	var out, errOut bytes.Buffer
 	err := CLI([]string{"-target", u.String(), "-stage", "300ms", "-cooldown", "150ms", "-max", "8",
-		"-out", filepath.Join(dir, "report.json"), "-data-dir", dir, "-header", "X-Bench: 1", "-quiet"}, &out, &errOut)
+		"-out", reportPath, "-data-dir", dir, "-header", "X-Bench: 1", "-quiet"}, &out, &errOut)
 	if err != nil {
 		t.Fatalf("%v\n%s", err, errOut.String())
 	}
@@ -356,8 +362,12 @@ func TestCLI(t *testing.T) {
 	if f.Lemmings != 3 || f.HostCap != 2 || f.Report == "" {
 		t.Fatalf("capacity file %+v", f)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "report.json")); err != nil {
+	fi, err := os.Stat(reportPath)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("report.json mode %v, want 0600 after atomic replace", fi.Mode().Perm())
 	}
 	s := out.String()
 	for _, want := range []string{"verdict:", "by file type", "at 4 lemmings it failed"} {
@@ -388,7 +398,9 @@ func TestFetchStreamsAndChecksLength(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec := newRecorder(time.Now())
-	l := newLemming(0, &o, http.DefaultTransport, newSite(u.String(), 14), rec, 1)
+	base := newTransport(&o)
+	t.Cleanup(base.CloseIdleConnections)
+	l := newLemming(0, &o, base, newSite(u.String(), 14), rec, 1)
 	body, ct, _, ok := l.fetch(context.Background(), u.String()+"big.mp4", false)
 	if !ok || ct != "video/mp4" || body != nil {
 		t.Fatalf("ok %v ct %q kept %d bytes", ok, ct, len(body))

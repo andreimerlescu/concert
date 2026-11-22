@@ -637,6 +637,7 @@ func TestTier_SilenceReport(t *testing.T) {
 	l.gate.TryAcquire(capacity.Hop)
 	l.gate.TryAcquire(capacity.Direct)
 	leafApp.stats.upstream5xx.Add(5)
+	leafApp.stats.upstreamUnavail.Add(5)
 	leafApp.leafTick(start.Add(time.Second))
 	_, rep := l.monitor.view()
 	if rep == nil || rep.HopInFlight != 1 || rep.DirectInFlight != 1 || !rep.Recovered.IsZero() {
@@ -857,7 +858,9 @@ func TestTier_BenchOnStart(t *testing.T) {
 	srv := httptest.NewServer(site)
 	t.Cleanup(srv.Close)
 	defer func(f func(*bench.Options)) { benchStartTuning = f }(benchStartTuning)
+	runs := 0
 	benchStartTuning = func(o *bench.Options) {
+		runs++
 		o.StageDuration = 300 * time.Millisecond
 		o.Cooldown = 150 * time.Millisecond
 		o.Max = 16
@@ -889,10 +892,17 @@ func TestTier_BenchOnStart(t *testing.T) {
 	if st := a.leafReport(time.Now()); st.Bench == nil || st.Bench.Lemmings != 4 {
 		t.Fatalf("leaf state does not report the benchmark: %+v", st.Bench)
 	}
-	served := site.Served()
+	if fi, err := os.Stat(filepath.Join(dir, "bench-report.json")); err != nil {
+		t.Fatalf("bench-report.json missing: %v", err)
+	} else if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("bench-report.json mode %v, want 0600", fi.Mode().Perm())
+	}
+	// The hook runs only when a benchmark starts. (Comparing the site's
+	// served count raced: a page the first run cancelled can finish in the
+	// server after Run returns.)
 	a.benchOnStart(context.Background())
-	if site.Served() != served {
-		t.Fatal("second start benchmarked again instead of using capacity.json")
+	if runs != 1 {
+		t.Fatalf("benchmark ran %d times; the second start must use capacity.json", runs)
 	}
 }
 

@@ -99,6 +99,68 @@ func runReconcile(args []string, stdout io.Writer) error {
 	return nil
 }
 
+// runArchiveReceipts is "concert archive-receipts [-data-dir DIR] [-older-than 720h] [-dry-run]":
+// offline compaction for fastlane.jsonl. It acquires fastlane.lock exclusively
+// (refusing to run while Concert is live), archives only expired settled
+// receipts older than -older-than to a timestamped 0600 JSONL file + .sha256,
+// and atomically rewrites fastlane.jsonl keeping all pending, unknown, active,
+// and recent receipts intact.
+func runArchiveReceipts(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("archive-receipts", flag.ContinueOnError)
+	dataDir := fs.String("data-dir", os.Getenv("CONCERT_DATA_DIR"), "concert's data directory (CONCERT_DATA_DIR)")
+	olderThan := fs.Duration("older-than", 720*time.Hour, "archive expired settled receipts older than this duration")
+	dryRun := fs.Bool("dry-run", false, "report how many receipts would be archived without modifying files")
+	fs.Usage = func() {
+		fmt.Fprintln(fs.Output(), "usage: concert archive-receipts [-data-dir DIR] [-older-than 720h] [-dry-run]")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *dataDir == "" {
+		fs.Usage()
+		return errors.New("archive-receipts requires -data-dir or CONCERT_DATA_DIR")
+	}
+	rep, err := fastlane.ArchiveReceipts(*dataDir, *olderThan, *dryRun, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	if !rep.DryRun && rep.Archived > 0 {
+		auditPath := filepath.Join(*dataDir, auditLogName)
+		secret := []byte(envOrFile("CONCERT_ADMIT_SECRET", ""))
+		canAudit := len(secret) > 0
+		if !canAudit {
+			if _, stErr := os.Stat(auditPath); errors.Is(stErr, os.ErrNotExist) {
+				canAudit = true
+			} else if _, vErr := verifyAuditFile(auditPath, nil); vErr == nil {
+				canAudit = true
+			}
+		}
+		if canAudit {
+			al := newAuditLogger(auditPath, secret)
+			al.record(auditEvent{
+				Actor:   "cli:archive-receipts",
+				Role:    roleAdmin.String(),
+				Source:  "cli",
+				Action:  "fastlane.archive",
+				Target:  filepath.Base(rep.ArchiveFile),
+				Outcome: "allow",
+				Details: map[string]any{
+					"total_before":   rep.TotalBefore,
+					"archived":       rep.Archived,
+					"kept":           rep.Kept,
+					"older_than":     rep.OlderThan,
+					"archive_sha256": rep.ArchiveSHA256,
+				},
+			})
+			al.close()
+		}
+	}
+	out, _ := json.MarshalIndent(rep, "", "  ")
+	fmt.Fprintln(stdout, string(out))
+	return nil
+}
+
 // Sample configuration, printed by "concert example fastlane|networks" and
 // documented key by key in docs/FASTLANE.md. Every value is a well-formed
 // placeholder to replace.

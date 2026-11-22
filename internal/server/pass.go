@@ -221,9 +221,8 @@ type userShard struct {
 	m  map[passID]*userSlots
 }
 
-// userSlots keeps separate pools per protocol family. sema.SetCap drains when
-// shrinking, so a single semaphore can't be resized when a user's protocol
-// changes; two lazily created ones avoid that.
+// userSlots keeps separate pools per protocol family so a client's HTTP/1.1
+// and HTTP/2 asset limits stay independent without resizing on every request.
 type userSlots struct {
 	lastSeen int64 // unix nanos, guarded by the shard mutex
 	h1       sema.Semaphore

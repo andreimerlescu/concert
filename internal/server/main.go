@@ -22,6 +22,8 @@ func Main() {
 		switch os.Args[1] {
 		case "reconcile":
 			runSub = runReconcile
+		case "archive-receipts":
+			runSub = runArchiveReceipts
 		case "example":
 			runSub = runExample
 		case "audit":

@@ -129,16 +129,3 @@ func (p *Planner) Current() int {
 	defer p.mu.Unlock()
 	return p.current
 }
-
-// SafeShrink is the capacity to hand a semaphore that loses its in-flight
-// accounting when shrunk below current use (sema, and so room): never less
-// than occupied, so the cap steps down as requests finish.
-func SafeShrink(target, occupied int) int {
-	if target < occupied {
-		target = occupied
-	}
-	if target < 1 {
-		target = 1
-	}
-	return target
-}

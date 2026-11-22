@@ -1,10 +1,20 @@
-# Handoff: Concert after v0.2.0
+# Handoff: Concert after v0.3.0
 
-This file briefs the next agent working on Concert in Antigravity. Read it fully before changing anything. It says what v0.2.0 did, what is left, in what order, and the standard of work expected. When this file and the code disagree, the code and its tests are the truth. Say so in your report.
+This file briefs the next agent working on Concert in Antigravity. Read it fully before changing anything. It says what v0.3.0 completed, what remains in the backlog, and the standard of work expected. When this file and the code disagree, the code and its tests are the truth. Say so in your report.
 
 ## 1. Where things stand
 
-v0.2.0 makes Concert work as **two tiers**: an edge Concert (waiting room, fast lane, cookies, bans) in front of a leaf Concert per application host, with or without haproxy between them. It also adds a **capacity benchmark**. The design, every setting and the limitations are in [docs/TOPOLOGY.md](docs/TOPOLOGY.md), and the change list is in [docs/CHANGES.md](docs/CHANGES.md).
+v0.3.0 completes the production-hardening milestone on top of v0.2.0's two-tier edge/leaf architecture and lemmings benchmark:
+
+- **Strict non-draining capacity shrink (T4 done):** Upgraded to `sema v1.2.0` and `room v1.6.0` (PR specs archived in `docs/SEMA-PR.md` and `docs/ROOM-PR.md`), removed `capacity.SafeShrink`, surfaced `cap_draining` / `concert_room_cap_draining`, and verified under `-race -count=10` shrink stress.
+- **Dead code removed (T3 done):** Legacy `newProxy` / `forwardTo` / `forwardToPool` removed.
+- **Active-active traffic-weighted multi-edge (T8 done) & fail-open Redis alert dedupe:** Edges report live demand (`?demand=<n>`), leaves allocate proportional shares (`hop.AllocateShares`), and Redis peers deduplicate shared operational alerts (`-email-cluster-dedupe`).
+- **Single-use hop nonces & native leaf mTLS:** 64-shard bounded replay cache (`internal/hop/replay.go`, `-hop-replay-guard`, `-hop-require-nonce`), native listener client-CA verification (`-tls-client-ca`, `-tls-require-client-cert`, `-hop-require-mtls` using `tls.VerifyClientCertIfGiven`), and updated HAProxy guidance (`T5` documented in `docs/TOPOLOGY.md`).
+- **Portal tier observability (T6 done) & drained on-demand re-benchmarking:** Live Edge/Leaf Portal Overview panels + `POST /api/topology/rebench`, `POST /_room/rebench`, `POST /_room/hop/rebench` with last-healthy-leaf `409` safety guard.
+- **Zero-downtime Fast-Lane ops:** Live online reconciliation (`internal/gateway` `/reconcile`, Portal Fast lane tab + `POST /api/fastlane/reconcile` + `POST /_room/fastlane/reconcile`), latched 80%/95% `max_records` alerts, Prometheus gauges, and audited offline `concert archive-receipts` CLI.
+- **Native Front-Door Static Serving (`internal/static`), Pure-Stdlib FastCGI (`internal/fcgi`) & `:80 → :443` Redirect:** `os.Root`-confined static offload (`-static-root`, `-static-mounts`, `.br`/`.gz` sidecars, stdlib `gzip`, `ETag`/`304`, `Range`, fail-closed allowlist), `fcgi://` / `fcgi+unix://` upstreams with WordPress `try_files` and `/wp-content/uploads/*` + `/wp-config.php` execution blocks, `-tls-http-listen` ACME HTTP-01 + strict-`Host` redirect listener, and [docs/WORDPRESS.md](docs/WORDPRESS.md).
+
+The design, every setting and the architectural boundaries are in [docs/TOPOLOGY.md](docs/TOPOLOGY.md), [docs/WORDPRESS.md](docs/WORDPRESS.md), [docs/FASTLANE.md](docs/FASTLANE.md), [docs/ENTERPRISE.md](docs/ENTERPRISE.md), and [docs/CHANGES.md](docs/CHANGES.md).
 
 | Path | What it is |
 |---|---|
@@ -194,13 +204,12 @@ Verification: <commands and their real output, trimmed to the relevant lines>
 Not done / open questions: <anything left, anything you were unsure of>
 ```
 
-## 6. Known limits at v0.2.0
+## 6. Architectural boundaries at v0.3.0
 
-All of these are documented in TOPOLOGY.md, and none is a bug to fix silently:
+All of these are intentional, documented in `docs/TOPOLOGY.md` and `docs/FASTLANE.md`, and not bugs to change silently:
 
-- a captured claim can be replayed within the skew window;
-- a single active edge;
-- shares across several edges are approximate;
-- a leaf's room capacity is static;
-- haproxy cannot retry leaf backpressure;
-- the startup benchmark measures the application only at that moment.
+- **Remaining backlog items:** `T2` (domain-driven split of `internal/server`) and `T7` (lemmings enhancement ports) remain queued for post-v0.3.0 milestones.
+- **Local waiting rooms and single-writer payment journals:** Multiple active edges share leaf capacity dynamically (weighted by live demand) and share bans/alert dedupe via fail-open Redis, while waiting rooms and payment journals stay fast and local by design.
+- **Static leaf direct room capacity:** Direct traffic to a leaf is bounded dynamically by the leaf's host gate rather than resizing the leaf's own room.
+- **HAProxy between tiers:** Direct Edge-to-Leaf is preferred for slot-aware routing and backpressure-aware retries; HAProxy between tiers must keep `retry-on conn-failure empty-response` and avoid `retry-on 503`.
+- **Strict Solana `concert-native-sol` verification:** Intentionally accepts single-instruction `SystemProgram.Transfer` transactions only (no compute-budget or arbitrary instruction wrappers).

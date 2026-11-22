@@ -59,6 +59,11 @@
       <button class="nav-link" id="tab-fastlane-btn" data-bs-toggle="tab" data-bs-target="#tab-fastlane" type="button" role="tab" aria-controls="tab-fastlane" aria-selected="false"><i aria-hidden="true" class="bi bi-lightning-charge"></i> Fast lane</button>
     </li>
     <li class="nav-item" role="presentation">
+      <button class="nav-link" id="tab-email-btn" data-bs-toggle="tab" data-bs-target="#tab-email" type="button" role="tab" aria-controls="tab-email" aria-selected="false">
+        <i aria-hidden="true" class="bi bi-envelope-check"></i> Email <span class="badge rounded-pill text-bg-secondary" id="email-queue-count">0</span>
+      </button>
+    </li>
+    <li class="nav-item" role="presentation">
       <button class="nav-link" id="tab-settings-btn" data-bs-toggle="tab" data-bs-target="#tab-settings" type="button" role="tab" aria-controls="tab-settings" aria-selected="false">
         <i aria-hidden="true" class="bi bi-sliders"></i> Settings
       </button>
@@ -73,7 +78,44 @@
     <div class="tab-pane fade" id="tab-fastlane" role="tabpanel" aria-labelledby="tab-fastlane-btn" tabindex="0">
       <div class="d-flex justify-content-between align-items-center mb-3"><div><p class="concert-eyebrow">X402 + COLLECTION ACCESS</p><h2 class="h3">A clearer path through.</h2></div><button class="btn btn-outline-info" id="fastlane-refresh"><i aria-hidden="true" class="bi bi-arrow-repeat"></i> Refresh</button></div>
       <div id="fastlane-state" class="alert alert-info" role="status">Loading fast-lane configuration…</div>
+      <div id="fastlane-capacity-alert" class="alert d-none" role="alert"></div>
       <div class="row g-3 mb-4" id="fastlane-stats"></div>
+      <div class="card stat-card mb-4 d-none" id="fastlane-headroom-card">
+        <div class="card-body">
+          <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+            <h3 class="h6 mb-0"><i aria-hidden="true" class="bi bi-journal-check"></i> Receipt journal headroom</h3>
+            <span class="small font-monospace" id="fastlane-headroom-text">–</span>
+          </div>
+          <div class="progress mb-2" role="progressbar" aria-label="Fast-lane receipt journal usage" aria-valuemin="0" aria-valuemax="100">
+            <div class="progress-bar" id="fastlane-headroom-bar"></div>
+          </div>
+          <div class="small text-body-secondary">Proactive alerts fire at 80% and 95% of <code>max_records</code>. Archive expired settled receipts offline with <code>concert archive-receipts -data-dir … -older-than 720h</code>.</div>
+        </div>
+      </div>
+      <div class="card stat-card mb-4 d-none" id="fastlane-unresolved-card">
+        <div class="card-body">
+          <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+            <h3 class="h6 mb-0"><i aria-hidden="true" class="bi bi-exclamation-octagon"></i> Unresolved receipts (zero-downtime online reconciliation)</h3>
+            <span class="small text-body-secondary" id="fastlane-reconcile-status" role="status"></span>
+          </div>
+          <p class="small text-body-secondary mb-3">Reconciliation checks final on-chain state read-only without stopping Concert, signing, or moving funds. Once confirmed, the payer’s session unlocks immediately.</p>
+          <div class="table-responsive">
+            <table class="table table-sm table-hover align-middle mb-0">
+              <thead>
+                <tr>
+                  <th scope="col">State</th>
+                  <th scope="col">Network</th>
+                  <th scope="col">Payer / Amount</th>
+                  <th scope="col">Fingerprint</th>
+                  <th scope="col">Started</th>
+                  <th scope="col" class="text-end">Action</th>
+                </tr>
+              </thead>
+              <tbody id="fastlane-unresolved-rows"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
       <div class="row g-4"><section class="col-lg-6"><h3 class="h5">Accepted payments</h3><div id="fastlane-offers"></div></section><section class="col-lg-6"><h3 class="h5">NFT collection rules</h3><div id="fastlane-collections"></div></section></div>
       <div class="card mt-4"><div class="card-body"><h3 class="h6">Configure access</h3><p class="small text-body-secondary mb-0">Set CONCERT_FASTLANE_CONFIG in the environment, and CONCERT_NETWORKS_CONFIG, then edit the payment offers and collection rules and restart Concert; the chain gateway runs inside it. Existing receipts retain their expiry. The setup guide describes each chain’s collection identifier and supported wallet proof formats.</p></div></div>
     </div>
@@ -84,7 +126,7 @@
         <div class="col-sm-6 col-xl-3">
           <div class="card stat-card h-100"><div class="card-body">
             <div class="d-flex justify-content-between align-items-start">
-              <div><div class="text-body-secondary small">Page slots in use</div><div class="stat-value" id="stat-occupancy">–</div></div>
+              <div><div class="text-body-secondary small">Page slots in use <span class="badge text-bg-warning ms-1 d-none" id="badge-cap-draining">draining</span></div><div class="stat-value" id="stat-occupancy">–</div></div>
               <i aria-hidden="true" class="bi bi-door-open stat-icon text-primary"></i>
             </div>
             <div class="progress mt-3" role="progressbar" aria-label="Page slot utilization" aria-valuemin="0" aria-valuemax="100">
@@ -205,6 +247,112 @@
               <dt class="col-8">Guest</dt><dd class="col-4 text-end" data-stat="priority_requests_guest">–</dd>
             </dl>
           </div></div>
+        </div>
+      </div>
+
+      <!-- Edge / Leaf tier observability & on-demand re-benchmarking (T6) -->
+      <div class="mt-4 d-none" id="tier-section">
+        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+          <div class="d-flex align-items-center gap-2">
+            <h2 class="h5 mb-0"><i aria-hidden="true" class="bi bi-diagram-3"></i> Tier &amp; capacity</h2>
+            <span class="badge text-bg-primary text-uppercase" id="tier-role-badge"></span>
+            <span class="font-monospace small text-body-secondary" id="tier-node-id"></span>
+          </div>
+          <button type="button" class="btn btn-sm btn-outline-primary d-none" id="tier-leaf-rebench-btn">
+            <i aria-hidden="true" class="bi bi-speedometer"></i> Drain &amp; re-benchmark
+          </button>
+        </div>
+
+        <!-- Edge view -->
+        <div class="d-none" id="tier-edge-view">
+          <div class="row g-3 mb-3">
+            <div class="col-md-4">
+              <div class="card stat-card h-100"><div class="card-body">
+                <h3 class="h6 mb-2"><i aria-hidden="true" class="bi bi-hdd-network"></i> Edge capacity plan</h3>
+                <dl class="row stat-list mb-0">
+                  <dt class="col-8">Usable leaves</dt><dd class="col-4 text-end" id="edge-leaves-usable">–</dd>
+                  <dt class="col-8">Leaf page slots</dt><dd class="col-4 text-end" id="edge-leaf-slots">–</dd>
+                  <dt class="col-8">Planned room cap</dt><dd class="col-4 text-end" id="edge-planned-cap">–</dd>
+                </dl>
+              </div></div>
+            </div>
+            <div class="col-md-4">
+              <div class="card stat-card h-100"><div class="card-body">
+                <h3 class="h6 mb-2"><i aria-hidden="true" class="bi bi-arrow-left-right"></i> Data plane</h3>
+                <dl class="row stat-list mb-0">
+                  <dt class="col-8">Leaf backpressure (503)</dt><dd class="col-4 text-end" id="edge-backpressure">–</dd>
+                  <dt class="col-8">Upstream retries</dt><dd class="col-4 text-end" id="edge-retries">–</dd>
+                </dl>
+              </div></div>
+            </div>
+            <div class="col-md-4">
+              <div class="card stat-card h-100"><div class="card-body">
+                <h3 class="h6 mb-2"><i aria-hidden="true" class="bi bi-broadcast"></i> Control plane</h3>
+                <dl class="row stat-list mb-0">
+                  <dt class="col-8">Leaf polls (errors)</dt><dd class="col-4 text-end" id="edge-polls">–</dd>
+                  <dt class="col-8">Ban pushes (errors)</dt><dd class="col-4 text-end" id="edge-pushes">–</dd>
+                </dl>
+              </div></div>
+            </div>
+          </div>
+          <div class="card stat-card">
+            <div class="card-body p-0">
+              <div class="table-responsive">
+                <table class="table table-sm table-hover align-middle mb-0">
+                  <thead>
+                    <tr>
+                      <th>Leaf</th>
+                      <th>Status</th>
+                      <th class="text-end">Host cap</th>
+                      <th class="text-end">Weighted share</th>
+                      <th class="text-end">In flight</th>
+                      <th class="text-end">Latency</th>
+                      <th>Last silence / benchmark</th>
+                      <th class="text-end">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody id="tier-edge-leaves"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Leaf view -->
+        <div class="d-none" id="tier-leaf-view">
+          <div class="alert alert-danger d-none mb-3" id="tier-leaf-silence" role="alert"></div>
+          <div class="row g-3">
+            <div class="col-lg-4">
+              <div class="card stat-card h-100"><div class="card-body">
+                <h3 class="h6 mb-2"><i aria-hidden="true" class="bi bi-cpu"></i> Host gate</h3>
+                <dl class="row stat-list mb-0">
+                  <dt class="col-7">Host cap</dt><dd class="col-5 text-end" id="leaf-host-cap">–</dd>
+                  <dt class="col-7">Hop in flight (waiting)</dt><dd class="col-5 text-end" id="leaf-hop-inflight">–</dd>
+                  <dt class="col-7">Direct in flight (waiting)</dt><dd class="col-5 text-end" id="leaf-direct-inflight">–</dd>
+                  <dt class="col-7">Mean latency</dt><dd class="col-5 text-end" id="leaf-latency">–</dd>
+                </dl>
+              </div></div>
+            </div>
+            <div class="col-lg-4">
+              <div class="card stat-card h-100"><div class="card-body">
+                <h3 class="h6 mb-2"><i aria-hidden="true" class="bi bi-shield-check"></i> Trust chain</h3>
+                <dl class="row stat-list mb-0">
+                  <dt class="col-8">Verified hop claims</dt><dd class="col-4 text-end" id="leaf-hop-accepted">–</dd>
+                  <dt class="col-8">Rejected claims</dt><dd class="col-4 text-end" id="leaf-hop-rejected">–</dd>
+                  <dt class="col-8">Replayed nonces blocked</dt><dd class="col-4 text-end" id="leaf-hop-replayed">–</dd>
+                  <dt class="col-8">Missing mTLS rejected</dt><dd class="col-4 text-end" id="leaf-hop-mtls">–</dd>
+                  <dt class="col-8">Backpressure refusals</dt><dd class="col-4 text-end" id="leaf-hop-backpressure">–</dd>
+                </dl>
+              </div></div>
+            </div>
+            <div class="col-lg-4">
+              <div class="card stat-card h-100"><div class="card-body">
+                <h3 class="h6 mb-2"><i aria-hidden="true" class="bi bi-bar-chart-line"></i> Edge shares &amp; benchmark</h3>
+                <div class="small text-body-secondary mb-2" id="leaf-bench-summary">No benchmark recorded yet.</div>
+                <ul class="list-group list-group-flush small" id="leaf-edge-shares"></ul>
+              </div></div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -424,6 +572,352 @@
             <h2 class="h6 mb-3"><i aria-hidden="true" class="bi bi-lock"></i> Environment only, and listeners</h2>
             <dl class="row small mb-0" id="settings-fixed"></dl>
           </div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Email delivery, DNS verification & scheduled event digest -->
+    <div class="tab-pane fade" id="tab-email" role="tabpanel" aria-labelledby="tab-email-btn" tabindex="0">
+      <div class="alert alert-warning d-none" id="email-readonly-alert" role="alert">
+        <i aria-hidden="true" class="bi bi-lock"></i> <code>-read-only-settings</code> (GitOps mode) is enabled: configuration changes and portal credential writes are locked. Provide settings and secrets via flags or <code>CONCERT_*</code> environment variables.
+      </div>
+      <div class="alert alert-info d-none" id="email-secret-note" role="alert"></div>
+      <div class="alert alert-secondary d-none" id="email-paused-alert" role="alert">
+        <i aria-hidden="true" class="bi bi-pause-circle"></i> Scheduled email digests are currently <strong>paused</strong>. Runtime events continue queuing until resumed.
+      </div>
+
+      <div class="row g-3">
+        <!-- Left column: provider, schedule cadence & compliance form -->
+        <div class="col-xl-7">
+          <form id="email-form" class="d-grid gap-3" novalidate>
+            <div class="card stat-card">
+              <div class="card-body">
+                <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+                  <h2 class="h6 mb-0"><i aria-hidden="true" class="bi bi-send-check"></i> Delivery provider &amp; credentials</h2>
+                  <span class="badge text-bg-secondary" id="email-provider-badge">Disabled</span>
+                </div>
+                <div class="row g-3">
+                  <div class="col-md-6">
+                    <label for="email-provider" class="form-label">Provider</label>
+                    <select class="form-select form-select-sm" id="email-provider">
+                      <option value="">Disabled (off)</option>
+                      <option value="smtp">SMTP (Username &amp; Password)</option>
+                      <option value="resend">Resend (API Key)</option>
+                      <option value="sendpanda">SendPanda (sendpanda.email API Key)</option>
+                    </select>
+                  </div>
+                  <div class="col-md-6">
+                    <label for="email-dkim-selector" class="form-label">DKIM selector <span class="text-body-secondary small">(optional DNS check)</span></label>
+                    <input type="text" class="form-control form-control-sm font-monospace" id="email-dkim-selector" placeholder="e.g. resend, s1, default">
+                  </div>
+                </div>
+
+                <!-- SMTP provider fields -->
+                <div id="email-smtp-fields" class="row g-3 mt-1 d-none">
+                  <div class="col-md-5">
+                    <label for="email-smtp-host" class="form-label">SMTP host</label>
+                    <input type="text" class="form-control form-control-sm font-monospace" id="email-smtp-host" placeholder="smtp.example.com">
+                  </div>
+                  <div class="col-md-3">
+                    <label for="email-smtp-port" class="form-label">Port</label>
+                    <input type="number" class="form-control form-control-sm font-monospace" id="email-smtp-port" min="1" max="65535" value="587">
+                  </div>
+                  <div class="col-md-4">
+                    <label for="email-smtp-tls" class="form-label">TLS mode</label>
+                    <select class="form-select form-select-sm" id="email-smtp-tls">
+                      <option value="starttls">STARTTLS (port 587)</option>
+                      <option value="tls">Implicit TLS / SMTPS (port 465)</option>
+                      <option value="none">None (local relay only)</option>
+                    </select>
+                  </div>
+                  <div class="col-md-6">
+                    <label for="email-smtp-user" class="form-label">SMTP username</label>
+                    <input type="text" class="form-control form-control-sm font-monospace" id="email-smtp-user" autocomplete="off" placeholder="alerts@example.com">
+                  </div>
+                  <div class="col-md-6">
+                    <div class="d-flex justify-content-between align-items-center">
+                      <label for="email-smtp-pass" class="form-label mb-1">SMTP password</label>
+                      <span class="badge text-bg-light border" id="email-badge-smtp-pass">not set</span>
+                    </div>
+                    <div class="input-group input-group-sm">
+                      <input type="password" class="form-control font-monospace" id="email-smtp-pass" autocomplete="new-password" placeholder="Write-only (blank keeps existing)">
+                      <button type="button" class="btn btn-outline-danger d-none" id="email-clear-smtp-pass" title="Remove stored SMTP password"><i aria-hidden="true" class="bi bi-trash"></i></button>
+                    </div>
+                    <div class="form-text">Stored AES-256-GCM encrypted in <code>email-secrets.json</code>, or override via <code>CONCERT_SMTP_PASS</code>.</div>
+                  </div>
+                </div>
+
+                <!-- Resend provider fields -->
+                <div id="email-resend-fields" class="row g-3 mt-1 d-none">
+                  <div class="col-md-6">
+                    <div class="d-flex justify-content-between align-items-center">
+                      <label for="email-resend-key" class="form-label mb-1">Resend API key</label>
+                      <span class="badge text-bg-light border" id="email-badge-resend-key">not set</span>
+                    </div>
+                    <div class="input-group input-group-sm">
+                      <input type="password" class="form-control font-monospace" id="email-resend-key" autocomplete="new-password" placeholder="re_... (write-only)">
+                      <button type="button" class="btn btn-outline-danger d-none" id="email-clear-resend-key" title="Remove stored Resend API key"><i aria-hidden="true" class="bi bi-trash"></i></button>
+                    </div>
+                    <div class="form-text">Override via <code>CONCERT_RESEND_API_KEY</code>. Never returned after saving.</div>
+                  </div>
+                  <div class="col-md-6">
+                    <label for="email-resend-url" class="form-label">Resend API base URL <span class="text-body-secondary small">(optional)</span></label>
+                    <input type="url" class="form-control form-control-sm font-monospace" id="email-resend-url" placeholder="https://api.resend.com">
+                  </div>
+                </div>
+
+                <!-- SendPanda provider fields -->
+                <div id="email-sendpanda-fields" class="row g-3 mt-1 d-none">
+                  <div class="col-md-6">
+                    <div class="d-flex justify-content-between align-items-center">
+                      <label for="email-sendpanda-key" class="form-label mb-1">SendPanda API key</label>
+                      <span class="badge text-bg-light border" id="email-badge-sendpanda-key">not set</span>
+                    </div>
+                    <div class="input-group input-group-sm">
+                      <input type="password" class="form-control font-monospace" id="email-sendpanda-key" autocomplete="new-password" placeholder="sendpanda.email API key (write-only)">
+                      <button type="button" class="btn btn-outline-danger d-none" id="email-clear-sendpanda-key" title="Remove stored SendPanda API key"><i aria-hidden="true" class="bi bi-trash"></i></button>
+                    </div>
+                    <div class="form-text">Override via <code>CONCERT_SENDPANDA_API_KEY</code>. Never returned after saving.</div>
+                  </div>
+                  <div class="col-md-6">
+                    <label for="email-sendpanda-url" class="form-label">SendPanda API base URL <span class="text-body-secondary small">(editable)</span></label>
+                    <input type="url" class="form-control form-control-sm font-monospace" id="email-sendpanda-url" placeholder="https://api.sendpanda.email/v1">
+                  </div>
+                </div>
+
+                <hr class="my-3">
+                <div class="row g-3">
+                  <div class="col-md-5">
+                    <label for="email-from-name" class="form-label">From display name</label>
+                    <input type="text" class="form-control form-control-sm" id="email-from-name" placeholder="Concert">
+                  </div>
+                  <div class="col-md-7">
+                    <label for="email-from-addr" class="form-label">From email address</label>
+                    <input type="email" class="form-control form-control-sm font-monospace" id="email-from-addr" placeholder="alerts@yourdomain.com">
+                  </div>
+                  <div class="col-12">
+                    <label for="email-to" class="form-label">Administrator recipients</label>
+                    <input type="text" class="form-control form-control-sm font-monospace" id="email-to" placeholder="ops@yourdomain.com, security@yourdomain.com">
+                    <div class="form-text">Comma-separated addresses. Each recipient receives an individually signed one-click pause link.</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Cadence schedule & event categories -->
+            <div class="card stat-card">
+              <div class="card-body">
+                <h2 class="h6 mb-3"><i aria-hidden="true" class="bi bi-clock-history"></i> Digest schedule &amp; rate enforcement</h2>
+                <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+                  <span class="small fw-semibold">Send</span>
+                  <select class="form-select form-select-sm w-auto" id="email-cadence-max-select" aria-label="Maximum emails per window">
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                    <option value="4">4</option>
+                    <option value="6">6</option>
+                    <option value="10">10</option>
+                    <option value="12">12</option>
+                    <option value="24">24</option>
+                    <option value="50">50</option>
+                    <option value="100">100</option>
+                    <option value="333">333</option>
+                    <option value="custom">Custom…</option>
+                  </select>
+                  <input type="number" class="form-control form-control-sm w-auto d-none" id="email-cadence-max-custom" min="1" max="1000" aria-label="Custom email count">
+                  <span class="small fw-semibold">email(s) every</span>
+                  <select class="form-select form-select-sm w-auto" id="email-cadence-window-select" aria-label="Cadence window value">
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                    <option value="4">4</option>
+                    <option value="6">6</option>
+                    <option value="7">7</option>
+                    <option value="12">12</option>
+                    <option value="14">14</option>
+                    <option value="15">15</option>
+                    <option value="24">24</option>
+                    <option value="28">28</option>
+                    <option value="30">30</option>
+                    <option value="45">45</option>
+                    <option value="60">60</option>
+                    <option value="90">90</option>
+                    <option value="120">120</option>
+                    <option value="custom">Custom…</option>
+                  </select>
+                  <input type="number" class="form-control form-control-sm w-auto d-none" id="email-cadence-window-custom" min="1" max="43200" aria-label="Custom window value">
+                  <select class="form-select form-select-sm w-auto" id="email-cadence-unit" aria-label="Cadence window unit">
+                    <option value="minutes">minutes</option>
+                    <option value="hours">hours</option>
+                    <option value="days">days</option>
+                  </select>
+                </div>
+                <div class="d-flex flex-wrap gap-1 mb-2" id="email-cadence-presets">
+                  <button type="button" class="btn btn-sm btn-outline-secondary" data-max="1" data-win="15" data-unit="minutes">1 / 15m</button>
+                  <button type="button" class="btn btn-sm btn-outline-secondary" data-max="4" data-win="90" data-unit="minutes">4 / 90m</button>
+                  <button type="button" class="btn btn-sm btn-outline-secondary" data-max="1" data-win="1" data-unit="days">1 / day</button>
+                  <button type="button" class="btn btn-sm btn-outline-secondary" data-max="1" data-win="7" data-unit="days">1 / week</button>
+                  <button type="button" class="btn btn-sm btn-outline-secondary" data-max="333" data-win="28" data-unit="days">333 / 28d</button>
+                </div>
+                <div class="small text-body-secondary mb-3" id="email-cadence-preview">Paced digest schedule enforced by Concert.</div>
+
+                <h3 class="h6 small text-uppercase text-body-secondary mb-2">Queued event categories</h3>
+                <div class="row g-2 small" id="email-categories">
+                  <div class="col-md-6">
+                    <div class="form-check">
+                      <input class="form-check-input" type="checkbox" id="email-cat-silence" data-cat="silence">
+                      <label class="form-check-label" for="email-cat-silence"><strong>Silence &amp; circuit breakers</strong><br><span class="text-body-secondary">Leaf application silence/recovery and upstream CB trips</span></label>
+                    </div>
+                  </div>
+                  <div class="col-md-6">
+                    <div class="form-check">
+                      <input class="form-check-input" type="checkbox" id="email-cat-capacity" data-cat="capacity">
+                      <label class="form-check-label" for="email-cat-capacity"><strong>Capacity &amp; leaf failover</strong><br><span class="text-body-secondary">Unreachable leaves and edge capacity drops</span></label>
+                    </div>
+                  </div>
+                  <div class="col-md-6">
+                    <div class="form-check">
+                      <input class="form-check-input" type="checkbox" id="email-cat-bans" data-cat="bans">
+                      <label class="form-check-label" for="email-cat-bans"><strong>Abuse bans &amp; surges</strong><br><span class="text-body-secondary">Permanent bans, CIDR range bans, and auto-ban surges</span></label>
+                    </div>
+                  </div>
+                  <div class="col-md-6">
+                    <div class="form-check">
+                      <input class="form-check-input" type="checkbox" id="email-cat-fastlane" data-cat="fastlane">
+                      <label class="form-check-label" for="email-cat-fastlane"><strong>Fast-lane reconciliation</strong><br><span class="text-body-secondary">Unresolved payment settlements needing review</span></label>
+                    </div>
+                  </div>
+                  <div class="col-md-6">
+                    <div class="form-check">
+                      <input class="form-check-input" type="checkbox" id="email-cat-queue" data-cat="queue">
+                      <label class="form-check-label" for="email-cat-queue"><strong>Waiting room saturation</strong><br><span class="text-body-secondary">Queue full events and 503 breaker trips</span></label>
+                    </div>
+                  </div>
+                  <div class="col-md-6">
+                    <div class="form-check">
+                      <input class="form-check-input" type="checkbox" id="email-cat-security" data-cat="security">
+                      <label class="form-check-label" for="email-cat-security"><strong>Admin &amp; compliance security</strong><br><span class="text-body-secondary">Portal login lockouts, settings edits, and DSAR actions</span></label>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Compliance & footer branding -->
+            <div class="card stat-card">
+              <div class="card-body">
+                <h2 class="h6 mb-2"><i aria-hidden="true" class="bi bi-file-earmark-check"></i> Compliance headers, links &amp; footer</h2>
+                <p class="small text-body-secondary mb-3">Included automatically with RFC 5322/3834/8058 headers (<code>Auto-Submitted</code>, <code>Precedence: bulk</code>, signed <code>List-Unsubscribe</code> one-click pause) in both HTML and plain-text digests.</p>
+                <div class="row g-3">
+                  <div class="col-md-6">
+                    <label for="email-org-name" class="form-label">Organization name</label>
+                    <input type="text" class="form-control form-control-sm" id="email-org-name" placeholder="Acme Operations Inc.">
+                  </div>
+                  <div class="col-md-6">
+                    <label for="email-postal-address" class="form-label">Physical postal address <span class="text-body-secondary small">(CAN-SPAM)</span></label>
+                    <input type="text" class="form-control form-control-sm" id="email-postal-address" placeholder="100 Main St, Suite 400, Austin, TX 78701">
+                  </div>
+                  <div class="col-md-6">
+                    <label for="email-portal-url" class="form-label">Admin portal URL</label>
+                    <input type="url" class="form-control form-control-sm font-monospace" id="email-portal-url" placeholder="https://portal.example.com">
+                  </div>
+                  <div class="col-md-6">
+                    <label for="email-public-base-url" class="form-label">Public base URL <span class="text-body-secondary small">(one-click unsubscribe)</span></label>
+                    <input type="url" class="form-control form-control-sm font-monospace" id="email-public-base-url" placeholder="https://app.example.com">
+                  </div>
+                  <div class="col-md-6">
+                    <label for="email-privacy-url" class="form-label">Privacy policy URL</label>
+                    <input type="url" class="form-control form-control-sm font-monospace" id="email-privacy-url" placeholder="https://example.com/privacy">
+                  </div>
+                  <div class="col-md-6">
+                    <label for="email-terms-url" class="form-label">Terms / notice URL</label>
+                    <input type="url" class="form-control form-control-sm font-monospace" id="email-terms-url" placeholder="https://example.com/terms">
+                  </div>
+                </div>
+              </div>
+              <div class="card-footer d-flex flex-wrap align-items-center gap-2">
+                <button type="submit" class="btn btn-sm btn-primary" id="email-save"><i aria-hidden="true" class="bi bi-check2-circle"></i> Save email settings</button>
+                <button type="button" class="btn btn-sm btn-outline-secondary" id="email-reload"><i aria-hidden="true" class="bi bi-arrow-counterclockwise"></i> Reload</button>
+                <span class="small text-body-secondary ms-auto" id="email-save-status"></span>
+              </div>
+            </div>
+          </form>
+        </div>
+
+        <!-- Right column: DNS connectivity check, test send & live event queue -->
+        <div class="col-xl-5 d-flex flex-column gap-3">
+          <div class="card stat-card">
+            <div class="card-body">
+              <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+                <h2 class="h6 mb-0"><i aria-hidden="true" class="bi bi-diagram-3"></i> DNS connectivity &amp; test delivery</h2>
+                <button type="button" class="btn btn-sm btn-outline-primary" id="email-verify-btn"><i aria-hidden="true" class="bi bi-patch-check"></i> Verify DNS &amp; connection</button>
+              </div>
+              <p class="small text-body-secondary mb-3">Save settings first, then verify sender MX, SPF, DMARC, optional DKIM selector, recipient MX, provider DNS, and live SMTP/API authentication.</p>
+              <div id="email-verify-summary" class="alert d-none py-2 small" role="status"></div>
+              <div class="table-responsive d-none" id="email-verify-wrap">
+                <table class="table table-sm table-portal mb-3">
+                  <thead>
+                    <tr>
+                      <th scope="col">Check</th>
+                      <th scope="col">Status</th>
+                      <th scope="col">Result</th>
+                    </tr>
+                  </thead>
+                  <tbody id="email-verify-rows"></tbody>
+                </table>
+              </div>
+              <hr class="my-3">
+              <label for="email-test-to" class="form-label small fw-semibold">Send test email</label>
+              <div class="input-group input-group-sm">
+                <input type="email" class="form-control font-monospace" id="email-test-to" placeholder="Blank sends to first configured recipient">
+                <button type="button" class="btn btn-success" id="email-test-btn"><i aria-hidden="true" class="bi bi-envelope-arrow-up"></i> Send test</button>
+              </div>
+              <div class="small text-body-secondary mt-2" id="email-test-result"></div>
+            </div>
+          </div>
+
+          <div class="card stat-card">
+            <div class="card-body">
+              <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+                <h2 class="h6 mb-0"><i aria-hidden="true" class="bi bi-inbox"></i> Event queue &amp; schedule budget</h2>
+                <div class="ms-auto d-flex gap-1">
+                  <button type="button" class="btn btn-sm btn-outline-warning" id="email-pause-btn"><i aria-hidden="true" class="bi bi-pause-fill"></i> Pause</button>
+                  <button type="button" class="btn btn-sm btn-outline-primary" id="email-flush-btn"><i aria-hidden="true" class="bi bi-send"></i> Flush now</button>
+                  <button type="button" class="btn btn-sm btn-outline-secondary" id="email-refresh-btn" title="Refresh queue status"><i aria-hidden="true" class="bi bi-arrow-clockwise"></i></button>
+                </div>
+              </div>
+              <div class="d-flex justify-content-between small mb-1">
+                <span>Rolling cadence budget</span>
+                <span class="fw-semibold" id="email-budget-text">–</span>
+              </div>
+              <div class="progress mb-2" role="progressbar" aria-label="Email cadence budget used" aria-valuemin="0" aria-valuemax="100">
+                <div class="progress-bar" id="email-budget-bar"></div>
+              </div>
+              <dl class="row stat-list small mb-3">
+                <dt class="col-6">Next scheduled send</dt><dd class="col-6 text-end" id="email-next-send">–</dd>
+                <dt class="col-6">Queued events</dt><dd class="col-6 text-end" id="email-queued-summary">–</dd>
+                <dt class="col-6">Delivered / Failed</dt><dd class="col-6 text-end" id="email-totals">–</dd>
+                <dt class="col-6">Last delivery</dt><dd class="col-6 text-end text-break" id="email-last-delivery">–</dd>
+              </dl>
+
+              <div class="d-none mb-3" id="email-unsubscribed-wrap">
+                <h3 class="h6 small text-uppercase text-body-secondary mb-2">Paused / unsubscribed recipients</h3>
+                <ul class="list-group list-group-flush small" id="email-unsubscribed-list"></ul>
+              </div>
+
+              <h3 class="h6 small text-uppercase text-body-secondary mb-2">Pending digest events</h3>
+              <div class="table-responsive">
+                <table class="table table-sm table-portal mb-0">
+                  <thead>
+                    <tr>
+                      <th scope="col">Severity</th>
+                      <th scope="col">Event</th>
+                      <th scope="col" class="text-end">Count</th>
+                    </tr>
+                  </thead>
+                  <tbody id="email-queue-rows"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>

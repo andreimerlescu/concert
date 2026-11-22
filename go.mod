@@ -1,13 +1,13 @@
 module github.com/andreimerlescu/concert
 
-go 1.27.3
+go 1.27.4
 
 require (
 	filippo.io/edwards25519 v1.2.0
 	github.com/andreimerlescu/goenv v1.1.0
 	github.com/andreimerlescu/naddr v0.0.1
-	github.com/andreimerlescu/room v1.5.0
-	github.com/andreimerlescu/sema v1.1.0
+	github.com/andreimerlescu/room v1.6.0
+	github.com/andreimerlescu/sema v1.2.0
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1
 	github.com/gin-gonic/gin v1.12.0
 	github.com/hiero-ledger/hiero-sdk-go/v2 v2.85.1

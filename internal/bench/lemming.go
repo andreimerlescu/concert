@@ -70,6 +70,15 @@ func (s *site) get(u string) *page {
 	return s.pages[u]
 }
 
+func (s *site) depthOf(u string) (int, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if p := s.pages[u]; p != nil {
+		return p.depth, true
+	}
+	return 0, false
+}
+
 // hit counts one visit to u this stage.
 func (s *site) hit(u string) {
 	s.mu.Lock()
@@ -146,9 +155,10 @@ func newLemming(id int, o *Options, transport http.RoundTripper, s *site, rec *r
 		id:   id,
 		opts: o,
 		client: &http.Client{
-			Transport: transport,
-			Jar:       jar,
-			Timeout:   o.RequestTimeout,
+			Transport:     transport,
+			Jar:           jar,
+			Timeout:       o.RequestTimeout,
+			CheckRedirect: stayOnTarget(o.Target),
 		},
 		site:   s,
 		rec:    rec,
@@ -181,8 +191,8 @@ func (l *lemming) run(ctx context.Context) {
 				next, depth = l.start(), 0
 			} else {
 				next = l.site.fallback(l.rng)
-				if pp := l.site.get(next); pp != nil {
-					depth = pp.depth
+				if d, ok := l.site.depthOf(next); ok {
+					depth = d
 				}
 			}
 		}
@@ -345,11 +355,39 @@ func (l *lemming) fetch(ctx context.Context, u string, isPage bool) (body []byte
 		return nil, contentType, final, false
 	}
 	fail, finding := statusKind(resp.StatusCode)
+	if fail == "" && finding == "" && offsiteRedirect(resp, l.opts.Target) {
+		finding = FindOffsite
+	}
 	s.fail, s.finding = fail, finding
 	if fail != "" || finding != "" || resp.StatusCode >= 300 {
 		return nil, contentType, final, false
 	}
 	return buf.Bytes(), contentType, final, true
+}
+
+// stayOnTarget is the lemmings' redirect policy: follow redirects on the
+// target's host, as a browser would, and stop at one that leaves it. The
+// benchmark loads only the application it was pointed at: an off-site
+// login, payment or CDN redirect is never crawled, loaded or sent -header.
+func stayOnTarget(target *url.URL) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		if target == nil || !strings.EqualFold(req.URL.Host, target.Host) {
+			return http.ErrUseLastResponse
+		}
+		return nil
+	}
+}
+
+// offsiteRedirect reports a redirect response stayOnTarget did not follow.
+func offsiteRedirect(resp *http.Response, target *url.URL) bool {
+	if resp.StatusCode < 300 || resp.StatusCode > 399 || target == nil {
+		return false
+	}
+	loc, err := resp.Location()
+	return err == nil && !strings.EqualFold(loc.Host, target.Host)
 }
 
 // checkRange asks for the first KiB of a media file, as a player seeking

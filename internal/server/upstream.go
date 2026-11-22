@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/andreimerlescu/concert/internal/fcgi"
 	"github.com/andreimerlescu/concert/internal/hop"
 )
 
@@ -62,17 +63,21 @@ func (b *upstreamBackend) recordSuccess() {
 	b.mu.Unlock()
 }
 
-func (b *upstreamBackend) recordFailure(threshold int, cooldown time.Duration, errMsg string, now time.Time) {
+func (b *upstreamBackend) recordFailure(threshold int, cooldown time.Duration, errMsg string, now time.Time) bool {
 	if threshold <= 0 {
-		return
+		return false
 	}
 	b.mu.Lock()
+	wasOpen := !b.openUntil.IsZero() && now.Before(b.openUntil)
 	b.failures++
 	b.lastErr = errMsg
+	opened := false
 	if b.failures >= threshold {
 		b.openUntil = now.Add(cooldown)
+		opened = !wasOpen
 	}
 	b.mu.Unlock()
+	return opened
 }
 
 func (b *upstreamBackend) setActiveHealth(ok bool, errMsg string) {
@@ -90,16 +95,18 @@ func (b *upstreamBackend) setActiveHealth(ok bool, errMsg string) {
 }
 
 type upstreamPool struct {
-	backends    []*upstreamBackend
-	rr          atomic.Uint64
-	cbThreshold int
-	cbCooldown  time.Duration
-	retries     int // extra attempts for bodyless requests; see trackedTransport
-	healthPath  string
-	healthEvery time.Duration
-	transport   *http.Transport
-	stop        chan struct{}
-	stopOnce    sync.Once
+	backends      []*upstreamBackend
+	rr            atomic.Uint64
+	cbThreshold   int
+	cbCooldown    time.Duration
+	retries       int // extra attempts for bodyless requests; see trackedTransport
+	healthPath    string
+	healthEvery   time.Duration
+	transport     *http.Transport
+	fcgi          *fcgi.Transport
+	onCircuitOpen func(target, reason string)
+	stop          chan struct{}
+	stopOnce      sync.Once
 }
 
 func parseUpstreams(spec string) ([]*url.URL, error) {
@@ -111,8 +118,20 @@ func parseUpstreams(spec string) ([]*url.URL, error) {
 			continue
 		}
 		u, err := url.Parse(part)
-		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-			return nil, fmt.Errorf("invalid -upstream entry %q: must look like http://host:port", part)
+		if err != nil {
+			return nil, fmt.Errorf("invalid -upstream entry %q: %w", part, err)
+		}
+		switch u.Scheme {
+		case "http", "https":
+			if u.Host == "" {
+				return nil, fmt.Errorf("invalid -upstream entry %q: must look like http://host:port", part)
+			}
+		case "fcgi", "fcgi+unix":
+			if _, _, ferr := fcgi.ParseTarget(u); ferr != nil {
+				return nil, ferr
+			}
+		default:
+			return nil, fmt.Errorf("invalid -upstream entry %q: must use http://, https://, fcgi://, or fcgi+unix://", part)
 		}
 		if seen[u.String()] {
 			continue
@@ -158,6 +177,10 @@ func buildUpstreamTLSConfig(caFile, clientCert, clientKey string) (*tls.Config, 
 }
 
 func newUpstreamPool(cfg config, transport *http.Transport) *upstreamPool {
+	return newUpstreamPoolWithFCGI(cfg, transport, nil)
+}
+
+func newUpstreamPoolWithFCGI(cfg config, transport *http.Transport, fcgiTr *fcgi.Transport) *upstreamPool {
 	targets := cfg.targets
 	if len(targets) == 0 && cfg.target != nil {
 		targets = []*url.URL{cfg.target}
@@ -174,6 +197,7 @@ func newUpstreamPool(cfg config, transport *http.Transport) *upstreamPool {
 		healthPath:  cfg.upstreamHealthPath,
 		healthEvery: cfg.upstreamHealthInterval,
 		transport:   transport,
+		fcgi:        fcgiTr,
 		stop:        make(chan struct{}),
 	}
 	if p.healthPath != "" && p.healthEvery > 0 {
@@ -191,6 +215,9 @@ func (p *upstreamPool) close() {
 		if p.transport != nil {
 			p.transport.CloseIdleConnections()
 		}
+		if p.fcgi != nil {
+			_ = p.fcgi.Close()
+		}
 	})
 }
 
@@ -198,18 +225,24 @@ func (p *upstreamPool) close() {
 // for capacity, while another has room.
 const backpressureHold = time.Second
 
+// leafUnusable marks a leaf backend that reported draining, an unhealthy or
+// silent application, or whose control-plane reports expired. 0 means unknown
+// (standalone pool or a load-balancer VIP), and >0 is the leaf's free-slot share.
+const leafUnusable int64 = -1
+
 // pick selects a backend for a new request; see pickExcept.
 func (p *upstreamPool) pick(now time.Time) (*upstreamBackend, bool) {
 	return p.pickExcept(now, nil)
 }
 
 // pickExcept selects the healthy backend with the most free capacity,
-// skipping those in tried. When every healthy backend reports its slots
-// (leaves on an edge), free capacity is slots minus in-flight; otherwise it
-// is the fewest in flight. Backends that just answered with backpressure
-// are used only when nothing else is healthy. Ties break round-robin.
-// Returns (backend, true) if a healthy backend was found; otherwise a
-// round-robin fallback (so half-open probes can recover) and false.
+// skipping those in tried and leaves the control plane marked unusable. When
+// every healthy, usable backend reports its slots (leaves on an edge), free
+// capacity is slots minus in-flight; otherwise it is the fewest in flight.
+// Backends that just answered with backpressure are used only when nothing
+// else is healthy and usable. Ties break round-robin.
+// Returns (backend, true) if a healthy usable backend was found; otherwise a
+// round-robin fallback (so half-open probes can recover) and its health.
 func (p *upstreamPool) pickExcept(now time.Time, tried []*upstreamBackend) (*upstreamBackend, bool) {
 	n := len(p.backends)
 	if n == 1 {
@@ -227,11 +260,23 @@ func (p *upstreamPool) pickExcept(now time.Time, tried []*upstreamBackend) (*ups
 	}
 	nowNS := now.UnixNano()
 	slotAware := true
+	usableAny := false
 	for _, b := range p.backends {
-		if b.isHealthy(now) && b.slots.Load() <= 0 {
+		if !b.isHealthy(now) {
+			continue
+		}
+		s := b.slots.Load()
+		if s < 0 {
+			continue
+		}
+		usableAny = true
+		if s == 0 {
 			slotAware = false
 			break
 		}
+	}
+	if !usableAny {
+		slotAware = false
 	}
 	var best, bestFull *upstreamBackend
 	var bestScore, bestFullScore int64 = -(1 << 62), -(1 << 62)
@@ -240,9 +285,13 @@ func (p *upstreamPool) pickExcept(now time.Time, tried []*upstreamBackend) (*ups
 		if isTried(b) || !b.isHealthy(now) {
 			continue
 		}
+		s := b.slots.Load()
+		if s < 0 {
+			continue
+		}
 		score := -b.inFlight.Load()
 		if slotAware {
-			score += b.slots.Load()
+			score += s
 		}
 		if b.fullUntil.Load() > nowNS {
 			if score > bestFullScore {
@@ -260,7 +309,13 @@ func (p *upstreamPool) pickExcept(now time.Time, tried []*upstreamBackend) (*ups
 	if bestFull != nil {
 		return bestFull, true
 	}
-	// Nothing healthy and untried: a round-robin candidate.
+	// Nothing healthy and usable untried: fall back round-robin, preferring a
+	// circuit-healthy backend (e.g. when every leaf is draining/starting up).
+	for i := 0; i < n; i++ {
+		if b := p.backends[(start+i)%n]; !isTried(b) && b.isHealthy(now) {
+			return b, true
+		}
+	}
 	for i := 0; i < n; i++ {
 		if b := p.backends[(start+i)%n]; !isTried(b) {
 			return b, false
@@ -306,10 +361,20 @@ func (p *upstreamPool) probeLoop() {
 
 func (p *upstreamPool) probeAll(client *http.Client) {
 	for _, b := range p.backends {
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		if fcgi.IsFastCGI(b.target) && p.fcgi != nil {
+			err := p.fcgi.DialCheck(ctx, b.target)
+			cancel()
+			if err != nil {
+				b.setActiveHealth(false, err.Error())
+			} else {
+				b.setActiveHealth(true, "")
+			}
+			continue
+		}
 		u := *b.target
 		u.Path = p.healthPath
 		u.RawQuery = ""
-		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 		if err != nil {
 			cancel()
@@ -341,6 +406,11 @@ func newEnterpriseProxy(cfg config, stats *counters, modify func(*http.Response)
 	if err != nil {
 		return nil, nil, err
 	}
+	// Size the keep-alive pool for the configured concurrency so high-capacity
+	// edge-to-leaf and leaf-to-origin links reuse connections instead of
+	// churning TCP handshakes and TIME_WAIT sockets.
+	perHost := max(256, cfg.capacity+cfg.effectivePriorityCap(), cfg.hostCap)
+	totalIdle := max(512, perHost*max(1, len(cfg.targets)))
 	transport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
@@ -354,20 +424,50 @@ func newEnterpriseProxy(cfg config, stats *counters, modify func(*http.Response)
 		// unzips it here: the browser loses Content-Length (no download
 		// progress) and Concert spends CPU on every asset.
 		DisableCompression:    true,
-		MaxIdleConns:          512,
-		MaxIdleConnsPerHost:   256,
+		MaxIdleConns:          totalIdle,
+		MaxIdleConnsPerHost:   perHost,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: time.Second,
 		ResponseHeaderTimeout: cfg.headerTimeout,
+		WriteBufferSize:       32 << 10,
+		ReadBufferSize:        32 << 10,
 	}
 
-	pool := newUpstreamPool(cfg, transport)
+	var fcgiTr *fcgi.Transport
+	if cfg.hasFastCGI {
+		var ferr error
+		fcgiTr, ferr = fcgi.NewTransport(fcgi.Config{
+			Root:          cfg.staticRoot,
+			Index:         cfg.fcgiIndex,
+			DenyPaths:     cfg.parsedFCGIDenyPaths,
+			HeaderTimeout: cfg.headerTimeout,
+			OnStderr: func(msg string) {
+				log.Printf("fcgi stderr: %s", clip(msg, 512))
+			},
+			OnRequest: func() {
+				if stats != nil {
+					stats.fcgiRequests.Add(1)
+				}
+			},
+			OnDenied: func(p string) {
+				if stats != nil {
+					stats.fcgiDenied.Add(1)
+				}
+			},
+		})
+		if ferr != nil {
+			return nil, nil, ferr
+		}
+	}
+	pool := newUpstreamPoolWithFCGI(cfg, transport, fcgiTr)
 	rt := &trackedTransport{
-		base:  transport,
-		pool:  pool,
-		stats: stats,
-		topo:  topo,
+		base:     transport,
+		fcgi:     fcgiTr,
+		compress: cfg.compress,
+		pool:     pool,
+		stats:    stats,
+		topo:     topo,
 	}
 
 	proxy := &httputil.ReverseProxy{
@@ -379,7 +479,20 @@ func newEnterpriseProxy(cfg config, stats *counters, modify func(*http.Response)
 			if !ok || b == nil {
 				b, _ = pool.pick(time.Now())
 			}
-			pr.SetURL(b.target)
+			if fcgi.IsFastCGI(b.target) {
+				// Keep request path and query intact so Unix socket paths in
+				// fcgi+unix:///... never pollute REQUEST_URI.
+				pr.Out.URL.Scheme = "http"
+				pr.Out.URL.Host = pr.In.Host
+				if pr.Out.URL.Host == "" {
+					pr.Out.URL.Host = "localhost"
+				}
+				pr.Out.URL.Path = pr.In.URL.Path
+				pr.Out.URL.RawPath = pr.In.URL.RawPath
+				pr.Out.URL.RawQuery = pr.In.URL.RawQuery
+			} else {
+				pr.SetURL(b.target)
+			}
 
 			ra, hasAddr := remoteAddr(pr.In)
 			fromTrusted := hasAddr && containsAddr(cfg.trusted, ra)
@@ -435,10 +548,12 @@ func newEnterpriseProxy(cfg config, stats *counters, modify func(*http.Response)
 var errCircuitOpen = errors.New("upstream circuit breaker open")
 
 type trackedTransport struct {
-	base  http.RoundTripper
-	pool  *upstreamPool
-	stats *counters
-	topo  *topology // signs an edge's claims; nil or standalone signs nothing
+	base     http.RoundTripper
+	fcgi     *fcgi.Transport
+	compress bool
+	pool     *upstreamPool
+	stats    *counters
+	topo     *topology // signs an edge's claims; nil or standalone signs nothing
 }
 
 // RoundTrip sends req to the backend chosen for it. On an edge it signs the
@@ -469,15 +584,15 @@ func (t *trackedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	var tried []*upstreamBackend
 	for i := 0; ; i++ {
 		out := req
-		if b != first {
+		if b != first && !fcgi.IsFastCGI(b.target) && !fcgi.IsFastCGI(first.target) {
 			out = retarget(req, first.target, b.target)
 		}
 		out = t.topo.signHop(out)
 		resp, err := t.attempt(b, out)
-		if err == nil && t.topo.isEdge() && resp.StatusCode == http.StatusServiceUnavailable && resp.Header.Get(hop.BackpressureHeader) != "" {
+		if err == nil && t.topo.isEdge() && isLeafBackpressure(resp, t.topo) {
 			t.topo.edge.backpressure.Add(1)
 		}
-		if i+1 >= attempts || !retryable(resp, err) {
+		if i+1 >= attempts || !retryableFor(resp, err, t.topo) {
 			return resp, err
 		}
 		if resp != nil {
@@ -506,14 +621,25 @@ func (t *trackedTransport) attempt(b *upstreamBackend, req *http.Request) (*http
 	defer b.inFlight.Add(-1)
 
 	start := time.Now()
-	resp, err := t.base.RoundTrip(req)
+	var resp *http.Response
+	var err error
+	if fcgi.IsFastCGI(b.target) && t.fcgi != nil {
+		resp, err = t.fcgi.RoundTripTo(req, b.target)
+		if err == nil && t.compress {
+			maybeGzipFastCGI(req, resp)
+		}
+	} else {
+		resp, err = t.base.RoundTrip(req)
+	}
 	dur := time.Since(start)
 	if t.stats != nil {
 		t.stats.upstreamLatency.observe(dur)
 	}
 	if err != nil {
 		if !errors.Is(err, context.Canceled) {
-			b.recordFailure(t.pool.cbThreshold, t.pool.cbCooldown, err.Error(), time.Now())
+			if b.recordFailure(t.pool.cbThreshold, t.pool.cbCooldown, err.Error(), time.Now()) && t.pool.onCircuitOpen != nil {
+				t.pool.onCircuitOpen(b.target.Redacted(), err.Error())
+			}
 		}
 		return nil, err
 	}
@@ -530,22 +656,42 @@ func (t *trackedTransport) attempt(b *upstreamBackend, req *http.Request) (*http
 		}
 	}
 	switch {
-	case resp.StatusCode == http.StatusServiceUnavailable && resp.Header.Get(hop.BackpressureHeader) != "":
+	case isLeafBackpressure(resp, t.topo):
 		// A leaf at capacity is healthy: no circuit-breaker failure.
 	case resp.StatusCode >= 502 && resp.StatusCode <= 504:
-		b.recordFailure(t.pool.cbThreshold, t.pool.cbCooldown, fmt.Sprintf("HTTP %d", resp.StatusCode), time.Now())
+		if t.stats != nil {
+			t.stats.upstreamUnavail.Add(1)
+		}
+		reason := fmt.Sprintf("HTTP %d", resp.StatusCode)
+		if b.recordFailure(t.pool.cbThreshold, t.pool.cbCooldown, reason, time.Now()) && t.pool.onCircuitOpen != nil {
+			t.pool.onCircuitOpen(b.target.Redacted(), reason)
+		}
 	default:
 		b.recordSuccess()
 	}
 	return resp, nil
 }
 
+// isLeafBackpressure reports whether resp is a leaf capacity refusal. Only an
+// edge talks to leaves; standalone and leaf nodes talk to applications and
+// never trust an origin's Concert-Backpressure header.
+func isLeafBackpressure(resp *http.Response, topo *topology) bool {
+	if topo != nil && !topo.isEdge() {
+		return false
+	}
+	return resp != nil && resp.StatusCode == http.StatusServiceUnavailable &&
+		resp.Header.Get(hop.BackpressureHeader) != ""
+}
+
 // retryable reports whether an attempt failed without reaching the
 // application: a leaf's backpressure answer, or no connection at all.
 func retryable(resp *http.Response, err error) bool {
+	return retryableFor(resp, err, nil)
+}
+
+func retryableFor(resp *http.Response, err error, topo *topology) bool {
 	if err == nil {
-		return resp != nil && resp.StatusCode == http.StatusServiceUnavailable &&
-			resp.Header.Get(hop.BackpressureHeader) != ""
+		return isLeafBackpressure(resp, topo)
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false

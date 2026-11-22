@@ -224,6 +224,10 @@ func writeFileAtomic(path string, data []byte) error {
 	tmp := f.Name()
 	defer os.Remove(tmp) // no-op after a successful rename
 
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return err
+	}
 	if _, err := f.Write(data); err != nil {
 		_ = f.Close()
 		return err

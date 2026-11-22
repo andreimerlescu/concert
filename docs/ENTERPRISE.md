@@ -14,6 +14,7 @@ Enable `-enterprise-hardened` (`CONCERT_HARDENED=true`) in production to fail cl
 - `CONCERT_ADMIN_TOKEN` or `CONCERT_ADMIN_TOKENS` configured
 - Tamper-evident `-audit-log` persisted (cannot be `off`)
 - Admin portal served over native TLS (`-portal-tls-cert`/`-portal-tls-key`) or `-portal-secure-cookie` behind trusted proxies
+- On leaf nodes (`-role leaf`), `-hop-require-nonce=true` (enforcing single-use `Concert-Hop` nonces with bounded replay defense)
 
 For immutable / GitOps deployments, also enable `-read-only-settings` (`CONCERT_READ_ONLY_SETTINGS=true`) so neither the portal nor `/_room/cap` can mutate `settings.json` at runtime.
 
@@ -27,7 +28,7 @@ For immutable / GitOps deployments, also enable `-read-only-settings` (`CONCERT_
 | --- | --- |
 | `viewer` | Read-only overview, queue, bans, history, settings, `/_room/stats`, `/_room/metrics` (internal `upstream` URL is hidden when `-stats-auth=true`) |
 | `operator` | All `viewer` permissions + queue promote/kick (`POST /_room/promote`), capacity updates (`POST /_room/cap`), temporary single-IP bans, lifting bans |
-| `admin` | All `operator` permissions + permanent bans, CIDR range bans, live settings changes, GDPR/CCPA DSAR export & erasure |
+| `admin` | All `operator` permissions + permanent bans, CIDR range bans, live settings changes, drained leaf re-benchmarking (`POST /_room/rebench`, `POST /api/topology/rebench`), zero-downtime fast-lane reconciliation (`POST /_room/fastlane/reconcile`, `POST /api/fastlane/reconcile`), GDPR/CCPA DSAR export & erasure |
 
 ### Multi-User Portal Accounts with Argon2id + TOTP MFA
 
@@ -93,10 +94,12 @@ CONCERT_ADMIT_SECRET_FILE=/run/secrets/concert/admit_secret \
 
 ## 4. Secrets Management, Rotation, Custom TLS & FIPS 140-3
 
-- **File-backed secrets (`_FILE`):** Every secret environment variable supports a `*_FILE` sibling (`CONCERT_ADMIT_SECRET_FILE`, `CONCERT_ADMIT_SECRET_PREV_FILE`, `CONCERT_ADMIN_TOKEN_FILE`, `CONCERT_ADMIN_TOKENS_FILE`, `CONCERT_PORTAL_PASS_FILE`, `CONCERT_PORTAL_USERS_FILE`, `CONCERT_POLICY_TOKEN_FILE`, `CONCERT_REDIS_PASSWORD_FILE`, `CONCERT_STELLAR_FEE_SECRET_FILE`, `CONCERT_HEDERA_FEE_SECRET_FILE`) for Kubernetes Secrets, Docker Secrets, and Vault Agent sidecars.
-- **Zero-downtime secret rotation:** Set `CONCERT_ADMIT_SECRET` to the new secret and `CONCERT_ADMIT_SECRET_PREV` to the outgoing secret for one `-admit-ttl` / priority-grant window. Concert validates cookies signed by either key and automatically re-signs them under the new key.
-- **Enterprise PKI & Portal HTTPS:** Use `-tls-cert` / `-tls-key` (main listener) and `-portal-tls-cert` / `-portal-tls-key` (admin portal) for hot-reloading PEM certificates with AEAD-only TLS 1.2+ or `-tls-min-version=1.3` and `-hsts-max-age=31536000`.
-- **Upstream mTLS & Custom CA:** Set `-upstream-ca`, `-upstream-client-cert`, and `-upstream-client-key` to enforce mutual TLS to internal origins.
+- **File-backed secrets (`_FILE`):** Every secret environment variable supports a `*_FILE` sibling (`CONCERT_ADMIT_SECRET_FILE`, `CONCERT_ADMIT_SECRET_PREV_FILE`, `CONCERT_ADMIN_TOKEN_FILE`, `CONCERT_ADMIN_TOKENS_FILE`, `CONCERT_PORTAL_PASS_FILE`, `CONCERT_PORTAL_USERS_FILE`, `CONCERT_POLICY_TOKEN_FILE`, `CONCERT_REDIS_PASSWORD_FILE`, `CONCERT_SMTP_PASS_FILE`, `CONCERT_RESEND_API_KEY_FILE`, `CONCERT_SENDPANDA_API_KEY_FILE`, `CONCERT_STELLAR_FEE_SECRET_FILE`, `CONCERT_HEDERA_FEE_SECRET_FILE`) for Kubernetes Secrets, Docker Secrets, and Vault Agent sidecars.
+- **Zero-downtime secret rotation:** Set `CONCERT_ADMIT_SECRET` to the new secret and `CONCERT_ADMIT_SECRET_PREV` to the outgoing secret for one `-admit-ttl` / priority-grant window. Concert validates cookies, signed email unsubscribe links, and AES-256-GCM encrypted `email-secrets.json` under either key and re-encrypts/re-signs under the new key on next write.
+- **Enterprise PKI, Portal HTTPS, Companion `:80` Redirect & Native Leaf mTLS:** Use `-tls-cert` / `-tls-key` (main listener) and `-portal-tls-cert` / `-portal-tls-key` (admin portal) for hot-reloading PEM certificates with AEAD-only TLS 1.2+ or `-tls-min-version=1.3` and `-hsts-max-age=31536000`. Add `-tls-http-listen=:80` for ACME HTTP-01 and strict-`Host` HTTP→HTTPS redirects (`301`/`308`). Add `-tls-client-ca` with `-hop-require-mtls=true` on leaf nodes to require verified edge client certificates for `Concert-Hop` claims and `/_room/hop/*` while still allowing direct public browsers on the same port (`tls.VerifyClientCertIfGiven`), or set `-tls-require-client-cert=true` for strict mTLS on every connection.
+- **Confined Static Offload & FastCGI Hardening:** `-static-root`, `-static-mounts`, `-fcgi-deny-paths`, `-tls-http-listen`, and `fcgi+unix://` socket paths are locked against live HTTP Portal mutation; `internal/static` and `internal/fcgi` use kernel-enforced `os.Root` containment, fail-closed safe-extension allowlists, dotfile/secret rejection, httpoxy `Proxy` header stripping, and default PHP execution denial on `/wp-content/uploads/*` and `/wp-config.php`.
+- **Single-Use Hop Nonces:** `-hop-replay-guard=true` (default) blocks captured `Concert-Hop` header replays via a bounded 64-shard cache; set `-hop-require-nonce=true` after rolling upgrades to reject nonceless legacy claims.
+- **Upstream mTLS & Custom CA:** Set `-upstream-ca`, `-upstream-client-cert`, and `-upstream-client-key` to enforce mutual TLS to internal origins or leaves.
 - **FIPS 140-3:** Build with `make build-fips` (sets `GOFIPS140=v1.0.0` using Go's native FIPS 140-3 cryptographic module).
 
 ---
@@ -105,8 +108,8 @@ CONCERT_ADMIT_SECRET_FILE=/run/secrets/concert/admit_secret \
 
 - **Multi-Upstream Load Balancing & Circuit Breaker:** Pass comma-separated URLs to `-upstream`, configure active health checks (`-upstream-health-path=/healthz`, `-upstream-health-interval=10s`), and enable circuit breaking (`-upstream-cb-failures=5`, `-upstream-cb-cooldown=15s`).
 - **Kubernetes Readiness & Graceful Drain:** Point `livenessProbe` at `/_room/healthz` and `readinessProbe` at `/_room/readyz` (returns `503` immediately on `SIGTERM` drain or when all upstreams are unhealthy). See `deploy/k8s/deployment.yaml`.
-- **Multi-Node Ban Synchronization:** Set `-redis-addr`, `-redis-tls=true`, and `CONCERT_REDIS_PASSWORD_FILE` to replicate bans and unbans across Concert instances in real time via Redis/Valkey Pub/Sub + state hydration (fails open gracefully if Redis is unreachable).
-- **Prometheus Metrics:** Scrape `/_room/metrics` (with a `viewer` bearer token when `-stats-auth=true`) for gauges, counters, and upstream latency histograms (`concert_upstream_duration_seconds`).
+- **Multi-Node Ban Synchronization & Alert Deduplication:** Set `-redis-addr`, `-redis-tls=true`, and `CONCERT_REDIS_PASSWORD_FILE` to replicate bans/unbans in real time via Redis/Valkey Pub/Sub + state hydration and deduplicate shared cluster email alerts (`-email-cluster-dedupe=true`, default; counter `concert_email_cluster_deduped_total`) via non-blocking fail-open `SET NX PX` leases.
+- **Prometheus Metrics:** Scrape `/_room/metrics` (with a `viewer` bearer token when `-stats-auth=true`) for gauges, counters, and upstream latency histograms (`concert_upstream_duration_seconds`, `concert_room_cap_draining`, `concert_leaf_hop_replayed_total`, `concert_leaf_hop_mtls_rejected_total`, `concert_leaf_rebench_total`, `concert_fastlane_records_used`, `concert_fastlane_records_max`, `concert_fastlane_unresolved`, `concert_email_cluster_deduped_total`).
 - **Structured JSON Logging & Tracing:** Set `-log-format=json` for SIEM-ready access logs carrying `request_id` (`X-Request-ID`) and W3C `trace_id` (`traceparent`).
 
 ---
@@ -118,11 +121,27 @@ CONCERT_ADMIT_SECRET_FILE=/run/secrets/concert/admit_secret \
 - **Configurable Retention:** Adjust `-history-retention` between `1h` and `720h` (default `72h`).
 - **DSAR Export & Erasure (`admin` role):**
   - `GET /_room/privacy/export?client=203.0.113.55`
-  - `DELETE /_room/privacy/erase?client=203.0.113.55` (add `&include_bans=true` to also lift an individual ban; all DSAR actions are recorded in `audit.jsonl`)
+  - `DELETE /_room/privacy/erase?client=203.0.113.55` (add `&include_bans=true` to also lift an individual ban; also purges matching pending events from `email-queue.json`; all DSAR actions are recorded in `audit.jsonl`)
 
 ---
 
-## 7. Compliance Control Mapping
+## 7. Administrator Email Delivery, DNS Verification & Scheduled Digests
+
+Off by default (`-email-provider ""`). Managed through the Admin Portal **Email** tab (RBAC `admin` + CSRF + hash-chained audit trail) or flags / `CONCERT_*` environment variables:
+
+- **Providers (`-email-provider smtp|resend|sendpanda`):**
+  - **SMTP:** `-email-smtp-host`, `-email-smtp-port` (default `587`), `-email-smtp-tls` (`starttls`, `tls`, or `none`; `none` is rejected when `-enterprise-hardened=true`), `-email-smtp-user`, and password via `CONCERT_SMTP_PASS` (`*_FILE`) or write-only encrypted portal storage.
+  - **Resend:** Bearer API key via `CONCERT_RESEND_API_KEY` (`*_FILE`) or encrypted portal vault; optional `-email-resend-url` (default `https://api.resend.com`, HTTPS required under `-enterprise-hardened=true`).
+  - **SendPanda (`sendpanda.email`):** Bearer API key via `CONCERT_SENDPANDA_API_KEY` (`*_FILE`) or encrypted portal vault; editable `-email-sendpanda-url` (default `https://api.sendpanda.email/v1`, HTTPS required under `-enterprise-hardened=true`).
+- **Encrypted Secret Vault (`email-secrets.json`, `0600`):** Portal-entered SMTP passwords and API keys are never written to `settings.json`, never returned by `GET` APIs, and never logged. They are encrypted with AES-256-GCM using a key derived from `CONCERT_ADMIT_SECRET` (requiring a stable `CONCERT_ADMIT_SECRET`). Environment variables (`CONCERT_*` / `*_FILE`) always take precedence and remain the sole mechanism in `-read-only-settings` GitOps mode.
+- **DNS Connectivity & Test Delivery (`POST /api/email/verify`, `POST /api/email/test`):** Checks sender domain MX, SPF, DMARC, optional DKIM selector (`-email-dkim-selector`), recipient domain MX, provider host DNS, and live SMTP/API authentication, plus on-demand test email sending.
+- **Coalescing Event Queue & Paced Cadence (`email-queue.json`, `0600`):** Queues toggleable runtime events across six categories (`silence`, `capacity`, `bans`, `fastlane`, `queue`, `security`) configured by `-email-events`, respects `-privacy-anonymize-ip`, and enforces both a rolling hard cap (`-email-cadence-max`, `1..1000`) over the configured window (`-email-cadence-window` + `-email-cadence-unit` `minutes|hours|days`, `15m..30d`) and even pacing (`window / max >= 1m`) — e.g. `1 email every 15 minutes`, `4 emails every 90 minutes`, `1 email every 7 days`, or `333 emails every 28 days`. Failed sends back off exponentially without dropping events or consuming cadence slots.
+- **Compliance Headers, Footers & RFC 8058 One-Click Pause:** Every digest and test email includes HTML + plain-text (`multipart/alternative`), `Auto-Submitted: auto-generated`, `Precedence: bulk`, organization name (`-email-org-name`), physical postal address (`-email-postal-address`), Privacy/Terms/Portal links (`-email-privacy-url`, `-email-terms-url`, `-email-portal-url`), and HMAC-SHA256 signed `List-Unsubscribe` / `List-Unsubscribe-Post: List-Unsubscribe=One-Click` links routed to `/_concert/email/unsubscribe` (main listener) and `/email/unsubscribe` (portal). `GET` renders a confirmation button (immune to automated mail link-scanners); `POST` pauses alerts for that recipient and logs `email.unsubscribe` to `audit.jsonl`.
+- **Prometheus Metrics:** `concert_email_queued_events`, `concert_email_sent_total`, and `concert_email_errors_total`.
+
+---
+
+## 8. Compliance Control Mapping
 
 | Framework | Key Concert Controls |
 | --- | --- |

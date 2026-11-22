@@ -23,13 +23,14 @@ One Concert in front of one application is a **standalone** node, and nothing in
 When the edge forwards a request it admitted, it adds one header:
 
 ```
-Concert-Hop: v=1;e=www;t=1795000000123;c=203.0.113.9;r=5;f=1;k=page;p=h2;s=<HMAC-SHA256>
+Concert-Hop: v=1;e=www;t=1795000000123;n=8a4f02c91b3e7d01;c=203.0.113.9;r=5;f=1;k=page;p=h2;s=<HMAC-SHA256>
 ```
 
 | Field | Meaning |
 |---|---|
 | `e` | the edge's node ID (`-node-id`) |
 | `t` | when it was signed, Unix milliseconds |
+| `n` | single-use 16-hex CSPRNG-salted nonce (optional during rolling upgrades from v0.2.0 unless `-hop-require-nonce=true`) |
 | `c` | the client address the edge resolved, after its own `-trusted-proxies` |
 | `r` | the visitor's Concert-Priority rank at the edge, 0 guest to 6 staff |
 | `f` | 1 when the edge's fast lane found the visitor eligible (paid or NFT) |
@@ -42,21 +43,23 @@ The key is derived from `CONCERT_HOP_SECRET` (at least 32 bytes, the same on eve
 A leaf accepts a claim only when **all** of these hold:
 
 1. the connection comes from `-hop-peers`: the edges, or the load balancer between the tiers;
-2. the signature verifies for this request's method and exact URI;
-3. the timestamp is within `-hop-max-skew` (default 30s) of the leaf's clock.
+2. when `-hop-require-mtls=true`, the TLS connection presented a client certificate verified against `-tls-client-ca`;
+3. the signature verifies for this request's method and exact URI;
+4. the timestamp is within `-hop-max-skew` (default 30s) of the leaf's clock;
+5. when `-hop-replay-guard=true` (the default), the nonce `n` has not been seen before within the skew window (and when `-hop-require-nonce=true`, `n` must be present; required on leaves under `-enterprise-hardened`).
 
-Verifying costs about 1.3 µs. A claim from outside `-hop-peers` is ignored and earns the presenting client a forged-pass strike. A bad signature, a skewed clock or a claim for another URI is ignored and counted in `hop_rejected_total`. In every case the request is then served as direct traffic, so a broken trust chain degrades to ordinary Concert, never to an open door.
+Verifying costs about 1.3 µs. A claim from outside `-hop-peers` is ignored and earns the presenting client a forged-pass strike. A missing mTLS client certificate is ignored and counted in `hop_mtls_rejected_total`. A replayed nonce is ignored and counted in `hop_replayed_total`. A bad signature, a skewed clock or a claim for another URI is ignored and counted in `hop_rejected_total`. In every case the request is then served as direct traffic, so a broken trust chain degrades to ordinary Concert, never to an open door.
 
-The claim does **not** cover the body or the `Host` header (a load balancer may rewrite Host; bodies are streamed). A captured header can be replayed for the same method and URI until it leaves the skew window. Keep the link between tiers on a private network or use TLS with the upstream mTLS settings (`-upstream-ca`, `-upstream-client-cert`, `-upstream-client-key`).
+The claim does **not** cover the body or the `Host` header (a load balancer may rewrite Host; bodies are streamed). With `-hop-replay-guard=true` and `-hop-require-nonce=true`, captured headers cannot be replayed even inside the skew window (backed by a bounded 64-shard replay cache). Native leaf listener mTLS (`-tls-client-ca` + `-hop-require-mtls=true`) uses `tls.VerifyClientCertIfGiven`, so edges mutually authenticate to leaves while public browsers without client certificates can still visit a leaf directly on the same port. Setting `-tls-require-client-cert=true` enforces strict mTLS for every connection on the listener.
 
-Every node removes `Concert-Hop` from what it receives before anything else runs, so a client can never send one through an edge, and the application never sees it.
+Every node removes `Concert-Hop` from what it receives before anything else runs, so a client can never send one through an edge, and the application never sees it. In the other direction, every node removes `Concert-Backpressure` and `Concert-Hop-Node` from the application's responses: only a leaf itself signals backpressure, so an application's own 503 is never taken for a refusal and sent again to another leaf.
 
 ## What a leaf does with a verified claim
 
 | Class | Leaf work | When full |
 |---|---|---|
 | `page` | a slot in the **host gate**, waiting up to `-hop-wait` (default 2s) | `503` with `Concert-Backpressure: full` |
-| `asset` | a slot in the leaf's global asset pool, up to `-asset-wait` | `503` with backpressure |
+| `asset` | a slot in the leaf's global asset pool, up to `-asset-wait` (served straight off disk via `-static-root`/`-static-mounts` when configured, with zero origin load) | `503` with backpressure |
 | `stream` | a slot under `-stream-cap` | `503` with backpressure |
 | `bypass` | nothing | — |
 
@@ -86,21 +89,21 @@ The ceiling (`host_cap`) comes from the first of:
 
 **Retries.** With several upstreams, a request **without a body** is sent to another upstream (`-upstream-retries`, default 1) when the first refused the connection or answered with a leaf's backpressure `503`. In both cases nothing reached the application. Requests with a body are never retried. A leaf that pushed back is avoided for one second while another has room. Backpressure is not a circuit-breaker failure.
 
-**Routing.** When the edge balances across leaves itself and every healthy leaf reports its share, it sends each request to the leaf with the most free slots (`share − in flight`). Otherwise it uses fewest in flight.
+**Routing.** When the edge balances across leaves itself and every healthy, usable leaf reports its share, it sends each request to the leaf with the most free slots (`share − in flight`). Leaves that are draining, silent, or expired are skipped while any usable leaf remains. Otherwise it uses fewest in flight.
 
 **Capacity.** With `-hop-auto-cap` (the default for an edge), the edge's room capacity becomes:
 
 ```
-min(-cap, Σ healthy leaves' share − edge priority lane)
+min(-cap, Σ healthy leaves' weighted share − edge priority lane)
 ```
 
-so the leaves never see more than they can serve, even counting the edge's priority lane. A leaf's **share** is its `host_cap` divided by the number of edges it has heard from in the last minute, so two edges sharing the leaves don't each plan on all of it.
+so the leaves never see more than they can serve, even counting the edge's priority lane. Each edge reports its live demand (`occupancy + live_queue_depth`) on signed polls (`?demand=<n>`). Each leaf allocates its `host_cap` proportionally across every active edge it has heard from in the last minute (with a floor of 1 slot per active edge), returning `your_share` and `edge_shares`. Multiple active edges sharing leaves therefore dynamically shift capacity toward whichever edge is carrying real load, while sharing bans and deduplicating cluster alerts (`-email-cluster-dedupe`) over optional fail-open Redis (`-redis-addr`).
 
 - A drop applies at the next round. A rise applies only after two rounds agree, so a flapping leaf cannot thrash the room.
 - A leaf whose reports stop fades out linearly between 3 and 15 polls (6s to 30s at the default `-hop-poll 2s`), so a brief control-link drop does not collapse capacity, and a dead leaf stops counting within 30s.
-- Draining or unhealthy leaves (all of their upstreams unhealthy, or their application silent) stop counting at once.
+- Draining, re-benchmarking, or unhealthy leaves (all of their upstreams unhealthy, or their application silent) stop counting at once.
 - Until a leaf has reported, the edge admits one request at a time, and `/_room/readyz` answers 503 `no usable leaf`. **Start the leaves first.**
-- The room's capacity is never set below what it has in flight. `room`'s semaphore loses its in-flight accounting when shrunk below current use, so the edge steps down as requests finish instead.
+- Shrinking capacity below active in-flight occupancy is strictly enforced by `sema v1.2.0` / `room v1.6.0`: in-flight requests finish normally, no new slot is granted until occupancy drains below the new ceiling, and `/_room/stats`, `/_room/cap`, `/api/overview`, and `concert_room_cap_draining` report the transient `cap_draining` state.
 
 ## Bans: the edge is the source of truth
 
@@ -110,7 +113,7 @@ Every round the edge compares its ban list's version with what each leaf reports
 - lifts every ban the same edge listed before and no longer lists, unless the leaf has since banned that client itself for a different time;
 - skips its own `-abuse-allow` and `-trusted-proxies`;
 - ignores a snapshot older than the last one it applied from that edge, so a delayed push cannot undo a newer one;
-- persists everything in its own `bans.json`.
+- persists everything in its own `bans.json`, and which of those bans each edge applied in `hop-bans.json`, so after a restart it still lifts what the edge lifts. The edge sends its list again after a leaf restarts.
 
 So a bot banned on `www.mysite.com` is already banned when it moves to `i-01.mysite.com`. Bans a leaf makes itself, from direct traffic, stay local to that leaf. The Redis cluster sync (`-redis-addr`) still works alongside this for peers of the same tier.
 
@@ -140,7 +143,7 @@ The run doubles the number of lemmings from `-start` until a stage fails, then b
 - the page p95 exceeds `-p95` (2s), or
 - any request fails for load: timeouts, refused or reset connections, truncated bodies, 5xx and 429.
 
-Broken links and media served without byte ranges are reported as findings, not failures. The result is the largest passing number of lemmings. `capacity.json` gets `host_cap = lemmings × -safety (0.9)`.
+Lemmings stay on the target's host: a redirect to another host (an off-site login, payment page or CDN) is not followed, and is reported as an `offsite_redirect` finding, so the benchmark never loads a third party or sends it `-header` values. Broken links and media served without byte ranges are reported as findings, not failures. The result is the largest passing number of lemmings. `capacity.json` gets `host_cap = lemmings × -safety (0.9)`.
 
 The report (`-out`) explains the first failing stage:
 
@@ -149,11 +152,21 @@ The report (`-out`) explains the first failing stage:
 - the slowest and most-failing URLs;
 - a breakdown by file type (html, image, script, style, font, audio, video, archive, document, text, data), including whether audio and video honoured byte ranges.
 
-A leaf started with `-bench-on-start` and no `capacity.json` runs the benchmark against its upstream **before it starts listening**, so the benchmark is the only load the application sees. It then saves `capacity.json` and `bench-report.json` and serves with the result. It is off by default: it loads the application hard on purpose. Delete `capacity.json` to measure again. `-bench-p95` and `-bench-max-lemmings` tune it.
+A leaf started with `-bench-on-start` and no `capacity.json` runs the benchmark against its upstream **before it starts listening**, so the benchmark is the only load the application sees. It then saves `capacity.json` and `bench-report.json` and serves with the result. It is off by default: it loads the application hard on purpose. `-bench-p95` and `-bench-max-lemmings` tune it.
+
+### Drained on-demand re-benchmarking
+
+After hardware upgrades, application releases, or traffic-pattern changes, administrators (`admin` role) can recalibrate any leaf live without restarting Concert:
+
+- From the **Portal Overview** (`Tier & capacity` panel), click **Re-benchmark** on a leaf row (edge portal) or **Drain & re-benchmark** (leaf portal).
+- Via API: `POST /api/topology/rebench` (Portal, CSRF + `admin`) or `POST /_room/rebench` (Admin API, `admin` bearer token), passing `{"leaf":"i-01"}` on an edge (add `"force":true` only to override the safety guard).
+- Control plane: the edge calls `POST /_room/hop/rebench` on the target leaf.
+
+During recalibration, the leaf marks `rebenchmarking=true` so edges drain traffic off it (setting its share to `0`), waits for in-flight requests to drain, runs the lemmings benchmark cleanly against its upstream, atomically writes `capacity.json` and `bench-report.json` (`0600`), updates its host gate ceiling immediately, records a hash-chained `topology.rebench` audit entry, and emits a capacity notification. An edge refuses (`409 Conflict`) to drain its last healthy leaf unless `"force":true` is explicitly supplied.
 
 ## When the application goes silent
 
-A leaf samples its upstream every second. If every upstream is unhealthy, or three or more requests failed with none succeeding, the leaf records a **silence report**:
+A leaf samples its upstream every second. If every upstream is unhealthy, or three or more requests failed to get an application response (transport errors or `502`–`504`, matching the circuit breaker) with none answering, the leaf records a **silence report** (application-level `500` responses do not trip silence):
 
 - the host slots in use by edge and direct traffic, and the queue;
 - the requests in flight to the application;
@@ -161,7 +174,7 @@ A leaf samples its upstream every second. If every upstream is unhealthy, or thr
 - the upstream error counters;
 - the last healthy moment.
 
-It logs the report, appends it to `silence.jsonl` in `-data-dir`, returns it in its state (and so in the edge's `/_room/stats`), and stops counting toward the edge's capacity until the application answers again. On bare metal this separates "the host fell over carrying 40 requests" from "the host failed with nothing running".
+It logs the report, appends it to `silence.jsonl` in `-data-dir` (outside the monitor lock, rotated at 16 MiB keeping 4 older files), returns it in its state (and so in the edge's `/_room/stats`), and stops counting toward the edge's capacity until the application answers again. On bare metal this separates "the host fell over carrying 40 requests" from "the host failed with nothing running".
 
 ## Configuration
 
@@ -171,11 +184,17 @@ It logs the report, appends it to `silence.jsonl` in `-data-dir`, returns it in 
 | `-node-id` | `CONCERT_NODE_ID` | from the hostname | ID in claims and reports, 1-32 of `[A-Za-z0-9._-]` |
 | `-hop-peers` | `CONCERT_HOP_PEERS` | *(empty)* | Leaf: CIDRs that may present claims. **Required** for a leaf |
 | `-hop-max-skew` | `CONCERT_HOP_MAX_SKEW` | `30s` | Leaf: clock skew a claim may carry, 1s-5m |
+| `-hop-replay-guard` | `CONCERT_HOP_REPLAY_GUARD` | `true` | Leaf: reject replayed `Concert-Hop` nonces via a bounded 64-shard replay cache |
+| `-hop-require-nonce` | `CONCERT_HOP_REQUIRE_NONCE` | `false` | Leaf: reject claims without a nonce (`true` required on leaves under `-enterprise-hardened`) |
+| `-hop-require-mtls` | `CONCERT_HOP_REQUIRE_MTLS` | `false` | Leaf: require a verified client cert (`-tls-client-ca`) for `Concert-Hop` claims and `/_room/hop/*` while still allowing public browsers without certs |
+| `-tls-client-ca` | `CONCERT_TLS_CLIENT_CA` | *(empty)* | PEM CA bundle to verify client certificates on the main TLS listener |
+| `-tls-require-client-cert` | `CONCERT_TLS_REQUIRE_CLIENT_CERT` | `false` | Require a verified client certificate for every connection on the main TLS listener |
 | `-hop-wait` | `CONCERT_HOP_WAIT` | `2s` | Leaf: how long an edge page request waits for a host slot |
 | `-host-cap` | `CONCERT_HOST_CAP` | `0` | Leaf: host ceiling; 0 means `capacity.json`, then `-cap` |
 | `-hop-leaves` | `CONCERT_HOP_LEAVES` | *(empty)* | Edge: leaf base URLs for the control plane; empty means the `-upstream` targets |
 | `-hop-poll` | `CONCERT_HOP_POLL` | `2s` | Edge: control round interval, 500ms-1m |
 | `-hop-auto-cap` | `CONCERT_HOP_AUTO_CAP` | `true` | Edge: size the room from the leaves, never above `-cap` |
+| `-email-cluster-dedupe` | `CONCERT_EMAIL_CLUSTER_DEDUPE` | `true` | Deduplicate shared cluster alerts (`silence`, `capacity`, `bans`, `queue`) across multi-edge nodes via fail-open Redis `SET NX PX` |
 | `-upstream-retries` | `CONCERT_UPSTREAM_RETRIES` | `1` | Retries of bodyless requests on another upstream, 0-5 |
 | `-bench-on-start` | `CONCERT_BENCH_ON_START` | `false` | Leaf: benchmark the upstream before serving when `capacity.json` is missing |
 | `-bench-p95` | `CONCERT_BENCH_P95` | `2s` | p95 limit for the startup benchmark |
@@ -212,6 +231,9 @@ CONCERT_NODE_ID=i-01
 CONCERT_LISTEN=:8443
 CONCERT_TLS_CERT=/etc/concert/i-01.pem
 CONCERT_TLS_KEY=/etc/concert/i-01-key.pem
+CONCERT_TLS_CLIENT_CA=/etc/concert/tier-ca.pem
+CONCERT_HOP_REQUIRE_MTLS=true
+CONCERT_HOP_REQUIRE_NONCE=true
 CONCERT_UPSTREAM=http://127.0.0.1:3000
 CONCERT_HOP_PEERS=10.0.1.10/32   # the edge
 CONCERT_TRUSTED_PROXIES=127.0.0.1/32,::1/128
@@ -221,11 +243,11 @@ CONCERT_HOP_SECRET=…
 CONCERT_ADMIT_SECRET=…           # its own; i-01's passes are its own
 ```
 
-Requests for `i-01.mysite.com` reach this leaf directly and are served as an ordinary Concert, with its own waiting room. In this layout the leaf terminates TLS for the edge and for the public alike. The edge verifies the leaf's certificate (`-upstream-ca`) and presents its own; Concert's listener does not itself require client certificates, so the trust chain rests on `CONCERT_HOP_SECRET` and `-hop-peers`. If the link must also be mutually authenticated, terminate it in front of the leaf with a proxy that requires client certificates, and list that proxy in `-hop-peers`.
+Requests for `i-01.mysite.com` reach this leaf directly and are served as an ordinary Concert, with its own waiting room. In this layout the leaf terminates TLS for the edge and for the public alike: `-tls-client-ca` with `-hop-require-mtls=true` uses `tls.VerifyClientCertIfGiven`, so the edge mutually authenticates with its client certificate while browsers visiting `i-01.mysite.com` directly need no client certificate. If the leaf is strictly internal-only (no direct public browsers), set `CONCERT_TLS_REQUIRE_CLIENT_CERT=true` instead.
 
-### Example: haproxy between the tiers
+### Example: haproxy between the tiers (optional)
 
-The edge forwards to haproxy and polls the leaves directly:
+Direct Edge-to-Leaf balancing (above) is the recommended L7 topology because Concert's edge gets slot-aware routing, `Concert-Backpressure`-aware retries on bodyless requests, and native mTLS with zero extra hops. If you place HAProxy between the tiers (for example to fit an existing L4/L7 network fabric), point the edge at HAProxy and poll the leaves directly:
 
 ```sh
 CONCERT_UPSTREAM=http://10.0.1.5:8080            # haproxy
@@ -251,21 +273,19 @@ backend leaves
   retry-on conn-failure empty-response
 ```
 
-With haproxy in between, the edge sees one upstream, so a leaf's backpressure `503` reaches the browser instead of being retried on the other leaf: haproxy cannot tell a leaf's capacity refusal from the application's own 503 (retrying that could submit a form twice). The edge's capacity planning still keeps that rare. Removing haproxy and letting the edge balance gives you backpressure-aware retries and slot-aware routing.
+With HAProxy in between, **keep `retry-on conn-failure empty-response` and do not add `retry-on 503`**: HAProxy retries apply before inspecting response headers and cannot distinguish a leaf's `Concert-Backpressure: full` refusal from an application's own `503` (retrying an application `503` on non-idempotent requests risks duplicate execution). The edge's capacity planning keeps leaf backpressure rare; removing HAProxy and letting the edge balance directly unlocks both backpressure-aware retries and slot-aware routing.
 
 ## Observability
 
-`/_room/stats` adds `role` and `node`, and:
+`/_room/stats` and `/api/overview` (rendered live in the Admin Portal Overview **Tier & capacity** panel) add `role` and `node`, and:
 
-- on an edge, `edge`: usable leaves, leaf slots, planned cap, retries, backpressure, poll and push errors, and each leaf's state;
-- on a leaf, `leaf`: host cap and its source, hop and direct in flight and waiting, accepted, rejected and backpressured claims, edges seen, application health, and the last silence report.
+- on an edge, `edge`: usable leaves, leaf slots, planned cap, retries, backpressure, poll and push errors, and each leaf's state (including weighted `share`, `rebenchmarking`, `last_silence`, and last benchmark summary);
+- on a leaf, `leaf`: host cap and its source, hop and direct in flight and waiting, accepted, rejected, replayed, mTLS-rejected, and backpressured claims, per-edge weighted `edge_shares`, application health, re-benchmark count, and the last silence report.
 
-`/_room/metrics` adds `concert_node_info`, the `concert_edge_*` and `concert_leaf_*` series.
+`/_room/metrics` adds `concert_node_info`, `concert_room_cap_draining`, `concert_email_cluster_deduped_total`, the `concert_edge_*` series, and the `concert_leaf_*` series (including `concert_leaf_hop_replayed_total`, `concert_leaf_hop_mtls_rejected_total`, and `concert_leaf_rebench_total`).
 
-## Limitations
+## Architectural boundaries
 
-- **One edge is a single point of failure.** Several edges can share leaves (shares divide by edges seen), but each edge has its own waiting room and its own settlement journal. Run one active edge with a standby, as for standalone Concert.
-- **Shares across several edges are approximate.** They divide evenly by the number of edges seen, not by each edge's traffic.
-- **Replay inside the skew window.** See [The trust chain](#the-trust-chain).
-- **A leaf's own room capacity is static.** Its direct traffic is shaped by the host gate, not by resizing its room.
-- **The startup benchmark measures the application as it is at that moment.** Re-run it after hardware or application changes.
+- **Local waiting rooms and payment journals by design.** Multiple active edges share leaf capacity dynamically (weighted by live demand) and share bans/alert deduplication over optional fail-open Redis, while keeping waiting rooms and fast-lane payment journals local so a Redis outage never stalls admissions or double-charges a visitor. For multi-edge setups running paid fast-lane, either terminate fast-lane on one dedicated payment edge or use distinct `payTo` receiving addresses per edge.
+- **A leaf's own direct waiting-room cap is static.** Direct traffic to a leaf is bounded by the leaf's host gate (which dynamically prioritizes edge traffic ahead of direct traffic), rather than by resizing the leaf's own room.
+- **HAProxy between tiers.** Direct Edge-to-Leaf gives slot-aware routing and backpressure-aware retries; HAProxy between tiers should stick to `retry-on conn-failure empty-response` as noted above.

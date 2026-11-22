@@ -250,14 +250,27 @@ The gateway settles one authorization at a time per network, so a slow chain nev
 
 For an unresolved payment:
 
-1. Keep the original signed payload, client session and both journals. Check `/_concert/status`; retry the identical signed authorization if the gateway completed in the background.
-2. If the gateway's durable record remains `pending` or `unknown`, stop Concert, back up its data directory, and find the payment's fingerprint (`id`) in `<data-dir>/gateway/settlements.jsonl`. Do not export signed payloads into public logs/support channels.
-3. As the account Concert runs as, run `concert reconcile -data-dir <data-dir> -networks-config <networks.json> <fingerprint>` (the flags default to `CONCERT_DATA_DIR` and `CONCERT_NETWORKS_CONFIG`). For Stellar, add the sponsor's finalized transaction hash as the second argument. The command takes the journal lock, so it refuses to run while Concert is up. It validates ledger state against the saved authorization before recording success; it never broadcasts, signs, refunds or transfers funds. It refuses ambiguous data, including Hedera mirror amounts that are not exact 64-bit integers.
-4. Start Concert and retry the identical payment. If settlement cannot be proved, keep the receipt unresolved and follow the merchant's reviewed support/refund procedure. No automatic release, re-signing or refund is provided.
+1. **Zero-downtime online reconciliation (recommended while Concert is live):** Open the Admin Portal **Fast lane** tab (as an `admin`) and click **Reconcile** on the unresolved receipt (entering the sponsor's transaction hash for Stellar), or call `POST /api/fastlane/reconcile` (Portal, CSRF + `admin`) / `POST /_room/fastlane/reconcile` (Admin API, `admin` bearer token) with `{"fingerprint":"<64-hex>","stellar_hash":"<optional>"}`. Concert acquires the gateway's per-network settlement mutex so it cannot race an in-flight settlement, verifies final on-chain ledger state read-only (never signing, broadcasting, or moving funds), updates both `settlements.jsonl` and `fastlane.jsonl`, writes a hash-chained `fastlane.reconcile` audit record, and **immediately unlocks the payer's session without restarting Concert**.
+2. **Offline crash recovery (`concert reconcile`):** If Concert is stopped (for example after a host crash or incomplete journal line), back up its data directory and run `concert reconcile -data-dir <data-dir> -networks-config <networks.json> <fingerprint> [Stellar transaction hash]` as the service account. The CLI acquires the exclusive journal lock (refusing to run while Concert is live), validates final ledger state against the saved authorization, records success in `settlements.jsonl`, and then restarting Concert allows the identical authorization to succeed.
+3. If final settlement cannot be proved on chain, keep the receipt unresolved and follow the merchant's reviewed support/refund procedure. No automatic release, re-signing or refund is provided.
 
-Payment eligibility begins when Concert durably records successful settlement, including after reconciliation. Set an explicit refund/support policy for delayed or unavailable service. Native transfers are not bound to a web origin at the ledger level; the local receipt journal is essential, and different independent merchants sharing one receiving address cannot rely on it for global replay prevention.
+Payment eligibility begins when Concert durably records successful settlement, including after online or offline reconciliation. Set an explicit refund/support policy for delayed or unavailable service. Native transfers are not bound to a web origin at the ledger level; the local receipt journal is essential, and different independent merchants sharing one receiving address cannot rely on it for global replay prevention.
 
-Receipt deduplication records are not automatically pruned. `max_records` defaults to 100,000 and is a hard fail-closed ceiling; arrange a reviewed migration/archival strategy before reaching it. Backups, key rotation, redemptions across replicas, administrative pass revocation and automated refunds are not implemented. Short pass lifetimes bound ordinary admission risk but do not replace incident response.
+### Receipt headroom alerts and audited offline archival (`concert archive-receipts`)
+
+`max_records` defaults to 100,000 and remains a hard fail-closed ceiling against unbounded memory/disk growth. Concert monitors journal headroom continuously:
+
+- **Proactive alerts:** Latched alerts fire at **80%** (`warn`) and **95%** (`critical`) via the Administrator Email Delivery queue (`mailer.CatFastlane`), the Portal **Fast lane** tab headroom bar/banner, and Prometheus (`concert_fastlane_records_used`, `concert_fastlane_records_max`, `concert_fastlane_unresolved`).
+- **Audited offline compaction:** During a planned maintenance window, stop Concert and run:
+
+```sh
+concert archive-receipts -data-dir /var/lib/concert/data -older-than 720h -dry-run
+concert archive-receipts -data-dir /var/lib/concert/data -older-than 720h
+```
+
+`concert archive-receipts` acquires `fastlane.lock` exclusively (refusing to run while Concert is live), validates every line of `fastlane.jsonl` fail-closed, preserves **every** `pending`, `unknown`, active (unexpired), and recent receipt, writes only expired `settled` receipts older than `-older-than` to an atomic `0600` `fastlane-archive-<UTC>.jsonl` file plus a `.sha256` checksum file, fsyncs the archive and directory before atomically rewriting `fastlane.jsonl`, and records a hash-chained `fastlane.archive` event in `audit.jsonl`.
+
+Backups, key rotation, redemptions across replicas, administrative pass revocation and automated refunds are not implemented. Short pass lifetimes bound ordinary admission risk but do not replace incident response.
 
 ## Protocol references
 
