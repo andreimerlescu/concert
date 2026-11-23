@@ -61,7 +61,7 @@ func TestSettingDefs_CoverEveryFlag(t *testing.T) {
 		}
 	}
 	fs.VisitAll(func(f *flag.Flag) {
-		if f.Name != "version" && f.Name != "data-dir" && !byFlag[f.Name] {
+		if f.Name != "version" && f.Name != "data-dir" && f.Name != "config" && !byFlag[f.Name] {
 			t.Errorf("flag -%s has no setting definition", f.Name)
 		}
 	})

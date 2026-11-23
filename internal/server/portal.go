@@ -27,7 +27,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/andreimerlescu/concert/internal/mailer"
 	"github.com/gin-gonic/gin"
 )
 
@@ -179,7 +178,8 @@ func (pc *portalConfig) normalize() error {
 
 type portal struct {
 	a             *app
-	ln            net.Listener // bound by newPortal when -portal-listen is set; served by start
+	vhosts        *vhostManager // non-nil in multi-vhost -config mode
+	ln            net.Listener  // bound by newPortal when -portal-listen is set; served by start
 	tlsCfg        *tls.Config
 	engine        *gin.Engine
 	tmpl          *template.Template
@@ -193,6 +193,116 @@ type portal struct {
 	fails         *loginLimiter
 	emailOpsLimit *emailRateLimiter
 	history       *history // requests and bans on the main listener; see history.go
+}
+
+// newVhostPortal builds a single admin portal attached to a multi-vhost
+// manager. Its auth and listener come from the primary site's inherited
+// global portal config.
+func newVhostPortal(vm *vhostManager) (*portal, error) {
+	primary := vm.primaryApp()
+	if primary == nil {
+		return nil, nil
+	}
+	p, err := newPortal(primary)
+	if err != nil || p == nil {
+		return p, err
+	}
+	p.vhosts = vm
+	return p, nil
+}
+
+// targetApp returns the *app addressed by ?site=<host> (defaulting to the
+// primary/only site). Returns false after writing a 404 when an unknown site
+// is explicitly requested.
+func (p *portal) targetApp(c *gin.Context) (*app, bool) {
+	if p.vhosts == nil {
+		return p.a, true
+	}
+	site := strings.TrimSpace(c.Query("site"))
+	sr, ok := p.vhosts.siteByName(site)
+	if !ok {
+		jsonError(c, http.StatusNotFound, fmt.Sprintf("unknown site %q", site))
+		return nil, false
+	}
+	return sr.app, true
+}
+
+func (p *portal) apiSites(c *gin.Context) {
+	if p.vhosts != nil {
+		c.JSON(http.StatusOK, p.vhosts.summary())
+		return
+	}
+	a := p.a
+	g := a.current()
+	totalB, healthyB := 0, 0
+	if g.upstreams != nil {
+		totalB = len(g.upstreams.backends)
+		healthyB = g.upstreams.healthyCount(time.Now())
+	}
+	host := g.cfg.siteHost
+	if host == "" {
+		host = g.cfg.listen
+	}
+	s := siteSummary{
+		Host:             host,
+		Preset:           g.cfg.preset,
+		Active:           a.room.Len(),
+		Cap:              a.room.Cap(),
+		Queued:           a.room.LiveQueueDepth(),
+		StaticServed:     a.stats.staticServed.Load(),
+		FCGIRequests:     a.stats.fcgiRequests.Load(),
+		MicroCacheHits:   a.stats.microCacheHits.Load(),
+		UpstreamHealthy:  healthyB,
+		UpstreamBackends: totalB,
+		RuntimeOverride:  a.runtimeCapOverride.Load(),
+	}
+	var out vhostSummary
+	out.ConfigManaged = g.cfg.configManaged
+	out.Edition = Edition()
+	out.Sites = []siteSummary{s}
+	out.Totals.Sites = 1
+	out.Totals.Active = s.Active
+	out.Totals.Cap = int64(s.Cap)
+	out.Totals.Queued = s.Queued
+	out.Totals.StaticServed = s.StaticServed
+	out.Totals.MicroCacheHits = s.MicroCacheHits
+	if totalB > 0 && healthyB == 0 {
+		out.Totals.UnhealthySites = 1
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+func (p *portal) apiReload(c *gin.Context) {
+	if p.vhosts == nil {
+		jsonError(c, http.StatusBadRequest, "live config file reload is only available in -config mode")
+		return
+	}
+	pr := portalPrincipal(c)
+	if err := p.vhosts.Reload(); err != nil {
+		p.a.recordAudit(auditEvent{
+			Actor:    pr.Actor,
+			Role:     pr.Role.String(),
+			Source:   "portal",
+			Action:   "config.reload",
+			Outcome:  "error",
+			ClientIP: pr.IP.String(),
+			Details:  map[string]any{"error": err.Error()},
+		})
+		jsonError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	if primary := p.vhosts.primaryApp(); primary != nil {
+		p.a = primary
+	}
+	p.a.recordAudit(auditEvent{
+		Actor:    pr.Actor,
+		Role:     pr.Role.String(),
+		Source:   "portal",
+		Action:   "config.reload",
+		Outcome:  "allow",
+		ClientIP: pr.IP.String(),
+	})
+	c.JSON(http.StatusOK, p.vhosts.summary())
 }
 
 // newPortal builds the portal and, when -portal-listen is set, binds its
@@ -374,8 +484,6 @@ func (p *portal) routes() *gin.Engine {
 	r.GET("/", p.index)
 	r.POST("/login", p.login)
 	r.POST("/logout", p.requireSession, p.requireFormCSRF, p.logout)
-	r.GET(mailer.UnsubscribePortalPath, p.a.handleEmailUnsubscribe)
-	r.POST(mailer.UnsubscribePortalPath, p.a.handleEmailUnsubscribe)
 
 	api := r.Group("/api", p.requireSession, p.requireCSRF)
 	api.GET("/me", func(c *gin.Context) {
@@ -383,18 +491,21 @@ func (p *portal) routes() *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"actor": pr.Actor, "role": pr.Role.String(), "source": pr.Source})
 	})
 	api.GET("/metrics", p.requireRole(roleViewer), func(c *gin.Context) {
-		serveMetrics(c, p.a)
-	})
-	api.GET("/overview", p.requireRole(roleViewer), p.apiOverview)
-	api.POST("/topology/rebench", p.requireRole(roleAdmin), p.apiTopologyRebench)
-	api.GET("/fastlane", p.requireRole(roleViewer), func(c *gin.Context) {
-		if p.a.fastlane == nil {
-			c.JSON(200, gin.H{"enabled": false})
+		a, ok := p.targetApp(c)
+		if !ok {
 			return
 		}
-		c.JSON(200, p.a.fastlane.Summary())
+		if p.vhosts != nil {
+			c.Header("Cache-Control", "no-store")
+			c.Data(http.StatusOK, "text/plain; version=0.0.4; charset=utf-8", []byte(p.vhosts.renderPrometheusMetrics(a)))
+			return
+		}
+		serveMetrics(c, a)
 	})
-	api.POST("/fastlane/reconcile", p.requireRole(roleAdmin), p.apiFastlaneReconcile)
+	api.GET("/sites", p.requireRole(roleViewer), p.apiSites)
+	api.POST("/reload", p.requireRole(roleAdmin), p.apiReload)
+	api.GET("/overview", p.requireRole(roleViewer), p.apiOverview)
+	p.registerEnterprisePortalRoutes(r, api)
 	api.GET("/queue", p.requireRole(roleViewer), p.apiQueue)
 	api.POST("/queue/promote", p.requireRole(roleOperator), p.apiPromote)
 	api.POST("/queue/kick", p.requireRole(roleOperator), p.apiKick)
@@ -407,13 +518,6 @@ func (p *portal) routes() *gin.Engine {
 	api.GET("/settings", p.requireRole(roleViewer), p.apiSettings)
 	api.POST("/settings", p.requireRole(roleAdmin), p.apiSettingsSave)
 	api.DELETE("/settings", p.requireRole(roleAdmin), p.apiSettingsReset)
-	api.GET("/email", p.requireRole(roleViewer), p.apiEmail)
-	api.POST("/email/config", p.requireRole(roleAdmin), p.apiEmailConfigSave)
-	api.DELETE("/email/secrets", p.requireRole(roleAdmin), p.apiEmailSecretDelete)
-	api.POST("/email/pause", p.requireRole(roleAdmin), p.apiEmailPause)
-	api.POST("/email/verify", p.requireRole(roleAdmin), p.apiEmailVerify)
-	api.POST("/email/test", p.requireRole(roleAdmin), p.apiEmailTest)
-	api.POST("/email/flush", p.requireRole(roleAdmin), p.apiEmailFlush)
 	api.GET("/privacy/export", p.requireRole(roleAdmin), func(c *gin.Context) {
 		handlePrivacyExport(c, p.a, portalPrincipal(c), "portal")
 	})
@@ -623,9 +727,9 @@ func (p *portal) login(c *gin.Context) {
 		})
 		if _, lockedNow := p.fails.locked(ip, now); lockedNow {
 			ipLabel := p.a.emailIPLabel(ip)
-			p.a.notifyEvent(mailer.Event{
-				Category:    mailer.CatSecurity,
-				Severity:    mailer.SevWarn,
+			p.a.notifyAlert(alertEvent{
+				Category:    alertCatSecurity,
+				Severity:    alertSevWarn,
 				Title:       "Admin portal sign-in locked out",
 				Summary:     fmt.Sprintf("Client %s exceeded failed sign-in attempts and was temporarily locked out.", ipLabel),
 				Fingerprint: "security:login-lockout:" + ipLabel,

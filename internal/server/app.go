@@ -3,8 +3,6 @@ package server
 import (
 	"context"
 	"fmt"
-	"github.com/andreimerlescu/concert/internal/fastlane"
-	"github.com/andreimerlescu/concert/internal/mailer"
 	"log"
 	"math"
 	"net/http"
@@ -24,9 +22,8 @@ import (
 // counters live as long as the process. Everything built from settings lives
 // in the generation and is replaced when a setting changes.
 type app struct {
-	fastlane *fastlane.Service
-	// gatewayClose stops the in-process chain gateway after the fast lane.
-	gatewayClose func()
+	enterpriseAppState
+
 	// agentOffer is the fast-lane offer a queued agent is shown, or nil
 	// without payment offers; see agent.go. Set once in newApp.
 	agentOffer *agentOffer
@@ -56,21 +53,12 @@ type app struct {
 	// the portal is off. See history.go.
 	history *history
 
-	// audit is the hash-chained tamper-evident administrative audit log; see audit.go.
-	audit *auditLogger
-
-	// cluster synchronizes bans across Concert instances via Redis/Valkey; see cluster.go.
-	cluster *clusterSync
-
-	// topo is the edge or leaf tier state; see topology.go. Never nil.
-	topo *topology
-
-	// mailer manages administrator email delivery, cadence, and event queue; see mailer.go.
-	mailer     *mailer.Service
-	unsubLimit *emailRateLimiter
-
 	// draining flips true once shutdown starts so /_room/readyz returns 503.
 	draining atomic.Bool
+
+	// runtimeCapOverride is true when -config mode has an emergency live cap
+	// override applied from the Portal/API (cleared on SIGHUP / reload).
+	runtimeCapOverride atomic.Bool
 
 	// Listeners, set by run once serving starts; guarded by settings.mu.
 	mainEP, portalEP *endpoint
@@ -100,24 +88,18 @@ func newApp(cfg config) (*app, error) {
 
 	stats := &counters{}
 	a := &app{
-		cfg:        cfg,
-		stats:      stats,
-		admit:      newAdmitter(cfg.admitSecret, cfg.admitTTL, cfg.cookiePath, cfg.cookieDomain, cfg.secureCookie),
-		abuse:      newAbuseRegistry(cfg, stats),
-		drops:      newDropper(),
-		agents:     newAgentPlaces(),
-		audit:      newAuditLogger(auditLogPath(cfg), cfg.admitSecret),
-		unsubLimit: newEmailRateLimiter(30, time.Minute),
-		stop:       make(chan struct{}),
+		cfg:    cfg,
+		stats:  stats,
+		admit:  newAdmitter(cfg.admitSecret, cfg.admitTTL, cfg.cookiePath, cfg.cookieDomain, cfg.secureCookie),
+		abuse:  newAbuseRegistry(cfg, stats),
+		drops:  newDropper(),
+		agents: newAgentPlaces(),
+		stop:   make(chan struct{}),
 	}
 	a.admit.setPrevSecret(cfg.admitSecretPrev)
-	a.onClose(a.audit.close)
-	topo, err := newTopology(cfg)
-	if err != nil {
-		a.audit.close()
+	if err := a.initEnterpriseEarly(cfg); err != nil {
 		return nil, err
 	}
-	a.topo = topo
 	a.settings = newSettingsManager(cfg)
 	// Before the first generation: its proxy turns the origin's
 	// Concert-Priority header into grants.
@@ -156,84 +138,20 @@ func newApp(cfg config) (*app, error) {
 		wr.Stop()
 		return nil, fmt.Errorf("room config: %w", err)
 	}
-	if cfg.fastlaneFile != "" {
-		fc, err := fastlane.Load(cfg.fastlaneFile)
-		if err == nil && fc.Enabled && cfg.admitSecretGenerated {
-			err = fmt.Errorf("fast lane requires a stable CONCERT_ADMIT_SECRET")
-		}
-		var gw fastlane.Gateway
-		if err == nil && fc.Enabled {
-			gw, err = newGateway(fc, &cfg)
-		}
-		if err == nil {
-			a.fastlane, err = fastlane.New(fc, cfg.dataDir, cfg.admitSecret, gw, envOrFile("CONCERT_POLICY_TOKEN", ""))
-			if err != nil {
-				closeGateway(gw)
-			} else if gw != nil {
-				a.gatewayClose = func() { closeGateway(gw) }
-			}
-		}
-		if err != nil {
-			g.assets.users.close()
-			wr.Stop()
-			return nil, fmt.Errorf("fast lane: %w", err)
-		}
+	if err := a.initEnterpriseFastlane(cfg, wr); err != nil {
+		g.assets.users.close()
+		wr.Stop()
+		return nil, err
 	}
-	if a.fastlane != nil {
-		// A queued agent's status_url is absolute, so it can be handed to
-		// a person: "you're #37, watch here".
-		wr.SetStatusBaseURL(a.fastlane.Config().Origin + "/queue/status/")
-		a.agentOffer = newAgentOffer(a.fastlane)
-		a.fastlane.SetOnUnknown(func(network, session string) {
-			prefix := session
-			if len(prefix) > 8 {
-				prefix = prefix[:8]
-			}
-			a.notifyEvent(mailer.Event{
-				Category:    mailer.CatFastlane,
-				Severity:    mailer.SevCritical,
-				Title:       "Unresolved fast-lane payment settlement",
-				Summary:     fmt.Sprintf("A payment on network %s entered state \"unknown\" and requires reconciliation.", network),
-				Fingerprint: "fastlane:unknown:" + network,
-				Details:     map[string]string{"network": network, "session_prefix": prefix},
-			})
-		})
-		a.fastlane.SetOnCapacityWarn(func(used, max, pct int) {
-			sev := mailer.SevWarn
-			tier := "80"
-			if pct >= 95 {
-				sev = mailer.SevCritical
-				tier = "95"
-			}
-			a.notifyEvent(mailer.Event{
-				Category:    mailer.CatFastlane,
-				Severity:    sev,
-				Title:       fmt.Sprintf("Fast-lane receipt journal at %d%% capacity", pct),
-				Summary:     fmt.Sprintf("Fast-lane journal holds %d of %d records (%d%%). Schedule an offline archival window with `concert archive-receipts` before reaching 100%%.", used, max, pct),
-				Fingerprint: "fastlane:capacity:" + tier,
-				Details: map[string]string{
-					"records_used": fmt.Sprintf("%d", used),
-					"max_records":  fmt.Sprintf("%d", max),
-					"usage_pct":    fmt.Sprintf("%d", pct),
-				},
-			})
-		})
-	}
-	// All startup errors after this point close the fast lane's journal and mailer.
+	// All startup errors after this point close enterprise services cleanly.
 	started := false
 	defer func() {
 		if !started {
-			if a.mailer != nil {
-				a.mailer.Close()
-			}
-			if a.fastlane != nil {
-				a.fastlane.Close()
-				a.gatewayClose()
-			}
+			a.closeEnterpriseOnStartupErr()
 		}
 	}()
 	a.handler = http.HandlerFunc(a.serveHTTP)
-	a.mailer = a.initMailer(cfg)
+	a.initEnterpriseServices(cfg)
 
 	if cfg.dataDir != "" {
 		a.bansPath = bansFilePath(cfg.dataDir)
@@ -264,15 +182,6 @@ func newApp(cfg config) (*app, error) {
 
 	// Every new ban drops that network's waiting visitors from room's line
 	// and publishes to cluster peers when Redis sync is configured.
-	if cfg.redisAddr != "" {
-		a.cluster = newClusterSync(clusterConfig{
-			addr:     cfg.redisAddr,
-			password: cfg.redisPassword,
-			useTLS:   cfg.redisTLS,
-			prefix:   cfg.redisPrefix,
-		}, a.abuse, a.stats, a.queueDrop)
-		a.onClose(a.cluster.close)
-	}
 	a.abuse.setOnBan(func(scope netip.Prefix) {
 		a.queueDrop(scope)
 		a.topo.kickEdge() // leaves get the ban at once, not at the next poll
@@ -282,13 +191,11 @@ func newApp(cfg config) (*app, error) {
 			if t, err := parseBanTarget(b.Client); err == nil && t.scope() == scope {
 				cp := b
 				matched = &cp
-				if a.cluster != nil {
-					until := banForever
-					if !b.Permanent {
-						until = b.Until.UnixNano()
-					}
-					a.cluster.publishBan(t, until, b.Offenses)
+				until := banForever
+				if !b.Permanent {
+					until = b.Until.UnixNano()
 				}
+				a.publishClusterBan(t, until, b.Offenses)
 				break
 			}
 		}
@@ -298,18 +205,18 @@ func newApp(cfg config) (*app, error) {
 			if matched != nil && matched.Permanent {
 				kind = "Permanent ban"
 			}
-			a.notifyEvent(mailer.Event{
-				Category:    mailer.CatBans,
-				Severity:    mailer.SevWarn,
+			a.notifyAlert(alertEvent{
+				Category:    alertCatBans,
+				Severity:    alertSevWarn,
 				Title:       kind + " applied",
 				Summary:     fmt.Sprintf("%s is now blocked by the abuse registry.", label),
 				Fingerprint: "ban:" + label,
 				Details:     map[string]string{"target": label},
 			})
 		} else {
-			a.notifyEvent(mailer.Event{
-				Category:    mailer.CatBans,
-				Severity:    mailer.SevInfo,
+			a.notifyAlert(alertEvent{
+				Category:    alertCatBans,
+				Severity:    alertSevInfo,
 				Title:       "Abuse ban activity",
 				Summary:     fmt.Sprintf("Automated temporary ban applied (most recent: %s).", label),
 				Fingerprint: "ban:auto-surge",
@@ -319,20 +226,7 @@ func newApp(cfg config) (*app, error) {
 	})
 
 	go a.abuse.janitor(a.stop)
-	switch {
-	case a.topo.isEdge():
-		a.wg.Add(1)
-		go func() {
-			defer a.wg.Done()
-			a.runEdge()
-		}()
-	case a.topo.isLeaf():
-		a.wg.Add(1)
-		go func() {
-			defer a.wg.Done()
-			a.runLeafMonitor()
-		}()
-	}
+	a.startEnterpriseLoops()
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
@@ -346,12 +240,6 @@ func newApp(cfg config) (*app, error) {
 		}()
 	}
 	started = true
-	if a.fastlane != nil {
-		// Closers run newest first: the fast lane stops, then the gateway
-		// lets settlements in flight journal their results.
-		a.onClose(a.gatewayClose)
-		a.onClose(a.fastlane.Close)
-	}
 	return a, nil
 }
 
@@ -376,12 +264,7 @@ func (a *app) attachHistory(h *history) {
 	a.onClose(h.close)
 }
 
-// recordAudit appends an administrative/security event to the hash-chained audit log.
-func (a *app) recordAudit(ev auditEvent) {
-	if a != nil && a.audit != nil {
-		a.audit.record(ev)
-	}
-}
+// recordAudit is implemented in enterprise_hooks.go / enterprise_stub.go.
 
 // Close stops the janitors and the drop loop, flushes unsaved bans and the
 // history log, stops the waiting room's reaper, saves the queue, and stops
@@ -437,14 +320,14 @@ func registerRoomEvents(wr *room.WaitingRoom, a *app) {
 		live := wr.LiveQueueDepth()
 		log.Printf("upstream saturated: %d/%d slots, %d queued (%d live)",
 			s.Occupancy, s.Capacity, s.QueueDepth, live)
-		sev := mailer.SevWarn
+		sev := alertSevWarn
 		title := "Waiting room saturated"
 		if maxQ := wr.MaxQueueDepth(); maxQ > 0 && live >= maxQ {
-			sev = mailer.SevCritical
+			sev = alertSevCritical
 			title = "Waiting room queue-full breaker active"
 		}
-		a.notifyEvent(mailer.Event{
-			Category:    mailer.CatQueue,
+		a.notifyAlert(alertEvent{
+			Category:    alertCatQueue,
 			Severity:    sev,
 			Title:       title,
 			Summary:     fmt.Sprintf("Origin slots full (%d/%d), %d queued (%d live).", s.Occupancy, s.Capacity, s.QueueDepth, live),
@@ -475,6 +358,40 @@ func registerRoomEvents(wr *room.WaitingRoom, a *app) {
 	wr.On(room.EventTimeout, func(room.Snapshot) { stats.timeouts.Add(1) })
 	wr.On(room.EventPromote, func(room.Snapshot) { stats.promoted.Add(1) })
 	wr.On(room.EventRemove, func(room.Snapshot) { stats.removed.Add(1) })
+	wr.On(room.EventTokenRejected, func(s room.Snapshot) {
+		stats.tokenRejected.Add(1)
+		// Award a forged-pass strike on cryptographic tampering or cross-scope
+		// / cross-kind / key-mismatch replay, while leaving normal token expiry
+		// and key-rotation unknown_key misses unstruck.
+		if isForgedTokenRejection(s.Reason) {
+			a.tokenRejectionStrike(s.ClientKey)
+		}
+	})
+}
+
+func isForgedTokenRejection(reason string) bool {
+	switch reason {
+	case room.RejectReasonInvalidSignature,
+		room.RejectReasonWrongScope,
+		room.RejectReasonWrongKind,
+		room.RejectReasonKeyMismatch,
+		room.RejectReasonMalformed:
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *app) tokenRejectionStrike(key string) {
+	reg := a.current().abuse
+	if reg == nil || key == "" {
+		return
+	}
+	ip, err := netip.ParseAddr(key)
+	if err != nil {
+		return
+	}
+	reg.strike(ip, strikeForgedPass, time.Now())
 }
 
 // churnStrike records a ticket-churn strike against the client room keyed
@@ -496,14 +413,15 @@ func (a *app) churnStrike(key string) {
 // endpoints (see server.go); the deferred Close saves the queue and the
 // history after they have drained.
 func run(ctx context.Context, cfg config) error {
+	if strings.TrimSpace(cfg.configFile) != "" {
+		return runVhost(ctx, cfg)
+	}
 	a, err := newApp(cfg)
 	if err != nil {
 		return err
 	}
 	defer a.Close()
-	if a.topo.isLeaf() && cfg.benchOnStart {
-		a.benchOnStart(ctx)
-	}
+	a.maybeBenchOnStart(ctx, cfg)
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel() // stops the portal if the main listener fails
@@ -522,6 +440,9 @@ func run(ctx context.Context, cfg config) error {
 	if err != nil {
 		p.closeListener()
 		return err
+	}
+	if c.http3 && tlsCfg != nil {
+		handler = altSvcMiddleware(c.listen, handler)
 	}
 
 	var httpRedirectEP *endpoint
@@ -542,6 +463,19 @@ func run(ctx context.Context, cfg config) error {
 		}
 		p.closeListener()
 		return fmt.Errorf("listen %s: %w", c.listen, err)
+	}
+
+	var h3Closer func() error
+	if c.http3 && tlsCfg != nil {
+		h3Closer, err = startHTTP3Server(c.listen, tlsCfg, handler)
+		if err != nil {
+			_ = ln.Close()
+			if httpRedirectEP != nil {
+				_ = httpRedirectEP.shutdown()
+			}
+			p.closeListener()
+			return err
+		}
 	}
 
 	mainEP := newEndpoint("main", handler, shutdownGrace, newServer)
@@ -578,6 +512,9 @@ func run(ctx context.Context, cfg config) error {
 		if httpRedirectEP != nil {
 			log.Printf("tls: HTTP redirect & ACME HTTP-01 listening on %s -> HTTPS", c.tlsHTTPListen)
 		}
+		if h3Closer != nil {
+			log.Printf("tls: HTTP/3 (QUIC) listening on udp %s (Alt-Svc advertised)", c.listen)
+		}
 		if !c.secureCookie {
 			log.Printf("tls: browsers now reach concert over HTTPS; set CONCERT_SECURE_COOKIE=true")
 		}
@@ -590,20 +527,6 @@ func run(ctx context.Context, cfg config) error {
 		log.Printf("fcgi: php-fpm upstream active (root=%s, index=%s, deny=%d rule(s))",
 			c.staticRoot, c.fcgiIndex, len(c.parsedFCGIDenyPaths))
 	}
-	if a.fastlane != nil {
-		fc := a.fastlane.Config()
-		mode := "live networks"
-		if fc.TestMode {
-			mode = "test networks only"
-		}
-		log.Printf("fast lane: %s, %d payment offer(s), %d NFT rule(s), %ds pass, chain endpoints %s, settlement journal %s",
-			mode, len(fc.Offers), len(fc.Collections), fc.PassSeconds, c.networksFile, gatewayDir(c.dataDir))
-		if fc.GatewayURL != "" {
-			log.Printf("fast lane: gateway_url is ignored; the chain gateway runs inside concert")
-		}
-	} else if c.fastlaneFile != "" {
-		log.Printf("fast lane: %s has \"enabled\": false; wallet access is off", c.fastlaneFile)
-	}
 	if c.abuseEnabled {
 		log.Printf("abuse registry: %d strikes per %s, cooldown %s doubling to %s, %d ban paths",
 			c.abuseStrikes, c.abuseWindow, c.abuseCooldown, c.abuseMaxCooldown, len(g.banRules))
@@ -615,14 +538,7 @@ func run(ctx context.Context, cfg config) error {
 			log.Printf("data dir: %s (settings.json overrides flags and environment; bans, the queue and the history survive restarts)", c.dataDir)
 		}
 	}
-	switch {
-	case a.topo.isEdge():
-		log.Printf("edge %s: signing hop claims; polling %d leaf(s) every %s; room sized from leaves: %v (at most -cap %d)",
-			a.topo.node, len(c.controlURLs()), c.hopPoll, c.hopAutoCap, c.capacity)
-	case a.topo.isLeaf():
-		log.Printf("leaf %s: accepting hop claims from %s; host capacity %d (%s)",
-			a.topo.node, c.hopPeers, a.topo.leaf.gate.Cap(), a.topo.leaf.capSource)
-	}
+	a.logEnterpriseStartup(c)
 	if c.admitSecretGenerated {
 		log.Printf("CONCERT_ADMIT_SECRET not set: using a random secret; admission passes and priority grants reset on restart and are not shared across instances")
 	}
@@ -632,7 +548,13 @@ func run(ctx context.Context, cfg config) error {
 		<-ctx.Done()
 		a.draining.Store(true)
 	}()
-	return awaitShutdown(ctx, mainEP, portalEP, httpRedirectEP)
+	err = awaitShutdown(ctx, mainEP, portalEP, httpRedirectEP)
+	if h3Closer != nil {
+		if cerr := h3Closer(); cerr != nil && err == nil {
+			err = cerr
+		}
+	}
+	return err
 }
 
 // setPricing stores the skip-the-line price. It changes at runtime, so it

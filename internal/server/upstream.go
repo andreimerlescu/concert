@@ -17,9 +17,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/andreimerlescu/concert/internal/fcgi"
-	"github.com/andreimerlescu/concert/internal/hop"
 )
 
 // Multi-upstream pool with least-inflight load balancing, circuit breaking,
@@ -103,7 +100,7 @@ type upstreamPool struct {
 	healthPath    string
 	healthEvery   time.Duration
 	transport     *http.Transport
-	fcgi          *fcgi.Transport
+	fcgi          *fcgiTransport
 	onCircuitOpen func(target, reason string)
 	stop          chan struct{}
 	stopOnce      sync.Once
@@ -127,7 +124,7 @@ func parseUpstreams(spec string) ([]*url.URL, error) {
 				return nil, fmt.Errorf("invalid -upstream entry %q: must look like http://host:port", part)
 			}
 		case "fcgi", "fcgi+unix":
-			if _, _, ferr := fcgi.ParseTarget(u); ferr != nil {
+			if ferr := validateFastCGITarget(u); ferr != nil {
 				return nil, ferr
 			}
 		default:
@@ -180,7 +177,7 @@ func newUpstreamPool(cfg config, transport *http.Transport) *upstreamPool {
 	return newUpstreamPoolWithFCGI(cfg, transport, nil)
 }
 
-func newUpstreamPoolWithFCGI(cfg config, transport *http.Transport, fcgiTr *fcgi.Transport) *upstreamPool {
+func newUpstreamPoolWithFCGI(cfg config, transport *http.Transport, fcgiTr *fcgiTransport) *upstreamPool {
 	targets := cfg.targets
 	if len(targets) == 0 && cfg.target != nil {
 		targets = []*url.URL{cfg.target}
@@ -215,9 +212,7 @@ func (p *upstreamPool) close() {
 		if p.transport != nil {
 			p.transport.CloseIdleConnections()
 		}
-		if p.fcgi != nil {
-			_ = p.fcgi.Close()
-		}
+		closeFCGITransport(p.fcgi)
 	})
 }
 
@@ -362,8 +357,8 @@ func (p *upstreamPool) probeLoop() {
 func (p *upstreamPool) probeAll(client *http.Client) {
 	for _, b := range p.backends {
 		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-		if fcgi.IsFastCGI(b.target) && p.fcgi != nil {
-			err := p.fcgi.DialCheck(ctx, b.target)
+		if isFastCGITarget(b.target) && p.fcgi != nil {
+			err := dialCheckFCGI(ctx, p.fcgi, b.target)
 			cancel()
 			if err != nil {
 				b.setActiveHealth(false, err.Error())
@@ -434,28 +429,10 @@ func newEnterpriseProxy(cfg config, stats *counters, modify func(*http.Response)
 		ReadBufferSize:        32 << 10,
 	}
 
-	var fcgiTr *fcgi.Transport
+	var fcgiTr *fcgiTransport
 	if cfg.hasFastCGI {
 		var ferr error
-		fcgiTr, ferr = fcgi.NewTransport(fcgi.Config{
-			Root:          cfg.staticRoot,
-			Index:         cfg.fcgiIndex,
-			DenyPaths:     cfg.parsedFCGIDenyPaths,
-			HeaderTimeout: cfg.headerTimeout,
-			OnStderr: func(msg string) {
-				log.Printf("fcgi stderr: %s", clip(msg, 512))
-			},
-			OnRequest: func() {
-				if stats != nil {
-					stats.fcgiRequests.Add(1)
-				}
-			},
-			OnDenied: func(p string) {
-				if stats != nil {
-					stats.fcgiDenied.Add(1)
-				}
-			},
-		})
+		fcgiTr, ferr = newFCGITransportWithStats(cfg, stats)
 		if ferr != nil {
 			return nil, nil, ferr
 		}
@@ -479,7 +456,7 @@ func newEnterpriseProxy(cfg config, stats *counters, modify func(*http.Response)
 			if !ok || b == nil {
 				b, _ = pool.pick(time.Now())
 			}
-			if fcgi.IsFastCGI(b.target) {
+			if isFastCGITarget(b.target) {
 				// Keep request path and query intact so Unix socket paths in
 				// fcgi+unix:///... never pollute REQUEST_URI.
 				pr.Out.URL.Scheme = "http"
@@ -496,11 +473,11 @@ func newEnterpriseProxy(cfg config, stats *counters, modify func(*http.Response)
 
 			ra, hasAddr := remoteAddr(pr.In)
 			fromTrusted := hasAddr && containsAddr(cfg.trusted, ra)
-			if claim, ok := hopInFrom(pr.In.Context()); ok {
+			if hopIP, ok := hopInClientIP(pr.In.Context()); ok {
 				// A leaf knows the client from the edge's signed claim;
 				// the application sees it first, then the hop it came
 				// through, however the tiers are connected.
-				pr.Out.Header["X-Forwarded-For"] = []string{claim.Client.String()}
+				pr.Out.Header["X-Forwarded-For"] = []string{hopIP.String()}
 			} else if fromTrusted {
 				if v := pr.In.Header.Values("X-Forwarded-For"); len(v) > 0 {
 					pr.Out.Header["X-Forwarded-For"] = append([]string(nil), v...)
@@ -518,7 +495,7 @@ func newEnterpriseProxy(cfg config, stats *counters, modify func(*http.Response)
 				pr.Out.Header.Set("X-Forwarded-Host", pr.In.Host)
 			}
 			stripCookies(pr.Out, proxyCookies...)
-			for _, name := range []string{"PAYMENT-SIGNATURE", "PAYMENT-REQUIRED", "PAYMENT-RESPONSE", "Concert-Session", "X-Concert-CSRF", hop.Header, hop.BackpressureHeader, hop.NodeHeader} {
+			for _, name := range []string{"PAYMENT-SIGNATURE", "PAYMENT-REQUIRED", "PAYMENT-RESPONSE", "Concert-Session", "X-Concert-CSRF", "X-Room-Pass", "X-Room-Lease", hopHeaderName, hopBackpressureHeaderName, hopNodeHeaderName} {
 				pr.Out.Header.Del(name)
 			}
 		},
@@ -549,7 +526,7 @@ var errCircuitOpen = errors.New("upstream circuit breaker open")
 
 type trackedTransport struct {
 	base     http.RoundTripper
-	fcgi     *fcgi.Transport
+	fcgi     *fcgiTransport
 	compress bool
 	pool     *upstreamPool
 	stats    *counters
@@ -584,13 +561,13 @@ func (t *trackedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	var tried []*upstreamBackend
 	for i := 0; ; i++ {
 		out := req
-		if b != first && !fcgi.IsFastCGI(b.target) && !fcgi.IsFastCGI(first.target) {
+		if b != first && !isFastCGITarget(b.target) && !isFastCGITarget(first.target) {
 			out = retarget(req, first.target, b.target)
 		}
 		out = t.topo.signHop(out)
 		resp, err := t.attempt(b, out)
 		if err == nil && t.topo.isEdge() && isLeafBackpressure(resp, t.topo) {
-			t.topo.edge.backpressure.Add(1)
+			t.topo.recordEdgeBackpressure()
 		}
 		if i+1 >= attempts || !retryableFor(resp, err, t.topo) {
 			return resp, err
@@ -608,9 +585,7 @@ func (t *trackedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 			resp.Body.Close()
 		}
-		if t.topo.isEdge() {
-			t.topo.edge.retries.Add(1)
-		}
+		t.topo.recordEdgeRetry()
 		b = next
 	}
 }
@@ -623,8 +598,8 @@ func (t *trackedTransport) attempt(b *upstreamBackend, req *http.Request) (*http
 	start := time.Now()
 	var resp *http.Response
 	var err error
-	if fcgi.IsFastCGI(b.target) && t.fcgi != nil {
-		resp, err = t.fcgi.RoundTripTo(req, b.target)
+	if isFastCGITarget(b.target) && t.fcgi != nil {
+		resp, err = roundTripFCGI(t.fcgi, req, b.target)
 		if err == nil && t.compress {
 			maybeGzipFastCGI(req, resp)
 		}
@@ -680,7 +655,7 @@ func isLeafBackpressure(resp *http.Response, topo *topology) bool {
 		return false
 	}
 	return resp != nil && resp.StatusCode == http.StatusServiceUnavailable &&
-		resp.Header.Get(hop.BackpressureHeader) != ""
+		resp.Header.Get(hopBackpressureHeaderName) != ""
 }
 
 // retryable reports whether an attempt failed without reaching the

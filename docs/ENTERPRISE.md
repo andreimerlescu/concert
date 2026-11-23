@@ -1,5 +1,7 @@
 # Concert Enterprise Hardening & Compliance Guide
 
+> **Edition Note (`v0.3.0`+):** All enterprise features documented in this guide (RBAC/MFA/SSO, hash-chained audit logs, `-enterprise-hardened`, Redis HA ban sync, edge/leaf mesh + mTLS, email digests, and x402 Fast-Lane) ship in the **`econcert`** binary (`go build -tags "wordpress,enterprise" ./cmd/econcert`). Core `concert` and `wpconcert` compile without these packages or their transitive dependencies.
+
 This guide documents Concert's enterprise security, observability, high-availability, and privacy controls and maps them to common enterprise frameworks (SOC 2 Type II, ISO/IEC 27001, PCI DSS v4.0.1, HIPAA, GDPR/CCPA, and FIPS 140-3).
 
 ---
@@ -35,7 +37,7 @@ For immutable / GitOps deployments, also enable `-read-only-settings` (`CONCERT_
 Generate an OWASP Argon2id password hash:
 
 ```sh
-concert hash-password "your-strong-passphrase"
+econcert hash-password "your-strong-passphrase"
 ```
 
 Configure `CONCERT_PORTAL_USERS` (inline JSON or `@/etc/concert/portal_users.json` or `CONCERT_PORTAL_USERS_FILE`):
@@ -87,7 +89,7 @@ Verify chain integrity offline at any time:
 
 ```sh
 CONCERT_ADMIT_SECRET_FILE=/run/secrets/concert/admit_secret \
-  concert audit verify /var/lib/concert/data/audit.jsonl
+  econcert audit verify /var/lib/concert/data/audit.jsonl
 ```
 
 ---

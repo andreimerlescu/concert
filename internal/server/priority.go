@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"math/bits"
 	"net/http"
 	"strconv"
 	"strings"
@@ -365,9 +366,9 @@ func (g *priorityGrants) modifyResponse(resp *http.Response) error {
 // rankTicket places a waiting ticket by rank in room's line, and reports
 // whether it moved. room records the rank on the ticket (TicketInfo.Rank,
 // which the portal shows) and keeps it ahead of lower ranks, behind equal
-// or higher ones. A ticket already carrying this rank is left alone: a
-// second placement could only jump it ahead of a visitor an operator moved
-// to the front since, and each placement costs room a pass over its line.
+// or higher ones in O(log N) via room v1.7.0's indexed treap. A ticket
+// already carrying this rank is left alone so a second placement never
+// jumps ahead of a visitor an operator promoted since.
 func rankTicket(wr *room.WaitingRoom, token string, rank priorityRank) bool {
 	if ti, ok := wr.Ticket(token); !ok || ti.Rank == int(rank) {
 		return false
@@ -380,27 +381,96 @@ func rankTicket(wr *room.WaitingRoom, token string, rank priorityRank) bool {
 
 // ─── the priority lane ───────────────────────────────────────────────────────
 
-// rankedSem is a semaphore whose waiters are served highest rank first,
-// first come first served within a rank. A freed slot passes straight to
-// the next waiter.
+// rankedSem is a resizable semaphore whose waiters are served highest rank
+// first, first come first served within each rank, in O(1) time via per-rank
+// intrusive FIFO queues and a rank bitmask (mirroring sema v1.3.0 across all
+// 7 Concert priority ranks). Shrinking via SetCap is strictly non-draining:
+// in-flight holders finish untouched and no new slot is granted until
+// used < cap.
 type rankedSem struct {
-	mu      sync.Mutex
-	cap     int
-	used    int
-	seq     uint64
-	waiters []*semWaiter
+	mu         sync.Mutex
+	cap        int
+	used       int
+	waiting    int
+	activeMask uint8 // bit r set iff queues[r] is non-empty (rankCount == 7)
+	queues     [rankCount]rankQueue
+}
+
+type rankQueue struct {
+	head *semWaiter
+	tail *semWaiter
+}
+
+func (q *rankQueue) pushBack(w *semWaiter) {
+	w.prev = q.tail
+	w.next = nil
+	if q.tail == nil {
+		q.head = w
+		q.tail = w
+	} else {
+		q.tail.next = w
+		q.tail = w
+	}
+}
+
+func (q *rankQueue) popFront() *semWaiter {
+	w := q.head
+	if w == nil {
+		return nil
+	}
+	q.head = w.next
+	if q.head == nil {
+		q.tail = nil
+	} else {
+		q.head.prev = nil
+	}
+	w.prev = nil
+	w.next = nil
+	return w
+}
+
+func (q *rankQueue) remove(w *semWaiter) {
+	if w.prev != nil {
+		w.prev.next = w.next
+	} else if q.head == w {
+		q.head = w.next
+	}
+	if w.next != nil {
+		w.next.prev = w.prev
+	} else if q.tail == w {
+		q.tail = w.prev
+	}
+	w.prev = nil
+	w.next = nil
 }
 
 type semWaiter struct {
 	rank    priorityRank
-	seq     uint64
 	ready   chan struct{}
 	granted bool
+	prev    *semWaiter
+	next    *semWaiter
 }
 
-func newRankedSem(n int) *rankedSem { return &rankedSem{cap: n} }
+func higherOrEqualRankMask(r priorityRank) uint8 {
+	if r >= rankCount {
+		r = rankCount - 1
+	}
+	return uint8(((1 << rankCount) - 1) &^ ((1 << uint(r)) - 1))
+}
 
-func (s *rankedSem) Cap() int { return s.cap }
+func newRankedSem(n int) *rankedSem {
+	if n < 1 {
+		n = 1
+	}
+	return &rankedSem{cap: n}
+}
+
+func (s *rankedSem) Cap() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cap
+}
 
 func (s *rankedSem) Len() int {
 	s.mu.Lock()
@@ -411,13 +481,44 @@ func (s *rankedSem) Len() int {
 func (s *rankedSem) Waiting() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return len(s.waiters)
+	return s.waiting
+}
+
+// SetCap resizes the lane ceiling without draining in-flight requests.
+// Growing wakes highest-rank waiters up to the new cap; shrinking blocks
+// new admissions until in-flight usage drains below n.
+func (s *rankedSem) SetCap(n int) {
+	if n < 1 {
+		n = 1
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cap = n
+	s.dispatchLocked()
+}
+
+func (s *rankedSem) dispatchLocked() {
+	for s.used < s.cap && s.activeMask != 0 {
+		r := 7 - bits.LeadingZeros8(s.activeMask)
+		q := &s.queues[r]
+		w := q.popFront()
+		if q.head == nil {
+			s.activeMask &^= uint8(1) << uint(r)
+		}
+		s.waiting--
+		s.used++
+		w.granted = true
+		close(w.ready)
+	}
 }
 
 // acquire takes a slot, waiting up to wait. A true result must be released.
 func (s *rankedSem) acquire(ctx context.Context, rank priorityRank, wait time.Duration) bool {
+	if rank >= rankCount {
+		rank = rankCount - 1
+	}
 	s.mu.Lock()
-	if s.used < s.cap && len(s.waiters) == 0 {
+	if s.used < s.cap && (s.activeMask&higherOrEqualRankMask(rank)) == 0 {
 		s.used++
 		s.mu.Unlock()
 		return true
@@ -426,9 +527,10 @@ func (s *rankedSem) acquire(ctx context.Context, rank priorityRank, wait time.Du
 		s.mu.Unlock()
 		return false
 	}
-	w := &semWaiter{rank: rank, seq: s.seq, ready: make(chan struct{})}
-	s.seq++
-	s.waiters = append(s.waiters, w)
+	w := &semWaiter{rank: rank, ready: make(chan struct{})}
+	s.queues[rank].pushBack(w)
+	s.activeMask |= uint8(1) << uint(rank)
+	s.waiting++
 	s.mu.Unlock()
 
 	t := time.NewTimer(wait)
@@ -445,35 +547,23 @@ func (s *rankedSem) acquire(ctx context.Context, rank priorityRank, wait time.Du
 	if w.granted {
 		return true
 	}
-	for i, x := range s.waiters {
-		if x == w {
-			s.waiters = append(s.waiters[:i], s.waiters[i+1:]...)
-			break
-		}
+	q := &s.queues[w.rank]
+	q.remove(w)
+	if q.head == nil {
+		s.activeMask &^= uint8(1) << uint(w.rank)
 	}
+	s.waiting--
+	s.dispatchLocked()
 	return false
 }
 
 func (s *rankedSem) release() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.waiters) > 0 {
-		best := 0
-		for i := 1; i < len(s.waiters); i++ {
-			w, b := s.waiters[i], s.waiters[best]
-			if w.rank > b.rank || (w.rank == b.rank && w.seq < b.seq) {
-				best = i
-			}
-		}
-		w := s.waiters[best]
-		s.waiters = append(s.waiters[:best], s.waiters[best+1:]...)
-		w.granted = true
-		close(w.ready)
-		return
-	}
 	if s.used > 0 {
 		s.used--
 	}
+	s.dispatchLocked()
 }
 
 // ─── state and the gate ──────────────────────────────────────────────────────
@@ -513,7 +603,7 @@ func (g *generation) priorityGate(c *gin.Context) {
 	now := time.Now()
 	rank := ps.grants.rankOf(r, now)
 
-	fast := g.a.fastlane != nil && g.a.fastlane.Eligible(r)
+	fast := g.a.fastlaneEligible(r)
 	if fast && rank < rankCustomer {
 		rank = rankCustomer
 	}

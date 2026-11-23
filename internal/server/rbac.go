@@ -1,3 +1,5 @@
+//go:build enterprise
+
 package server
 
 import (
@@ -13,7 +15,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/netip"
 	"os"
@@ -25,89 +26,8 @@ import (
 )
 
 // Enterprise identity, RBAC, MFA (TOTP), SSO reverse-proxy integration,
-// named/scoped API tokens, and file-based secret loading (_FILE pattern).
-
-type rbacRole uint8
-
-const (
-	roleNone rbacRole = iota
-	roleViewer
-	roleOperator
-	roleAdmin
-)
-
-func (r rbacRole) String() string {
-	switch r {
-	case roleViewer:
-		return "viewer"
-	case roleOperator:
-		return "operator"
-	case roleAdmin:
-		return "admin"
-	default:
-		return "none"
-	}
-}
-
-func parseRole(s string) (rbacRole, bool) {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "viewer", "readonly", "read-only", "read":
-		return roleViewer, true
-	case "operator", "ops", "editor":
-		return roleOperator, true
-	case "admin", "administrator", "superadmin":
-		return roleAdmin, true
-	default:
-		return roleNone, false
-	}
-}
-
-func (r rbacRole) allows(required rbacRole) bool {
-	return r >= required && required > roleNone
-}
-
-type principal struct {
-	Actor  string
-	Role   rbacRole
-	Source string // "password", "user", "sso", "token"
-	IP     netip.Addr
-}
-
-func (p principal) label() string {
-	if p.Actor == "" {
-		if p.IP.IsValid() {
-			return p.IP.String()
-		}
-		return "unknown"
-	}
-	if p.IP.IsValid() {
-		return fmt.Sprintf("%s (%s) @ %s", p.Actor, p.Role, p.IP)
-	}
-	return fmt.Sprintf("%s (%s)", p.Actor, p.Role)
-}
-
-// ─── file-backed secrets (_FILE convention) ──────────────────────────────────
-
-// envOrFile resolves a secret from <name>_FILE first (for Kubernetes Secrets,
-// Docker Secrets, and Vault Agent sidecars), falling back to <name>, then def.
-func envOrFile(name, def string) string {
-	if filePath := strings.TrimSpace(os.Getenv(name + "_FILE")); filePath != "" {
-		if info, err := os.Stat(filePath); err == nil && info.Mode().Perm()&0o077 != 0 {
-			log.Printf("security: secret file %s (%s_FILE) has overly permissive mode %04o; recommend 0600 or 0400",
-				filePath, name, info.Mode().Perm())
-		}
-		b, err := os.ReadFile(filePath)
-		if err != nil {
-			log.Printf("security: failed to read %s_FILE (%s): %v", name, filePath, err)
-		} else {
-			return strings.TrimRight(string(b), "\r\n")
-		}
-	}
-	if v, ok := os.LookupEnv(name); ok && v != "" {
-		return v
-	}
-	return def
-}
+// named/scoped API tokens, and gateway secret loading.
+// Core rbacRole, principal, and envOrFile live in edition_core.go.
 
 // envLookupForGateway wraps envOrFile so chain sponsor keys can also be loaded
 // via CONCERT_STELLAR_FEE_SECRET_FILE and CONCERT_HEDERA_FEE_SECRET_FILE.

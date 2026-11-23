@@ -1,7 +1,10 @@
 package server
 
 import (
+	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -14,9 +17,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/andreimerlescu/concert/internal/fcgi"
 	"github.com/andreimerlescu/concert/internal/static"
 	"github.com/andreimerlescu/goenv/env"
+	"github.com/andreimerlescu/room"
 )
 
 // Cookies owned by concert and room. None of them are forwarded upstream.
@@ -31,6 +34,16 @@ var proxyCookies = []string{"room_ticket", "room_pass", "room_probe", admitCooki
 type config struct {
 	fastlaneFile string // immutable startup configuration; see docs/FASTLANE.md
 	networksFile string // chain endpoints for the fast lane's gateway
+	configFile   string // declarative Concertfile or .json path; see vhost.go
+
+	// Multi-vhost / declarative config metadata populated by vhost.go.
+	configManaged   bool
+	siteHost        string
+	preset          string
+	wpPreset        bool
+	microCacheTTL   time.Duration
+	microCacheMaxMB int
+	http3           bool
 
 	listen         string
 	upstream       string
@@ -53,6 +66,13 @@ type config struct {
 	apiJSON        bool
 	retryAfter     int
 	adminToken     string
+
+	// room v1.8.0 verify-only Ed25519 split mode for multi-replica VIP passes & signed leases.
+	roomVerifyKeys       string
+	roomScope            string
+	roomSignedMaxTTL     time.Duration
+	roomLeaseFraction    float64
+	parsedRoomVerifyKeys map[string]ed25519.PublicKey
 
 	assets            string
 	assetPublic       string
@@ -226,9 +246,14 @@ func parseConfig(fs *flag.FlagSet, args []string) (config, bool, error) {
 	// -data-dir says where settings.json is, so it cannot itself live there.
 	fs.StringVar(&cfg.dataDir, "data-dir", env.String("CONCERT_DATA_DIR", defaultDataDir),
 		"directory for settings.json, bans.json, the saved queue and the history log (empty disables persistence)")
+	fs.StringVar(&cfg.configFile, "config", env.String("CONCERT_CONFIG", ""),
+		"declarative multi-vhost config file (Concertfile or .json); source of truth reloaded on SIGHUP")
 
 	showVersion := fs.Bool("version", false, "show version")
 
+	if err := checkMovedFlags(args); err != nil {
+		return config{}, false, err
+	}
 	if err := fs.Parse(args); err != nil {
 		return config{}, false, err
 	}
@@ -248,10 +273,18 @@ func parseConfig(fs *flag.FlagSet, args []string) (config, bool, error) {
 	cfg.email.smtpPass = envOrFile("CONCERT_SMTP_PASS", "")
 	cfg.email.resendAPIKey = envOrFile("CONCERT_RESEND_API_KEY", "")
 	cfg.email.sendPandaAPIKey = envOrFile("CONCERT_SENDPANDA_API_KEY", "")
+	if strings.TrimSpace(cfg.roomVerifyKeys) == "" {
+		cfg.roomVerifyKeys = envOrFile("CONCERT_ROOM_VERIFY_KEYS", "")
+	}
 	cfg.accessLog = os.Stdout
 
 	if *showVersion {
 		return cfg, true, nil
+	}
+	if strings.TrimSpace(cfg.configFile) != "" {
+		// Declarative -config mode: the Concertfile/.json is the source of
+		// truth; per-site normalization happens inside newVhostManager.
+		return cfg, false, nil
 	}
 	if err := loadSettingsLayer(&cfg, fs); err != nil {
 		return config{}, false, err
@@ -264,6 +297,17 @@ func parseConfig(fs *flag.FlagSet, args []string) (config, bool, error) {
 
 // normalize validates the config and fills derived fields. It is idempotent.
 func (c *config) normalize() error {
+	if c.wpPreset {
+		if err := applyWordPressPreset(c); err != nil {
+			return err
+		}
+	}
+	if c.microCacheTTL < 0 {
+		return fmt.Errorf("invalid -micro-cache-ttl %s: must not be negative", c.microCacheTTL)
+	}
+	if c.microCacheMaxMB < 0 {
+		return fmt.Errorf("invalid -micro-cache-max-mb %d: must not be negative", c.microCacheMaxMB)
+	}
 	targets, err := parseUpstreams(c.upstream)
 	if err != nil {
 		return err
@@ -272,17 +316,11 @@ func (c *config) normalize() error {
 	c.target = targets[0]
 	c.hasFastCGI = false
 	for _, u := range targets {
-		if fcgi.IsFastCGI(u) {
+		if isFastCGITarget(u) {
 			c.hasFastCGI = true
 		}
 	}
 
-	if err := c.normalizeTopology(); err != nil {
-		return err
-	}
-	if c.hasFastCGI && c.role == roleEdge {
-		return errors.New("edge nodes cannot use fcgi:// or fcgi+unix:// upstreams directly; run php-fpm behind a standalone or leaf node")
-	}
 	if strings.TrimSpace(c.staticRoot) != "" {
 		info, serr := os.Stat(strings.TrimSpace(c.staticRoot))
 		if serr != nil || !info.IsDir() {
@@ -341,6 +379,25 @@ func (c *config) normalize() error {
 	}
 	if c.retryAfter < 1 {
 		c.retryAfter = 1
+	}
+	if strings.TrimSpace(c.roomVerifyKeys) != "" {
+		keys, err := parseEd25519VerifyKeys(c.roomVerifyKeys)
+		if err != nil {
+			return fmt.Errorf("invalid -room-verify-keys: %w", err)
+		}
+		c.parsedRoomVerifyKeys = keys
+		if strings.TrimSpace(c.roomScope) == "" {
+			return errors.New("-room-scope is required when -room-verify-keys is set")
+		}
+	} else {
+		c.parsedRoomVerifyKeys = nil
+	}
+	c.roomScope = strings.TrimSpace(c.roomScope)
+	if c.roomSignedMaxTTL != 0 && (c.roomSignedMaxTTL < time.Second || c.roomSignedMaxTTL > room.MaxSignedTokenTTL) {
+		return fmt.Errorf("invalid -room-signed-max-ttl %s: must be 0 (default 15m) or between 1s and %s", c.roomSignedMaxTTL, room.MaxSignedTokenTTL)
+	}
+	if math.IsNaN(c.roomLeaseFraction) || math.IsInf(c.roomLeaseFraction, 0) || c.roomLeaseFraction < 0 || c.roomLeaseFraction > 1 {
+		return fmt.Errorf("invalid -room-lease-fraction %g: must be between 0 and 1", c.roomLeaseFraction)
 	}
 	if g := c.firstPollGrace; g != 0 {
 		if g < minFirstPollGrace || g > maxFirstPollGrace {
@@ -424,6 +481,9 @@ func (c *config) normalize() error {
 			return fmt.Errorf("-tls-http-listen %q cannot share the same port as -listen %q", hl, c.listen)
 		}
 	}
+	if c.http3 && !hasTLS && !c.configManaged {
+		return errors.New("-http3 requires TLS (-tls-domains or -tls-cert/-tls-key)")
+	}
 
 	if len(c.admitSecret) == 0 {
 		secret := make([]byte, minSecretLen)
@@ -484,51 +544,11 @@ func (c *config) normalize() error {
 	if err := c.portal.normalize(); err != nil {
 		return err
 	}
-	if err := c.normalizeEmail(); err != nil {
+	if err := c.normalizeEnterprise(); err != nil {
 		return err
 	}
 
-	if c.hardened {
-		if err := c.validateHardened(); err != nil {
-			return err
-		}
-	}
-
 	return validateRoutes(c)
-}
-
-// validateHardened enforces baseline enterprise security controls when
-// -enterprise-hardened (CONCERT_HARDENED=true) is enabled.
-func (c *config) validateHardened() error {
-	var errs []string
-	if c.admitSecretGenerated {
-		errs = append(errs, "CONCERT_ADMIT_SECRET (or _FILE) must be explicitly configured")
-	}
-	if !c.secureCookie {
-		errs = append(errs, "-secure-cookie must be true")
-	}
-	if !c.statsAuth {
-		errs = append(errs, "-stats-auth must be true so /_room/stats and /_room/metrics require authentication")
-	}
-	if !c.apiTokens.enabled() {
-		errs = append(errs, "CONCERT_ADMIN_TOKEN or CONCERT_ADMIN_TOKENS must be configured")
-	}
-	if strings.EqualFold(strings.TrimSpace(c.auditLog), "off") || strings.EqualFold(strings.TrimSpace(c.auditLog), "none") {
-		errs = append(errs, "-audit-log cannot be disabled")
-	}
-	if c.dataDir == "" && strings.TrimSpace(c.auditLog) == "" {
-		errs = append(errs, "-audit-log or -data-dir must be set so tamper-evident audit logs persist")
-	}
-	if c.portal.enabled() && c.portal.tlsCert == "" && !c.portal.secureCookie && len(c.portal.trustedProxies) == 0 {
-		errs = append(errs, "admin portal requires -portal-tls-cert/-portal-tls-key or -portal-secure-cookie behind a trusted TLS proxy")
-	}
-	if c.role == roleLeaf && (!c.hopReplayGuard || !c.hopRequireNonce) {
-		errs = append(errs, "leaf nodes require -hop-replay-guard=true and -hop-require-nonce=true in enterprise-hardened mode")
-	}
-	if len(errs) > 0 {
-		return fmt.Errorf("enterprise-hardened checks failed: %s", strings.Join(errs, "; "))
-	}
-	return nil
 }
 
 // effectiveAssetCap is -asset-cap when set, otherwise cap × asset-user-cap-h2,
@@ -649,4 +669,55 @@ func validateRoutes(c *config) error {
 		}
 	}
 	return nil
+}
+
+// parseEd25519VerifyKeys parses comma-separated "kid=<pubkey>" entries for
+// room v1.8.0 verify-only split mode. Each public key may be encoded as 64-char
+// hex or standard/URL base64 (with or without padding) decoding to exactly 32
+// Ed25519 public key bytes.
+func parseEd25519VerifyKeys(spec string) (map[string]ed25519.PublicKey, error) {
+	out := make(map[string]ed25519.PublicKey)
+	for _, raw := range strings.Split(spec, ",") {
+		entry := strings.TrimSpace(raw)
+		if entry == "" {
+			continue
+		}
+		kid, val, ok := strings.Cut(entry, "=")
+		kid = strings.TrimSpace(kid)
+		val = strings.TrimSpace(val)
+		if !ok || kid == "" || val == "" {
+			return nil, fmt.Errorf("malformed entry %q (expected kid=<ed25519-pubkey>)", entry)
+		}
+		if _, dup := out[kid]; dup {
+			return nil, fmt.Errorf("duplicate key ID %q", kid)
+		}
+		pub, err := decodeEd25519PubKey(val)
+		if err != nil {
+			return nil, fmt.Errorf("key %q: %w", kid, err)
+		}
+		out[kid] = pub
+	}
+	if len(out) == 0 {
+		return nil, errors.New("at least one kid=<ed25519-pubkey> entry is required")
+	}
+	return out, nil
+}
+
+func decodeEd25519PubKey(s string) (ed25519.PublicKey, error) {
+	if len(s) == hex.EncodedLen(ed25519.PublicKeySize) {
+		if b, err := hex.DecodeString(s); err == nil && len(b) == ed25519.PublicKeySize {
+			return ed25519.PublicKey(b), nil
+		}
+	}
+	for _, enc := range []*base64.Encoding{
+		base64.RawURLEncoding,
+		base64.URLEncoding,
+		base64.RawStdEncoding,
+		base64.StdEncoding,
+	} {
+		if b, err := enc.DecodeString(s); err == nil && len(b) == ed25519.PublicKeySize {
+			return ed25519.PublicKey(b), nil
+		}
+	}
+	return nil, fmt.Errorf("must decode to %d-byte Ed25519 public key (base64url, base64, or hex)", ed25519.PublicKeySize)
 }

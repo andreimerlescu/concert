@@ -52,11 +52,15 @@ func TestVerify_SingleUseReplayGuard(t *testing.T) {
 	}
 
 	// Forged signature carrying a real nonce must fail signature BEFORE polluting cache.
+	// Mutate a byte before the final base64url character so real MAC bits (not unused
+	// trailing padding bits) always flip.
 	h3 := s.Sign(sampleClaim(), "GET", "/checkout", "")
-	forged := h3[:len(h3)-1] + "A"
-	if forged == h3 {
-		forged = h3[:len(h3)-1] + "B"
+	flipPos := len(h3) - 3
+	replacement := byte('A')
+	if h3[flipPos] == 'A' {
+		replacement = 'B'
 	}
+	forged := h3[:flipPos] + string(replacement) + h3[flipPos+1:]
 	if _, err := v.Verify(forged, "GET", "/checkout", ""); !errors.Is(err, ErrSignature) {
 		t.Fatalf("forged err = %v, want ErrSignature", err)
 	}

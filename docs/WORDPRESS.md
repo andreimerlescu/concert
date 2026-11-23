@@ -1,19 +1,71 @@
-# Running WordPress & WooCommerce Directly on Concert + PHP-FPM (Zero Caddy / Nginx / Apache)
+# Running WordPress & WooCommerce Directly on `wpconcert` + PHP-FPM (Zero Caddy / Nginx / Apache)
 
-Concert `v0.3.0` can serve as the **complete front-door web server** for a WordPress or WooCommerce host directly in front of `php-fpm`—no Caddy, Nginx, or Apache required.
+`wpconcert` (built with `go build -tags wordpress ./cmd/wpconcert`, or included inside `econcert`) is Concert `v0.3.0`'s dedicated **complete front-door web server** for WordPress & WooCommerce hosts directly in front of `php-fpm`—with **zero** blockchain, gRPC, or enterprise mesh bloat.
 
 ```text
-Internet (:80)   ──▶ Concert HTTP Redirect + ACME HTTP-01 (-tls-http-listen :80)
-Internet (:443)  ──▶ Concert HTTPS (Let's Encrypt ACME or PEM, TLS 1.2/1.3, HTTP/2)
+Internet (:80)   ──▶ wpconcert HTTP Redirect + ACME HTTP-01 (http_listen :80)
+Internet (:443)  ──▶ wpconcert HTTPS (ACME/PEM, TLS 1.2/1.3, HTTP/2 + opt-in HTTP/3 QUIC)
+                       ├─ Multi-vhost SNI & Host dispatch (Concertfile / .json, SIGHUP hot-reload)
                        ├─ Bans & scanners (/xmlrpc.php, /.env, /.git/*) ──▶ 429/403 (0 PHP load)
                        ├─ Static assets (/wp-content/*, /wp-includes/*, /robots.txt)
                        │    └─ internal/static (os.Root jail, .br/.gz sidecars, gzip, ETag, Range)
                        │         ──▶ served straight from disk (0 PHP-FPM load)
+                       ├─ Anonymous GET micro-cache (internal/microcache, singleflight collapse)
+                       │    └─ <1 ms cache hit + fresh concert_admit pass (0 PHP-FPM load)
+                       │         (strictly bypassed on wordpress_logged_in_*, woocommerce_*, POST, /checkout)
                        ├─ Blocked PHP (/wp-content/uploads/*.php, /wp-config.php) ──▶ 403 (0 PHP load)
                        ├─ Missing *.php probes (/shell.php) ──▶ 404 (0 PHP load)
-                       └─ Admitted dynamic pages & .php (capped to pm.max_children)
+                       └─ Admitted dynamic pages, carts & checkout (capped to pm.max_children)
                             └─ internal/fcgi (try_files → index.php) ──▶ php-fpm Unix socket
 ```
+
+---
+
+## 0. One-Command Setup with `wpconcert init` & `wpconcert doctor`
+
+Generate a `Concertfile` automatically sized to your server's local `php-fpm` `pm.max_children` pool:
+
+```sh
+wpconcert init --domain shop.example.com --root /var/www/shop --tls-email ops@example.com --http3 --out /etc/concert/Concertfile
+wpconcert doctor --config /etc/concert/Concertfile
+wpconcert -config /etc/concert/Concertfile
+```
+
+Example multi-site `/etc/concert/Concertfile` (reload cleanly with `kill -HUP $(pidof wpconcert)` or via the Portal **Reload config** button):
+
+```text
+{
+    listen :443
+    http_listen :80
+    tls_email ops@example.com
+    tls_cache /var/lib/concert/acme
+    hsts_max_age 31536000
+    http3 on
+    data_dir /var/lib/concert/data
+}
+
+shop.example.com, www.shop.example.com {
+    preset wordpress
+    root /var/www/shop
+    upstream fcgi+unix:///run/php/php8.3-fpm.sock
+    cap 12
+    priority_cap 4
+    micro_cache 15s
+    secure_cookie on
+}
+
+blog.example.com {
+    preset wordpress
+    root /var/www/blog
+    upstream fcgi+unix:///run/php/php8.3-fpm-blog.sock
+    cap 6
+    micro_cache 30s
+    secure_cookie on
+}
+```
+
+> [!NOTE]
+> **Security invariant:** Client cookies like `woocommerce_items_in_cart` and `wordpress_logged_in_*` trigger **micro-cache bypass** (so carts and logged-in users always hit fresh PHP through the waiting room), while **priority-lane promotion** remains strictly gated on the origin-signed `Concert-Priority` response header so attackers cannot forge cookies to jump the queue.
 
 ---
 

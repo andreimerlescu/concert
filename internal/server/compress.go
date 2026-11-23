@@ -1,3 +1,5 @@
+//go:build wordpress || enterprise
+
 package server
 
 import (

@@ -52,17 +52,30 @@ Concert caps the number of concurrent page requests that reach your origin. Ever
 
 **Assets** don't queue. A stylesheet or image can't run the waiting room's JavaScript, so making one wait is the same as failing it. Instead, asset paths require a valid pass, and each pass has its own small concurrency pool. One visitor can't monopolise the asset tier, and visitors who were never admitted can't touch it at all. A global semaphore across all passes protects the host.
 
+## Editions (Three Purpose-Built Binaries)
+
+`make build` compiles three deduplicated binaries from shared `internal/` packages (plus `bench-concert`), keeping lean binaries free of blockchain/gRPC/enterprise dependencies via Go build tags:
+
+| Binary | Build Command | What's Included |
+| --- | --- | --- |
+| **`concert`** | `go build ./cmd/concert` | Lean HTTP/HTTPS waiting-room front-door: FIFO waiting room (`room`), `sema` capacity + asset/stream tiers, `Concert-Priority`, `os.Root` local static serving + `.br`/`.gz`/gzip, ACME TLS + `:80→:443` redirect + opt-in `-http3`, declarative `-config` (`Concertfile`/`.json`) multi-vhost with `SIGHUP` hot-reload, abuse registry, single-password Portal (with multi-vhost site switcher), Prometheus `/metrics`, `bench` |
+| **`wpconcert`** | `go build -tags wordpress ./cmd/wpconcert` | Everything in `concert` **+** pure-stdlib FastCGI (`fcgi://`, `fcgi+unix://`), WordPress/WooCommerce `preset wordpress`, bounded in-memory anonymous GET micro-cache with `singleflight` stampede collapse (`-micro-cache-ttl`), and `wpconcert doctor` / `wpconcert init` PHP-FPM pool sizing tools — **zero** blockchain/gRPC/enterprise mesh deps |
+| **`econcert`** | `go build -tags "wordpress,enterprise" ./cmd/econcert` | Complete enterprise superset: `concert` + `wpconcert` **+** two-tier edge/leaf hop mesh (`Concert-Hop` nonces + native leaf mTLS + traffic-weighted multi-edge + drained remote re-benchmarking), Redis HA cluster sync & alert dedupe, RBAC/SSO + tamper-evident audit log + `-enterprise-hardened`, transactional email digest mailer, and x402 Fast-Lane (`reconcile`, `archive-receipts`) |
+
 ## Install
 
     go install github.com/andreimerlescu/concert/cmd/concert@latest
+    go install -tags wordpress github.com/andreimerlescu/concert/cmd/wpconcert@latest
+    go install -tags "wordpress,enterprise" github.com/andreimerlescu/concert/cmd/econcert@latest
 
-Or build from source:
+Or build all 24 cross-platform binaries and per-edition CycloneDX SBOMs from source:
 
     git clone https://github.com/andreimerlescu/concert.git
     cd concert
     make build
+    make sbom
 
-`make build` writes static binaries for Linux, macOS and Windows on amd64 and arm64 to `bin/`. Requires Go 1.27.3 or newer (`room v1.6.0` / `sema v1.2.0`).
+`make build` writes static binaries for Linux, macOS and Windows on amd64 and arm64 to `bin/`. Requires Go 1.27.3 or newer (`room v1.8.0` / `sema v1.3.0`).
 
 On RHEL, Alma, Rocky, CentOS Stream or Fedora, `installer.sh` installs a prebuilt binary as a confined systemd service under SELinux enforcing mode, downloads the IPtoASN database for IP details, and schedules its daily refresh. See the comments at the top of the script.
 
@@ -96,16 +109,21 @@ Every option can be set with a flag or an environment variable. A flag overrides
 
 | Flag | Environment | Default | Description |
 |---|---|---|---|
+| `-config` | `CONCERT_CONFIG` | *(empty)* | Declarative multi-vhost config file (`Concertfile` or `.json`); source of truth reloaded on `SIGHUP` |
 | `-listen` | `CONCERT_LISTEN` | `:8080` | Address to listen on (restart to change) |
-| `-upstream` | `CONCERT_UPSTREAM` | `http://127.0.0.1:3000` | Origin to proxy to (`http://`, `https://`, `fcgi://host:port`, or `fcgi+unix:///path/to/php-fpm.sock`) |
+| `-http3` | `CONCERT_HTTP3` | `false` | Serve HTTP/3 (QUIC) on UDP `-listen` alongside TCP HTTPS and advertise `Alt-Svc` (requires TLS; restart to change) |
+| `-upstream` | `CONCERT_UPSTREAM` | `http://127.0.0.1:3000` | Origin to proxy to (`http://`, `https://`; `fcgi://host:port` and `fcgi+unix:///path/to/php-fpm.sock` in `wpconcert`/`econcert`) |
 | `-static-root` | `CONCERT_STATIC_ROOT` | *(empty)* | Local document root served off disk via `os.Root` (also FastCGI `DOCUMENT_ROOT`; restart to change) |
 | `-static-mounts` | `CONCERT_STATIC_MOUNTS` | *(empty)* | Comma-separated `/prefix=/dir` static asset mounts confined by `os.Root` (restart to change) |
 | `-static-allow-ext` | `CONCERT_STATIC_ALLOW_EXT` | *(empty)* | Extra safe file extensions added to the static allowlist (scripts & secrets stay hard-blocked) |
 | `-static-cache-control` | `CONCERT_STATIC_CACHE_CONTROL` | `public, max-age=3600` | `Cache-Control` header applied to locally served static files |
 | `-static-fallback` | `CONCERT_STATIC_FALLBACK` | `false` | Forward missing mounted/asset static files upstream instead of fast `404` |
 | `-compress` | `CONCERT_COMPRESS` | `true` | On-the-fly stdlib `gzip` (`>= 1 KiB`) for locally served static files and FastCGI responses |
-| `-fcgi-index` | `CONCERT_FCGI_INDEX` | `index.php` | Entrypoint script for FastCGI `try_files` fallback and directory index |
-| `-fcgi-deny-paths` | `CONCERT_FCGI_DENY_PATHS` | `/wp-content/uploads/*,/wp-config.php` | Paths blocked from FastCGI PHP execution (`403`; restart to change) |
+| `-fcgi-index` | `CONCERT_FCGI_INDEX` | `index.php` | `wpconcert`/`econcert`: entrypoint script for FastCGI `try_files` fallback and directory index |
+| `-fcgi-deny-paths` | `CONCERT_FCGI_DENY_PATHS` | `/wp-content/uploads/*,/wp-config.php` | `wpconcert`/`econcert`: paths blocked from FastCGI PHP execution (`403`; restart to change) |
+| `-micro-cache-ttl` | `CONCERT_MICRO_CACHE_TTL` | `0s` | `wpconcert`/`econcert`: in-memory anonymous GET/HEAD page micro-cache TTL with stampede collapse (e.g. `15s`) |
+| `-micro-cache-max-mb` | `CONCERT_MICRO_CACHE_MAX_MB` | `64` | `wpconcert`/`econcert`: memory ceiling in MiB for the anonymous GET micro-cache |
+| `-wp-preset` | `CONCERT_WP_PRESET` | `false` | `wpconcert`/`econcert`: apply WordPress/WooCommerce asset gating, `/xmlrpc.php` block, and uploads PHP denial |
 | `-cap` | `CONCERT_CAPACITY` | `434` | Max concurrent page requests allowed through to the origin |
 | `-max-queue` | `CONCERT_MAX_QUEUE` | `369` | Reject new arrivals with 503 beyond this queue depth (0 = unlimited) |
 | `-reaper` | `CONCERT_REAPER` | `36s` | How often abandoned tickets are cleaned up |

@@ -29,6 +29,20 @@
 <div id="portal-app">
   <div class="alert alert-info d-none" id="portal-moved" role="alert"></div>
 
+  <div class="card stat-card mb-3 d-none" id="vhost-bar">
+    <div class="card-body py-2 px-3 d-flex flex-wrap align-items-center justify-content-between gap-2">
+      <div class="d-flex flex-wrap align-items-center gap-2">
+        <label for="site-selector" class="small fw-semibold mb-0"><i aria-hidden="true" class="bi bi-diagram-3"></i> Site</label>
+        <select class="form-select form-select-sm w-auto" id="site-selector" aria-label="Select virtual host site"></select>
+        <span class="badge text-bg-warning d-none" id="badge-runtime-override" title="Live cap override is temporary and resets on config reload">Temporary cap override</span>
+      </div>
+      <div class="d-flex flex-wrap align-items-center gap-3 small text-body-secondary">
+        <span id="vhost-summary">–</span>
+        <button type="button" class="btn btn-sm btn-outline-primary d-none" id="vhost-reload-btn"><i aria-hidden="true" class="bi bi-arrow-clockwise"></i> Reload config</button>
+      </div>
+    </div>
+  </div>
+
   <ul class="nav nav-tabs mb-4" role="tablist">
     <li class="nav-item" role="presentation">
       <button class="nav-link active" id="tab-overview-btn" data-bs-toggle="tab" data-bs-target="#tab-overview" type="button" role="tab" aria-controls="tab-overview" aria-selected="true">

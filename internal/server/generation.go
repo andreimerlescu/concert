@@ -245,6 +245,8 @@ func registerOps(r *gin.Engine, g *generation) {
 			"timeouts_total":               stats.timeouts.Load(),
 			"promoted_total":               stats.promoted.Load(),
 			"removed_total":                stats.removed.Load(),
+			"token_rejected_total":         stats.tokenRejected.Load(),
+			"lease_ceiling":                wr.LeaseCeiling(),
 			"asset_cap":                    assets.global.Cap(),
 			"asset_in_flight":              assets.global.Len(),
 			"asset_users":                  assets.users.count.Load(),
@@ -280,14 +282,7 @@ func registerOps(r *gin.Engine, g *generation) {
 			out["upstream_backends"] = len(g.upstreams.backends)
 			out["upstream_healthy"] = g.upstreams.healthyCount(time.Now())
 		}
-		out["role"] = a.topo.role
-		out["node"] = a.topo.node
-		switch {
-		case a.topo.isEdge():
-			out["edge"] = a.edgeView()
-		case a.topo.isLeaf():
-			out["leaf"] = a.leafView(time.Now())
-		}
+		a.populateStatsEnterprise(out)
 		c.JSON(http.StatusOK, out)
 	})
 
@@ -336,23 +331,7 @@ func registerOps(r *gin.Engine, g *generation) {
 		})
 	})
 
-	// POST /_room/rebench triggers a drained on-demand capacity benchmark on a
-	// leaf (or from an edge against a named leaf).
-	r.POST("/_room/rebench", func(c *gin.Context) {
-		actor, ok := g.requireRole(c, roleAdmin)
-		if !ok {
-			return
-		}
-		handleRebench(c, a, actor, "api")
-	})
-
-	r.POST("/_room/fastlane/reconcile", func(c *gin.Context) {
-		actor, ok := g.requireRole(c, roleAdmin)
-		if !ok {
-			return
-		}
-		handleFastlaneReconcile(c, a, actor, "api")
-	})
+	registerEnterpriseOpsRoutes(r, g)
 
 	// POST /_room/promote promotes a queued ticket (by raw room_ticket or
 	// client IP) to the requested position (default 1), completing the
@@ -450,7 +429,7 @@ func registerOps(r *gin.Engine, g *generation) {
 			return
 		}
 		a.saveBansNow()
-		a.cluster.publishUnban(t)
+		a.publishClusterUnban(t)
 		a.recordAudit(auditEvent{
 			Actor:    actor.Actor,
 			Role:     actor.Role.String(),

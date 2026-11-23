@@ -16,8 +16,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/andreimerlescu/concert/internal/hop"
-	"github.com/andreimerlescu/concert/internal/mailer"
 	"github.com/andreimerlescu/goenv/env"
 )
 
@@ -141,12 +139,20 @@ var settingDefs = []settingDef{
 	{key: "html", flag: "html", env: "CONCERT_HTML_FILE", group: groupRoom, label: "Custom waiting room HTML",
 		def: "", usage: "custom waiting room HTML file, empty for Concert's built-in page (must handle cookies_required and room_probe)",
 		ptr: func(c *config) any { return &c.htmlFile }},
+	{key: "room_verify_keys", flag: "room-verify-keys", env: "CONCERT_ROOM_VERIFY_KEYS", group: groupRoom, label: "Ed25519 verify keys (split mode)", restart: true,
+		def: "", usage: "comma-separated kid=<ed25519-pubkey> entries for stateless room v1.8.0 verify-only VIP passes and signed leases (also supports CONCERT_ROOM_VERIFY_KEYS_FILE)",
+		ptr: func(c *config) any { return &c.roomVerifyKeys }},
+	{key: "room_scope", flag: "room-scope", env: "CONCERT_ROOM_SCOPE", group: groupRoom, label: "Signed token scope", restart: true,
+		def: "", usage: "service scope bound into signed room v1.8.0 passes and leases (required with -room-verify-keys; auto-defaults to site hostname in -config mode)",
+		ptr: func(c *config) any { return &c.roomScope }},
+	{key: "room_signed_max_ttl", flag: "room-signed-max-ttl", env: "CONCERT_ROOM_SIGNED_MAX_TTL", group: groupRoom, label: "Signed token max TTL",
+		def: time.Duration(0), usage: "maximum TTL accepted for signed room v1.8.0 passes and leases, 1s-1h (0 = room default, 15m)",
+		ptr: func(c *config) any { return &c.roomSignedMaxTTL }, check: durationZeroOrBetween(time.Second, time.Hour)},
+	{key: "room_lease_fraction", flag: "room-lease-fraction", env: "CONCERT_ROOM_LEASE_FRACTION", group: groupRoom, label: "Signed lease pool fraction",
+		def: 0.0, usage: "fraction of -cap reserved for the work-conserving lease pool, 0-1 (0 = room default: 0.25 in signed mode, 1.0 otherwise)",
+		ptr: func(c *config) any { return &c.roomLeaseFraction }, check: floatBetween(0, 1)},
 
-	// ---- Fast lane ----
-	{key: "fastlane_config", flag: "fastlane-config", env: "CONCERT_FASTLANE_CONFIG", group: groupSkip, label: "x402 / NFT configuration file", restart: true,
-		def: "", usage: "fast lane JSON (x402 offers and NFT rules; see docs/FASTLANE.md), empty turns wallet access off (flag or CONCERT_FASTLANE_CONFIG only; takes a restart)", ptr: func(c *config) any { return &c.fastlaneFile }},
-	{key: "networks_config", flag: "networks-config", env: "CONCERT_NETWORKS_CONFIG", group: groupSkip, label: "Chain endpoints file", restart: true,
-		def: "", usage: "chain endpoints JSON for the fast lane's payment networks (see docs/FASTLANE.md); sponsor keys come from CONCERT_STELLAR_FEE_SECRET and CONCERT_HEDERA_FEE_SECRET (flag or CONCERT_NETWORKS_CONFIG only; takes a restart)", ptr: func(c *config) any { return &c.networksFile }},
+	// ---- Agent queue ----
 	{key: "agent_queue", flag: "agent-queue", env: "CONCERT_AGENT_QUEUE", group: groupSkip, label: "AI agents wait in line",
 		def: false, usage: "with wallet access on, requests carrying a valid Concert-Session header keep one place in line per session, with no cookies (off by default: agents are also what scalpers use)",
 		ptr: func(c *config) any { return &c.agentQueue }},
@@ -189,14 +195,8 @@ var settingDefs = []settingDef{
 		def: ":8080", usage: "address to listen on (flag or CONCERT_LISTEN only; takes a restart)",
 		ptr: func(c *config) any { return &c.listen }},
 	{key: "upstream", flag: "upstream", env: "CONCERT_UPSTREAM", group: groupOrigin, label: "Upstream origin",
-		def: "http://127.0.0.1:3000", usage: "origin to proxy to (http://, https://, fcgi://host:port, or fcgi+unix:///path/to/php-fpm.sock)",
+		def: "http://127.0.0.1:3000", usage: "origin to proxy to (http:// or https://; fcgi:// and fcgi+unix:// in wpconcert/econcert)",
 		ptr: func(c *config) any { return &c.upstream }},
-	{key: "fcgi_index", flag: "fcgi-index", env: "CONCERT_FCGI_INDEX", group: groupOrigin, label: "FastCGI index script",
-		def: "index.php", usage: "entrypoint script for FastCGI try_files fallback and directory index",
-		ptr: func(c *config) any { return &c.fcgiIndex }},
-	{key: "fcgi_deny_paths", flag: "fcgi-deny-paths", env: "CONCERT_FCGI_DENY_PATHS", group: groupOrigin, label: "FastCGI denied paths", restart: true,
-		def: "/wp-content/uploads/*,/wp-config.php", usage: "comma-separated paths forbidden from FastCGI PHP execution (403); suffix /* for a prefix",
-		ptr: func(c *config) any { return &c.fcgiDenyPaths }, check: checkPathList},
 	{key: "upstream_timeout", flag: "upstream-timeout", env: "CONCERT_UPSTREAM_TIMEOUT", group: groupOrigin, label: "Upstream header timeout",
 		def: 30 * time.Second, usage: "upstream response header timeout",
 		ptr: func(c *config) any { return &c.headerTimeout }, check: durationAtLeast(0)},
@@ -326,12 +326,6 @@ var settingDefs = []settingDef{
 	{key: "tls_key", flag: "tls-key", env: "CONCERT_TLS_KEY", group: groupTLS, label: "TLS private key file (PEM)",
 		def: "", usage: "PEM private key file for enterprise PKI TLS (hot-reloaded on change)",
 		ptr: func(c *config) any { return &c.tlsKey }},
-	{key: "tls_client_ca", flag: "tls-client-ca", env: "CONCERT_TLS_CLIENT_CA", group: groupTLS, label: "Client CA bundle (mTLS)", restart: true,
-		def: "", usage: "PEM CA bundle used to verify client certificates on the main HTTPS listener (VerifyClientCertIfGiven by default so public browsers keep working)",
-		ptr: func(c *config) any { return &c.tlsClientCA }},
-	{key: "tls_require_client_cert", flag: "tls-require-client-cert", env: "CONCERT_TLS_REQUIRE_CLIENT_CERT", group: groupTLS, label: "Require client cert for all TLS", restart: true,
-		def: false, usage: "require a verified client certificate for every connection on the main TLS listener (internal-only leaves)",
-		ptr: func(c *config) any { return &c.tlsRequireClientCert }},
 	{key: "tls_min_version", flag: "tls-min-version", env: "CONCERT_TLS_MIN_VERSION", group: groupTLS, label: "Minimum TLS version",
 		def: "1.2", usage: "minimum TLS version on listeners (1.2 or 1.3)",
 		ptr: func(c *config) any { return &c.tlsMinVersion }},
@@ -341,6 +335,9 @@ var settingDefs = []settingDef{
 	{key: "tls_http_listen", flag: "tls-http-listen", env: "CONCERT_TLS_HTTP_LISTEN", group: groupTLS, label: "HTTP redirect / ACME HTTP-01 address", restart: true,
 		def: "", usage: "companion plain-HTTP listener (e.g. :80) serving ACME HTTP-01 challenges and redirecting HTTP to HTTPS (flag or CONCERT_TLS_HTTP_LISTEN only)",
 		ptr: func(c *config) any { return &c.tlsHTTPListen }},
+	{key: "http3", flag: "http3", env: "CONCERT_HTTP3", group: groupTLS, label: "Enable HTTP/3 (QUIC)", restart: true,
+		def: false, usage: "serve HTTP/3 over QUIC on UDP -listen alongside TCP HTTPS and advertise Alt-Svc (requires TLS; restart to change)",
+		ptr: func(c *config) any { return &c.http3 }},
 
 	// ---- Upstream resilience & mTLS; see upstream.go ----
 	{key: "upstream_health_path", flag: "upstream-health-path", env: "CONCERT_UPSTREAM_HEALTH_PATH", group: groupOrigin, label: "Upstream health path",
@@ -387,35 +384,17 @@ var settingDefs = []settingDef{
 	{key: "portal_tls_key", flag: "portal-tls-key", env: "CONCERT_PORTAL_TLS_KEY", group: groupPortal, label: "Portal TLS key", restart: true,
 		def: "", usage: "PEM private key file to serve the admin portal natively over HTTPS",
 		ptr: func(c *config) any { return &c.portal.tlsKey }},
-	{key: "portal_sso_header", flag: "portal-sso-header", env: "CONCERT_PORTAL_SSO_HEADER", group: groupPortal, label: "SSO identity header", restart: true,
-		def: "", usage: "header set by a trusted SSO proxy (e.g. X-Forwarded-Email) identifying the signed-in user",
-		ptr: func(c *config) any { return &c.portal.ssoHeader }},
-	{key: "portal_sso_role_header", flag: "portal-sso-role-header", env: "CONCERT_PORTAL_SSO_ROLE_HEADER", group: groupPortal, label: "SSO role/group header", restart: true,
-		def: "", usage: "header set by a trusted SSO proxy carrying RBAC roles/groups (viewer, operator, admin)",
-		ptr: func(c *config) any { return &c.portal.ssoRoleHeader }},
-	{key: "portal_sso_default_role", flag: "portal-sso-default-role", env: "CONCERT_PORTAL_SSO_DEFAULT_ROLE", group: groupPortal, label: "SSO default role", restart: true,
-		def: "viewer", usage: "default RBAC role for SSO users when no role header matches (viewer, operator, admin)",
-		ptr: func(c *config) any { return &c.portal.ssoDefaultRole }},
-	{key: "portal_trusted_proxies", flag: "portal-trusted-proxies", env: "CONCERT_PORTAL_TRUSTED_PROXIES", group: groupPortal, label: "Portal trusted SSO proxies", restart: true,
-		def: "", usage: "comma-separated CIDRs of identity proxies trusted to set SSO headers",
-		ptr: func(c *config) any { return &c.portal.trustedProxiesSpec }, check: checkCIDRList},
 	{key: "history_log", flag: "history-log", env: "CONCERT_HISTORY_LOG", group: groupPortal, label: "History log file", restart: true,
 		def: "", usage: "JSON-lines file the portal's request history is written to and restored from; empty means history.jsonl in -data-dir, off keeps it in memory only (flag or CONCERT_HISTORY_LOG only; takes a restart)",
 		ptr: func(c *config) any { return &c.historyLog }},
 
-	// ---- Enterprise security & observability ----
+	// ---- Security & observability ----
 	{key: "stats_auth", flag: "stats-auth", env: "CONCERT_STATS_AUTH", group: groupEnterprise, label: "Require auth on stats/metrics",
 		def: false, usage: "require bearer token authentication on /_room/stats and /_room/metrics",
 		ptr: func(c *config) any { return &c.statsAuth }},
 	{key: "read_only_settings", flag: "read-only-settings", env: "CONCERT_READ_ONLY_SETTINGS", group: groupEnterprise, label: "Read-only settings (GitOps)", restart: true,
 		def: false, usage: "forbid live mutations to settings.json via portal or API for immutable/GitOps deployments",
 		ptr: func(c *config) any { return &c.readOnlySettings }},
-	{key: "hardened", flag: "enterprise-hardened", env: "CONCERT_HARDENED", group: groupEnterprise, label: "Enterprise hardened preset", restart: true,
-		def: false, usage: "enforce baseline enterprise security requirements at startup (explicit secrets, secure cookies, stats auth, audit log)",
-		ptr: func(c *config) any { return &c.hardened }},
-	{key: "audit_log", flag: "audit-log", env: "CONCERT_AUDIT_LOG", group: groupEnterprise, label: "Tamper-evident audit log", restart: true,
-		def: "", usage: "hash-chained JSONL audit log path; empty means audit.jsonl in -data-dir, off disables persistence",
-		ptr: func(c *config) any { return &c.auditLog }},
 	{key: "log_format", flag: "log-format", env: "CONCERT_LOG_FORMAT", group: groupEnterprise, label: "Log format", restart: true,
 		def: "text", usage: "access and structured log format: text or json",
 		ptr: func(c *config) any { return &c.logFormat }},
@@ -436,138 +415,14 @@ var settingDefs = []settingDef{
 	{key: "history_retention", flag: "history-retention", env: "CONCERT_HISTORY_RETENTION", group: groupPrivacy, label: "History retention",
 		def: 72 * time.Hour, usage: "how long client history and ended bans are kept (1h-720h)",
 		ptr: func(c *config) any { return &c.historyRetention }, check: durationBetween(time.Hour, 30*24*time.Hour)},
-
-	// ---- Cluster sync; see cluster.go ----
-	{key: "redis_addr", flag: "redis-addr", env: "CONCERT_REDIS_ADDR", group: groupCluster, label: "Redis/Valkey address", restart: true,
-		def: "", usage: "host:port of Redis/Valkey for multi-node HA ban synchronization (empty disables)",
-		ptr: func(c *config) any { return &c.redisAddr }},
-	{key: "redis_tls", flag: "redis-tls", env: "CONCERT_REDIS_TLS", group: groupCluster, label: "Redis TLS", restart: true,
-		def: false, usage: "use TLS 1.2+ when connecting to Redis/Valkey",
-		ptr: func(c *config) any { return &c.redisTLS }},
-	{key: "redis_prefix", flag: "redis-prefix", env: "CONCERT_REDIS_PREFIX", group: groupCluster, label: "Redis key prefix", restart: true,
-		def: "concert", usage: "key and pubsub channel prefix for cluster state in Redis/Valkey",
-		ptr: func(c *config) any { return &c.redisPrefix }},
-
-	// ---- Edge and leaf tiers; see topology.go and docs/TOPOLOGY.md ----
-	{key: "role", flag: "role", env: "CONCERT_ROLE", group: groupTopology, label: "Node role", restart: true,
-		def: roleStandalone, usage: "standalone (one tier), edge (waiting room in front of leaf Concerts) or leaf (protects one host behind an edge)",
-		ptr: func(c *config) any { return &c.role }, check: checkRole},
-	{key: "node_id", flag: "node-id", env: "CONCERT_NODE_ID", group: groupTopology, label: "Node ID", restart: true,
-		def: "", usage: "this node's ID in trust-chain claims and leaf reports, 1-32 of [A-Za-z0-9._-] (empty derives one from the hostname)",
-		ptr: func(c *config) any { return &c.nodeID }, check: checkNodeID},
-	{key: "hop_peers", flag: "hop-peers", env: "CONCERT_HOP_PEERS", group: groupTopology, label: "Hop peers (leaf)",
-		def: "", usage: "leaf: CIDRs whose connections may present Concert-Hop claims: the edges, or the load balancer between tiers; required with -role leaf",
-		ptr: func(c *config) any { return &c.hopPeers }, check: checkCIDRList, list: listCIDRs},
-	{key: "hop_max_skew", flag: "hop-max-skew", env: "CONCERT_HOP_MAX_SKEW", group: groupTopology, label: "Hop clock skew", restart: true,
-		def: hop.DefaultMaxSkew, usage: "leaf: how far a claim's timestamp may be from this clock, 1s-5m",
-		ptr: func(c *config) any { return &c.hopMaxSkew }, check: durationBetween(time.Second, 5*time.Minute)},
-	{key: "hop_wait", flag: "hop-wait", env: "CONCERT_HOP_WAIT", group: groupTopology, label: "Hop host-slot wait (leaf)",
-		def: 2 * time.Second, usage: "leaf: how long an edge's page request waits for a host slot before 503 backpressure, 0s-30s",
-		ptr: func(c *config) any { return &c.hopWait }, check: durationBetween(0, 30*time.Second)},
-	{key: "hop_replay_guard", flag: "hop-replay-guard", env: "CONCERT_HOP_REPLAY_GUARD", group: groupTopology, label: "Hop nonce replay guard (leaf)",
-		def: true, usage: "leaf: reject replayed single-use Concert-Hop nonces within 2x -hop-max-skew",
-		ptr: func(c *config) any { return &c.hopReplayGuard }},
-	{key: "hop_require_nonce", flag: "hop-require-nonce", env: "CONCERT_HOP_REQUIRE_NONCE", group: groupTopology, label: "Require hop nonces (leaf)",
-		def: false, usage: "leaf: reject legacy Concert-Hop claims without a single-use nonce (required in -enterprise-hardened mode)",
-		ptr: func(c *config) any { return &c.hopRequireNonce }},
-	{key: "hop_require_mtls", flag: "hop-require-mtls", env: "CONCERT_HOP_REQUIRE_MTLS", group: groupTopology, label: "Require mTLS for hop claims (leaf)",
-		def: false, usage: "leaf: require a verified TLS client certificate (-tls-client-ca) on Concert-Hop claims and /_room/hop/* while still allowing direct public browsers on HTTPS",
-		ptr: func(c *config) any { return &c.hopRequireMTLS }},
-	{key: "host_cap", flag: "host-cap", env: "CONCERT_HOST_CAP", group: groupTopology, label: "Host capacity (leaf)",
-		def: 0, usage: "leaf: page requests this host serves at once from every source; 0 uses capacity.json from the benchmark, then -cap",
-		ptr: func(c *config) any { return &c.hostCap }, check: intAtLeast(0)},
-	{key: "hop_leaves", flag: "hop-leaves", env: "CONCERT_HOP_LEAVES", group: groupTopology, label: "Leaf control URLs (edge)",
-		def: "", usage: "edge: comma-separated base URLs of the leaf Concerts to poll and sync bans to; empty means the -upstream targets (no load balancer between tiers)",
-		ptr: func(c *config) any { return &c.hopLeaves }, check: checkURLList},
-	{key: "hop_poll", flag: "hop-poll", env: "CONCERT_HOP_POLL", group: groupTopology, label: "Leaf poll interval (edge)",
-		def: 2 * time.Second, usage: "edge: how often each leaf's capacity is read and bans are synced, 500ms-1m",
-		ptr: func(c *config) any { return &c.hopPoll }, check: durationBetween(500*time.Millisecond, time.Minute)},
-	{key: "hop_auto_cap", flag: "hop-auto-cap", env: "CONCERT_HOP_AUTO_CAP", group: groupTopology, label: "Size room from leaves (edge)",
-		def: true, usage: "edge: set the room's capacity to what healthy leaves report, never above -cap",
-		ptr: func(c *config) any { return &c.hopAutoCap }},
-	{key: "bench_on_start", flag: "bench-on-start", env: "CONCERT_BENCH_ON_START", group: groupTopology, label: "Benchmark on first start (leaf)", restart: true,
-		def: false, usage: "leaf: before serving, crawl the upstream with the capacity benchmark when capacity.json is missing, and use its result as the host capacity",
-		ptr: func(c *config) any { return &c.benchOnStart }},
-	{key: "bench_p95", flag: "bench-p95", env: "CONCERT_BENCH_P95", group: groupTopology, label: "Benchmark p95 limit", restart: true,
-		def: 2 * time.Second, usage: "the p95 latency the startup benchmark holds the application to, 100ms-1m",
-		ptr: func(c *config) any { return &c.benchP95 }, check: durationBetween(100*time.Millisecond, time.Minute)},
-	{key: "bench_max_lemmings", flag: "bench-max-lemmings", env: "CONCERT_BENCH_MAX_LEMMINGS", group: groupTopology, label: "Benchmark lemming ceiling", restart: true,
-		def: 1024, usage: "the most concurrent lemmings the startup benchmark tries, 1-100000",
-		ptr: func(c *config) any { return &c.benchMaxLemmings }, check: intBetween(1, 100000)},
-
-	// ---- Email delivery; see mailer.go and internal/mailer ----
-	{key: "email_provider", flag: "email-provider", env: "CONCERT_EMAIL_PROVIDER", group: groupEmail, label: "Delivery provider",
-		def: "", usage: "administrator alert delivery provider: empty (disabled), smtp, resend, or sendpanda",
-		ptr: func(c *config) any { return &c.email.provider }, check: checkEmailProvider},
-	{key: "email_smtp_host", flag: "email-smtp-host", env: "CONCERT_EMAIL_SMTP_HOST", group: groupEmail, label: "SMTP host",
-		def: "", usage: "SMTP relay hostname (for -email-provider smtp)",
-		ptr: func(c *config) any { return &c.email.smtpHost }},
-	{key: "email_smtp_port", flag: "email-smtp-port", env: "CONCERT_EMAIL_SMTP_PORT", group: groupEmail, label: "SMTP port",
-		def: 587, usage: "SMTP port (587 for STARTTLS, 465 for implicit TLS)",
-		ptr: func(c *config) any { return &c.email.smtpPort }, check: intBetween(0, 65535)},
-	{key: "email_smtp_tls", flag: "email-smtp-tls", env: "CONCERT_EMAIL_SMTP_TLS", group: groupEmail, label: "SMTP TLS mode",
-		def: mailer.TLSStartTLS, usage: "SMTP transport security: starttls, tls (implicit SMTPS), or none (local relay only)",
-		ptr: func(c *config) any { return &c.email.smtpTLS }, check: checkSMTPTLS},
-	{key: "email_smtp_user", flag: "email-smtp-user", env: "CONCERT_EMAIL_SMTP_USER", group: groupEmail, label: "SMTP username",
-		def: "", usage: "SMTP authentication username (password comes from CONCERT_SMTP_PASS or encrypted email-secrets.json)",
-		ptr: func(c *config) any { return &c.email.smtpUser }},
-	{key: "email_resend_url", flag: "email-resend-url", env: "CONCERT_EMAIL_RESEND_URL", group: groupEmail, label: "Resend API base URL",
-		def: "", usage: "Resend REST API base URL (empty uses https://api.resend.com)",
-		ptr: func(c *config) any { return &c.email.resendURL }, check: checkOptionalHTTPURL},
-	{key: "email_sendpanda_url", flag: "email-sendpanda-url", env: "CONCERT_EMAIL_SENDPANDA_URL", group: groupEmail, label: "SendPanda API base URL",
-		def: "", usage: "SendPanda REST API base URL (empty uses https://api.sendpanda.email/v1)",
-		ptr: func(c *config) any { return &c.email.sendPandaURL }, check: checkOptionalHTTPURL},
-	{key: "email_from_name", flag: "email-from-name", env: "CONCERT_EMAIL_FROM_NAME", group: groupEmail, label: "Sender display name",
-		def: "Concert", usage: "display name on outgoing administrator digest emails",
-		ptr: func(c *config) any { return &c.email.fromName }},
-	{key: "email_from_addr", flag: "email-from-addr", env: "CONCERT_EMAIL_FROM_ADDR", group: groupEmail, label: "Sender email address",
-		def: "", usage: "From email address on outgoing digests (e.g. alerts@example.com)",
-		ptr: func(c *config) any { return &c.email.fromAddr }, check: checkOptionalEmail},
-	{key: "email_to", flag: "email-to", env: "CONCERT_EMAIL_TO", group: groupEmail, label: "Administrator recipients",
-		def: "", usage: "comma-separated administrator email addresses to receive scheduled digests",
-		ptr: func(c *config) any { return &c.email.toAddrs }, check: checkEmailList},
-	{key: "email_dkim_selector", flag: "email-dkim-selector", env: "CONCERT_EMAIL_DKIM_SELECTOR", group: groupEmail, label: "DKIM selector",
-		def: "", usage: "optional DKIM DNS selector verified under <selector>._domainkey.<from-domain>",
-		ptr: func(c *config) any { return &c.email.dkimSelector }},
-	{key: "email_cadence_max", flag: "email-cadence-max", env: "CONCERT_EMAIL_CADENCE_MAX", group: groupEmail, label: "Max emails per window",
-		def: 1, usage: "maximum digest emails delivered per cadence window (1-1000, paced evenly at window / max)",
-		ptr: func(c *config) any { return &c.email.cadenceMax }, check: intBetween(1, mailer.MaxCadenceEmails)},
-	{key: "email_cadence_window", flag: "email-cadence-window", env: "CONCERT_EMAIL_CADENCE_WINDOW", group: groupEmail, label: "Cadence window value",
-		def: 15, usage: "numeric length of the digest cadence window (combined with -email-cadence-unit, 15m to 30d)",
-		ptr: func(c *config) any { return &c.email.cadenceWindowValue }, check: intAtLeast(1)},
-	{key: "email_cadence_unit", flag: "email-cadence-unit", env: "CONCERT_EMAIL_CADENCE_UNIT", group: groupEmail, label: "Cadence window unit",
-		def: mailer.UnitMinutes, usage: "unit for the digest cadence window: minutes, hours, or days",
-		ptr: func(c *config) any { return &c.email.cadenceWindowUnit }, check: checkCadenceUnit},
-	{key: "email_events", flag: "email-events", env: "CONCERT_EMAIL_EVENTS", group: groupEmail, label: "Subscribed event categories",
-		def: "", usage: "comma-separated event categories to queue (empty = all; none = disabled; silence,capacity,bans,fastlane,queue,security)",
-		ptr: func(c *config) any { return &c.email.events }, check: checkEmailEvents},
-	{key: "email_org_name", flag: "email-org-name", env: "CONCERT_EMAIL_ORG_NAME", group: groupEmail, label: "Organization name",
-		def: "", usage: "sender organization name displayed in compliance email headers and footers",
-		ptr: func(c *config) any { return &c.email.orgName }},
-	{key: "email_postal_address", flag: "email-postal-address", env: "CONCERT_EMAIL_POSTAL_ADDRESS", group: groupEmail, label: "Physical postal address",
-		def: "", usage: "organization physical mailing address included in compliance email footers (CAN-SPAM)",
-		ptr: func(c *config) any { return &c.email.postalAddress }},
-	{key: "email_privacy_url", flag: "email-privacy-url", env: "CONCERT_EMAIL_PRIVACY_URL", group: groupEmail, label: "Privacy policy URL",
-		def: "", usage: "link to your privacy policy included in compliance email footers",
-		ptr: func(c *config) any { return &c.email.privacyURL }, check: checkOptionalHTTPURL},
-	{key: "email_terms_url", flag: "email-terms-url", env: "CONCERT_EMAIL_TERMS_URL", group: groupEmail, label: "Terms URL",
-		def: "", usage: "link to your terms or operational notice included in compliance email footers",
-		ptr: func(c *config) any { return &c.email.termsURL }, check: checkOptionalHTTPURL},
-	{key: "email_portal_url", flag: "email-portal-url", env: "CONCERT_EMAIL_PORTAL_URL", group: groupEmail, label: "Admin portal link URL",
-		def: "", usage: "URL linked in digest emails so administrators can jump directly to this Concert portal",
-		ptr: func(c *config) any { return &c.email.portalURL }, check: checkOptionalHTTPURL},
-	{key: "email_public_base_url", flag: "email-public-base-url", env: "CONCERT_EMAIL_PUBLIC_BASE_URL", group: groupEmail, label: "Public base URL (unsubscribe)",
-		def: "", usage: "public origin URL used to build signed RFC 8058 one-click /_concert/email/unsubscribe links",
-		ptr: func(c *config) any { return &c.email.publicBaseURL }, check: checkOptionalHTTPURL},
-	{key: "email_cluster_dedupe", flag: "email-cluster-dedupe", env: "CONCERT_EMAIL_CLUSTER_DEDUPE", group: groupEmail, label: "Cluster alert deduplication",
-		def: true, usage: "when -redis-addr is set, deduplicate shared cluster alert fingerprints across peers via fail-open Redis leases",
-		ptr: func(c *config) any { return &c.email.clusterDedupe }},
 }
 
 // settingByKey indexes settingDefs by key.
 var settingByKey = map[string]*settingDef{}
 
 func init() {
+	settingDefs = append(settingDefs, wordpressSettingDefs()...)
+	settingDefs = append(settingDefs, enterpriseSettingDefs()...)
 	for i := range settingDefs {
 		d := &settingDefs[i]
 		d.kind = kindOf(d.ptr(&config{}))
@@ -845,59 +700,7 @@ func checkHostList(v any) error {
 	return nil
 }
 
-func checkEmailProvider(v any) error {
-	switch strings.ToLower(strings.TrimSpace(v.(string))) {
-	case mailer.ProviderOff, mailer.ProviderSMTP, mailer.ProviderResend, mailer.ProviderSendPanda:
-		return nil
-	default:
-		return errors.New("must be empty (disabled), smtp, resend, or sendpanda")
-	}
-}
-
-func checkSMTPTLS(v any) error {
-	switch strings.ToLower(strings.TrimSpace(v.(string))) {
-	case "", mailer.TLSStartTLS, mailer.TLSImplicit, mailer.TLSNone:
-		return nil
-	default:
-		return errors.New("must be starttls, tls, or none")
-	}
-}
-
-func checkCadenceUnit(v any) error {
-	switch strings.ToLower(strings.TrimSpace(v.(string))) {
-	case mailer.UnitMinutes, mailer.UnitHours, mailer.UnitDays:
-		return nil
-	default:
-		return errors.New("must be minutes, hours, or days")
-	}
-}
-
-func checkOptionalEmail(v any) error {
-	s := strings.TrimSpace(v.(string))
-	if s == "" {
-		return nil
-	}
-	_, err := mailer.ValidateAddress(s)
-	return err
-}
-
-func checkEmailList(v any) error {
-	_, err := mailer.ParseAddressList(v.(string))
-	return err
-}
-
-func checkEmailEvents(v any) error {
-	_, err := mailer.ParseCategoryList(v.(string))
-	return err
-}
-
-func checkOptionalHTTPURL(v any) error {
-	s := strings.TrimSpace(v.(string))
-	if s == "" {
-		return nil
-	}
-	return mailer.ValidateHTTPURL(s, false)
-}
+// Email setting validators live in enterprise_hooks.go.
 
 // ─── loading ─────────────────────────────────────────────────────────────────
 
@@ -960,7 +763,13 @@ func loadSettingsLayer(cfg *config, fs *flag.FlagSet) error {
 		return fmt.Errorf("settings file %s: %w (fix it, or remove it to fall back to flags and environment)", path, err)
 	}
 	for key, v := range values {
-		settingByKey[key].set(cfg, v)
+		d := settingByKey[key]
+		baseSrc := cfg.settingBaseSources[key]
+		if (baseSrc == sourceFlag || baseSrc == sourceEnv) && encodeSetting(cfg.settingBase[key]) != encodeSetting(v) {
+			log.Printf("settings: WARNING %s overrides %s for %s (%v -> %v); reset in portal to follow %s again",
+				path, baseSrc, key, encodeSetting(cfg.settingBase[key]), encodeSetting(v), baseSrc)
+		}
+		d.set(cfg, v)
 		cfg.settingFile[key] = v
 	}
 	if len(values) > 0 {
@@ -1121,6 +930,41 @@ func (a *app) changeSettings(set map[string]json.RawMessage, reset []string, act
 	defer m.mu.Unlock()
 
 	prev := a.current()
+	if prev.cfg.configManaged {
+		// Declarative -config mode: the config file is the source of truth.
+		// Only temporary live emergency cap overrides are permitted here;
+		// they are never persisted to settings.json and reset on reload.
+		if len(reset) > 0 || len(set) != 1 {
+			return &settingsError{http.StatusBadRequest, "this instance is managed by -config; edit the Concertfile and send SIGHUP (or click Reload config) to persist changes — only temporary live cap overrides are permitted here"}
+		}
+		rawCap, ok := set["cap"]
+		if !ok {
+			return &settingsError{http.StatusBadRequest, "this instance is managed by -config; only temporary live cap overrides are permitted via the portal/API (edit the Concertfile and reload for all other changes)"}
+		}
+		d := settingByKey["cap"]
+		v, err := d.decode(rawCap)
+		if err == nil && d.check != nil {
+			err = d.check(v)
+		}
+		if err != nil {
+			return &settingsError{http.StatusBadRequest, fmt.Sprintf("cap %v", err)}
+		}
+		cand := prev.cfg
+		d.set(&cand, v)
+		if err := cand.normalize(); err != nil {
+			return &settingsError{http.StatusBadRequest, err.Error()}
+		}
+		g, err := a.buildGeneration(cand, prev)
+		if err != nil {
+			return &settingsError{http.StatusBadRequest, "concert cannot apply cap override: " + err.Error()}
+		}
+		if err := a.commit(g, nil); err != nil {
+			return &settingsError{http.StatusInternalServerError, "waiting room rejected cap override: " + err.Error()}
+		}
+		a.runtimeCapOverride.Store(true)
+		return nil
+	}
+
 	if prev.cfg.readOnlySettings {
 		return &settingsError{http.StatusForbidden, "settings are read-only (-read-only-settings / GitOps mode)"}
 	}
@@ -1277,29 +1121,19 @@ func (a *app) fixedSettings() map[string]string {
 	} else if cfg.portal.ssoHeader != "" {
 		portalAuth = "SSO proxy (" + cfg.portal.ssoHeader + ")"
 	}
-	clusterDesc := "standalone (in-memory)"
-	if cfg.redisAddr != "" {
-		clusterDesc = "Redis sync (" + cfg.redisAddr + ")"
-	}
-	emailSecretsDesc := "none configured"
-	if a.mailer != nil && a.mailer.Secrets() != nil {
-		st := a.mailer.Secrets().Status()
-		emailSecretsDesc = fmt.Sprintf("SMTP=%s, Resend=%s, SendPanda=%s", st.SMTPPass, st.ResendAPIKey, st.SendPandaAPIKey)
-	}
-	return map[string]string{
+	out := map[string]string{
 		"Data directory":   dataDir,
 		"Admission secret": secret,
 		"Admin tokens":     token,
 		"Portal auth":      portalAuth,
-		"Email secrets":    emailSecretsDesc,
-		"Audit log":        a.audit.describe(),
-		"Cluster sync":     clusterDesc,
 		"IP details":       a.ipinfo.describe(),
 		"History log":      a.history.describeLog(),
 		"Main listener":    mainEP.describe(),
 		"Portal listener":  portalEP.describe(),
 		"Version":          BinaryVersion() + " (" + fipsModeLabel() + ")",
 	}
+	a.describeEnterpriseSecrets(cfg, out)
+	return out
 }
 
 func sortedKeys[V any](m map[string]V) []string {

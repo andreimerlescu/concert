@@ -11,7 +11,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/andreimerlescu/concert/internal/mailer"
 	"github.com/andreimerlescu/concert/internal/static"
 	"github.com/andreimerlescu/room"
 	"github.com/andreimerlescu/sema"
@@ -35,24 +34,26 @@ import (
 // reconfigured in place; room documents every setter as safe to call while
 // traffic flows.
 //
-// Pools whose size changes are replaced rather than resized, because sema
-// drains every slot when shrinking. Requests already holding a slot finish
-// on the old pool, so for a moment the total in flight can exceed the new
-// limit by what the old pool still holds.
+// Pools (assets.global, streams.sem, and the priority lane) are resized in
+// place on commit via non-draining SetCap (sema v1.3.0 / rankedSem), so
+// shrinking never revokes in-flight requests and never temporarily
+// over-admits on reload. Failed reloads never mutate live caps because
+// SetCap runs only inside commit.
 
 // generation is everything built from one configuration.
 type generation struct {
-	a         *app
-	cfg       config
-	abuse     *abuseRegistry // a.abuse, or nil when -abuse=false
-	banRules  []pathRule
-	untracked []pathRule // paths the portal's queue view ignores
-	assets    *assetGuard
-	static    *static.Server
-	streams   *streamGuard
-	lane      *rankedSem // priority lane; see priority.go
-	upstreams *upstreamPool
-	proxy     *httputil.ReverseProxy
+	a          *app
+	cfg        config
+	abuse      *abuseRegistry // a.abuse, or nil when -abuse=false
+	banRules   []pathRule
+	untracked  []pathRule // paths the portal's queue view ignores
+	assets     *assetGuard
+	static     *static.Server
+	microCache *pageMicroCache
+	streams    *streamGuard
+	lane       *rankedSem // priority lane; see priority.go
+	upstreams  *upstreamPool
+	proxy      *httputil.ReverseProxy
 	// forward proxies an admitted request. forwardPage is the same for the
 	// room's and the lane's page requests, except on a leaf, where they
 	// first take a host slot behind the edge's traffic; see topology.go.
@@ -87,7 +88,7 @@ func (a *app) buildGeneration(next config, prev *generation) (*generation, error
 	g.untracked = append(g.untracked, parsePaths(next.bypass)...)
 	g.untracked = append(g.untracked, parsePaths(next.streamPaths)...)
 	g.untracked = append(g.untracked, pathRule{path: "/_room", prefix: true})
-	g.untracked = append(g.untracked, pathRule{path: mailer.UnsubscribeMainPath})
+	g.untracked = append(g.untracked, untrackedEnterprisePaths()...)
 
 	if prev != nil && sameProxy(prev.cfg, next) {
 		g.proxy = prev.proxy
@@ -98,9 +99,9 @@ func (a *app) buildGeneration(next config, prev *generation) (*generation, error
 			return nil, err
 		}
 		pool.onCircuitOpen = func(target, reason string) {
-			a.notifyEvent(mailer.Event{
-				Category:    mailer.CatSilence,
-				Severity:    mailer.SevCritical,
+			a.notifyAlert(alertEvent{
+				Category:    alertCatSilence,
+				Severity:    alertSevCritical,
 				Title:       "Upstream circuit breaker opened",
 				Summary:     fmt.Sprintf("Backend %s circuit breaker opened after repeated failures (%s).", target, reason),
 				Fingerprint: "cb:" + target,
@@ -111,10 +112,7 @@ func (a *app) buildGeneration(next config, prev *generation) (*generation, error
 		g.upstreams = pool
 	}
 	g.forward = g.proxyForward
-	g.forwardPage = g.forward
-	if a.topo.isLeaf() {
-		g.forwardPage = g.gateDirect(g.forward)
-	}
+	g.forwardPage = g.wrapForwardPage(g.forward)
 
 	var users *userStore
 	if prev != nil && sameUserPools(prev.cfg, next) {
@@ -122,14 +120,16 @@ func (a *app) buildGeneration(next config, prev *generation) (*generation, error
 	} else {
 		users = newUserStore(next.assetUserCapH1, next.assetUserCapH2)
 	}
-	var global sema.Semaphore
-	if prev != nil && prev.assets.global.Cap() == next.effectiveAssetCap() {
+	var global sema.PrioritySemaphore
+	if prev != nil {
 		global = prev.assets.global
-	} else if global, err = sema.New(next.effectiveAssetCap()); err != nil {
+	} else if global, err = sema.NewPriority(next.effectiveAssetCap()); err != nil {
 		return nil, fmt.Errorf("asset semaphore: %w", err)
 	}
 	g.assets = &assetGuard{
 		admit:       a.admit,
+		prio:        a.prio.grants,
+		laneRank:    priorityRank(next.priorityLaneRank),
 		users:       users,
 		global:      global,
 		userWait:    next.assetUserWait,
@@ -158,7 +158,7 @@ func (a *app) buildGeneration(next config, prev *generation) (*generation, error
 	}
 
 	var streamSem sema.Semaphore
-	if prev != nil && prev.streams.sem.Cap() == next.streamCap {
+	if prev != nil {
 		streamSem = prev.streams.sem
 	} else if streamSem, err = sema.New(next.streamCap); err != nil {
 		return nil, fmt.Errorf("stream semaphore: %w", err)
@@ -170,12 +170,18 @@ func (a *app) buildGeneration(next config, prev *generation) (*generation, error
 		strike: g.strike,
 	}
 
-	// The lane keeps its waiters when its size is unchanged; otherwise
-	// requests holding old slots finish on the old lane.
-	if prev != nil && prev.lane.Cap() == next.effectivePriorityCap() {
+	// The lane is reused across reloads and resized in place via non-draining
+	// SetCap during commit, preserving queued waiters without over-admission.
+	if prev != nil {
 		g.lane = prev.lane
 	} else {
 		g.lane = newRankedSem(next.effectivePriorityCap())
+	}
+
+	if prev != nil && sameMicroCache(prev.cfg, next) {
+		g.microCache = prev.microCache
+	} else {
+		g.microCache = buildMicroCache(next, a.stats)
 	}
 
 	engine, err := buildRouter(g)
@@ -219,7 +225,7 @@ func sameUserPools(a, b config) bool {
 
 func readWaitingRoomHTML(cfg config) ([]byte, error) {
 	if cfg.htmlFile == "" {
-		return concertWeb.ReadFile("web/waiting.html")
+		return waitingWeb.ReadFile("web/waiting.html")
 	}
 	html, err := os.ReadFile(cfg.htmlFile)
 	if err != nil {
@@ -244,18 +250,37 @@ func applyRoom(wr *room.WaitingRoom, cfg config, capacity int32, html []byte, pr
 	wr.SetCookieDomain(cfg.cookieDomain)
 	wr.SetHTML(html)
 	wr.SetSkipURL(cfg.skipURL)
+	wr.SetScope(cfg.roomScope)
+	var verifyErr error
+	if len(cfg.parsedRoomVerifyKeys) > 0 {
+		verifyErr = wr.SetEd25519VerifyKeys(cfg.parsedRoomVerifyKeys)
+	} else {
+		wr.SetVerifier(nil)
+	}
+	var signedTTLErr error
+	if cfg.roomSignedMaxTTL > 0 {
+		signedTTLErr = wr.SetSignedMaxTTL(cfg.roomSignedMaxTTL)
+	}
+	var leaseFracErr error
+	if cfg.roomLeaseFraction > 0 {
+		leaseFracErr = wr.SetLeaseFraction(cfg.roomLeaseFraction)
+	}
 	if cfg.rate > 0 || cfg.surge > 0 {
 		wr.SetRateFunc(price)
 	} else {
 		wr.SetRateFunc(nil)
 	}
 	return errors.Join(
+		verifyErr,
+		signedTTLErr,
+		leaseFracErr,
 		wr.SetCap(capacity),
 		wr.SetMaxQueueDepth(cfg.maxQueue),
 		wr.SetReaperInterval(cfg.reaper),
 		wr.SetTokenTTL(cfg.tokenTTL),
 		wr.SetFirstPollGrace(cfg.firstPollGrace),
 		wr.SetPassDuration(cfg.passDuration),
+		wr.Validate(),
 	)
 }
 
@@ -267,10 +292,15 @@ func (a *app) commit(g *generation, lp *listenPlan) error {
 	cfg := g.cfg
 
 	roomErr := applyRoom(a.room, cfg, a.edgeCap(cfg), g.html, a.price)
-	if a.topo.isLeaf() {
-		a.topo.leaf.applyConfig(cfg)
-		if a.topo.verifier != nil {
-			a.topo.verifier.SetReplayGuard(cfg.hopReplayGuard, cfg.hopRequireNonce)
+	if prev != nil {
+		if want := cfg.effectiveAssetCap(); g.assets.global.Cap() != want {
+			_ = g.assets.global.SetCap(want)
+		}
+		if g.streams.sem.Cap() != cfg.streamCap {
+			_ = g.streams.sem.SetCap(cfg.streamCap)
+		}
+		if want := cfg.effectivePriorityCap(); g.lane.Cap() != want {
+			g.lane.SetCap(want)
 		}
 	}
 	a.admit.configure(cfg.admitTTL, cfg.cookiePath, cfg.cookieDomain, cfg.secureCookie)
@@ -279,11 +309,7 @@ func (a *app) commit(g *generation, lp *listenPlan) error {
 	if a.history != nil {
 		a.history.setRetention(cfg.historyRetention)
 	}
-	if a.mailer != nil {
-		if mcfg, err := cfg.mailerConfig(); err == nil {
-			a.mailer.UpdateConfig(mcfg)
-		}
-	}
+	a.applyEnterpriseReload(cfg)
 	if prev == nil || prev.assets.users != g.assets.users {
 		g.assets.users.startJanitor(janitorInterval(cfg.admitTTL), cfg.admitTTL)
 	}

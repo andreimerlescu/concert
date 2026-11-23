@@ -12,7 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/andreimerlescu/concert/internal/fastlane"
 	"github.com/andreimerlescu/room"
 	"github.com/gin-gonic/gin"
 )
@@ -161,9 +160,10 @@ func (p *agentPlaces) reserve(wr *room.WaitingRoom, key string, addr netip.Addr,
 	}
 	p.mu.Unlock()
 
-	// Outside the lock: each lookup is a pass over room's line. A key that
-	// already has a place (its entry lost to a concurrent admission of the
-	// same session) is never refused for it.
+	// Outside the lock: room v1.7.0 executes TicketByKey in O(log N) under RLock,
+	// and keeping lookups outside p.mu avoids lock nesting. A key that already
+	// has a place (its entry lost to a concurrent admission of the same session)
+	// is never refused for it.
 	_, self := wr.TicketByKey(key)
 	var gone []string
 	for _, k := range mine {
@@ -260,10 +260,10 @@ func agentSessionLabel(key string) string {
 // its keyed place; an address over -agent-places is refused with 429
 // before room issues anything.
 func (g *generation) agentGate(c *gin.Context) {
-	if c.FullPath() != "" || !g.cfg.agentQueue || g.a.fastlane == nil {
+	if c.FullPath() != "" || !g.cfg.agentQueue || !g.a.fastlaneEnabled() {
 		return
 	}
-	sid, ok := g.a.fastlane.SessionID(c.Request)
+	sid, ok := g.a.fastlaneSessionID(c.Request)
 	if !ok {
 		return
 	}
@@ -444,35 +444,10 @@ func (g *generation) writeAgentWait(c *gin.Context, key string, roomBody []byte)
 }
 
 // agentOffer is the fast-lane offer in a queued agent's response, built
-// once from the fast lane's public configuration. It names where and what
-// to pay; it carries no secrets and no recipients.
+// once from the fast lane's public configuration (see enterprise_hooks.go).
 type agentOffer struct {
 	paymentURL string
 	body       gin.H
-}
-
-// newAgentOffer returns nil when no payment offer is configured (an
-// NFT-only fast lane has nothing to buy).
-func newAgentOffer(s *fastlane.Service) *agentOffer {
-	if s == nil {
-		return nil
-	}
-	pc := s.PublicConfig()
-	offers, _ := pc["offers"].([]fastlane.Offer)
-	if len(offers) == 0 {
-		return nil
-	}
-	list := make([]gin.H, 0, len(offers))
-	for _, o := range offers {
-		list = append(list, gin.H{
-			"network": o.Requirements.Network,
-			"asset":   o.Requirements.Asset,
-			"amount":  o.Requirements.Amount,
-		})
-	}
-	pass, _ := pc["pass_seconds"].(int)
-	url := s.Config().Origin + fastlane.Prefix + "/payment"
-	return &agentOffer{paymentURL: url, body: gin.H{"payment_url": url, "pass_seconds": pass, "offers": list}}
 }
 
 // refuseAgentPlace answers an arrival whose address already holds
@@ -494,7 +469,7 @@ func (g *generation) refuseAgentPlace(c *gin.Context) {
 // agentView is the portal overview's agent section.
 func (g *generation) agentView() gin.H {
 	return gin.H{
-		"agent_queue":                g.cfg.agentQueue && g.a.fastlane != nil,
+		"agent_queue":                g.cfg.agentQueue && g.a.fastlaneEnabled(),
 		"agent_places_per_address":   g.cfg.agentPlaces,
 		"agent_places_held":          g.a.agents.held(),
 		"agent_places_refused_total": g.a.agents.refused.Load(),

@@ -1,3 +1,5 @@
+//go:build enterprise
+
 package server
 
 import (
@@ -18,38 +20,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// emailConfig holds non-secret administrator email settings (stored in
-// settings.json when changed in the portal) alongside env/*_FILE-only secrets
-// (never persisted in settings.json).
-type emailConfig struct {
-	provider           string
-	smtpHost           string
-	smtpPort           int
-	smtpTLS            string
-	smtpUser           string
-	resendURL          string
-	sendPandaURL       string
-	fromName           string
-	fromAddr           string
-	toAddrs            string
-	dkimSelector       string
-	cadenceMax         int
-	cadenceWindowValue int
-	cadenceWindowUnit  string
-	events             string
-	orgName            string
-	postalAddress      string
-	privacyURL         string
-	termsURL           string
-	portalURL          string
-	publicBaseURL      string
-	clusterDedupe      bool
-
-	// Environment / *_FILE only; never written to settings.json.
-	smtpPass        string
-	resendAPIKey    string
-	sendPandaAPIKey string
-}
+// emailConfig is declared in edition_core.go.
 
 func (c *config) normalizeEmail() error {
 	e := &c.email

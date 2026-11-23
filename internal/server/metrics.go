@@ -10,7 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/andreimerlescu/concert/internal/capacity"
 	"github.com/gin-gonic/gin"
 )
 
@@ -98,10 +97,22 @@ func (a *app) renderPrometheusMetrics() string {
 	writePromMetric(&b, "concert_room_timeouts_total", "counter", "Total waiting room admission timeouts.", stats.timeouts.Load())
 	writePromMetric(&b, "concert_room_promoted_total", "counter", "Total queue promotions.", stats.promoted.Load())
 	writePromMetric(&b, "concert_room_removed_total", "counter", "Total tickets removed due to bans or operator kicks.", stats.removed.Load())
+	writePromMetric(&b, "concert_room_token_rejected_total", "counter", "Total signed pass or lease tokens rejected during verification.", stats.tokenRejected.Load())
+	writePromMetric(&b, "concert_room_lease_ceiling", "gauge", "Maximum slots reserved for the work-conserving signed lease pool.", wr.LeaseCeiling())
 
 	// Assets
 	writePromMetric(&b, "concert_assets_cap", "gauge", "Global concurrent asset request cap.", g.assets.global.Cap())
 	writePromMetric(&b, "concert_assets_in_flight", "gauge", "Current in-flight asset requests.", g.assets.global.Len())
+	assetsDraining := 0
+	if g.assets.global.Len() > g.assets.global.Cap() {
+		assetsDraining = 1
+	}
+	writePromMetric(&b, "concert_assets_cap_draining", "gauge", "1 while in-flight asset requests are draining down to a lower cap.", assetsDraining)
+	waitPrioVal := 0
+	if p, waiting := g.assets.global.HighestWaitingPriority(); waiting {
+		waitPrioVal = int(p) + 2 // low=1, normal=2, high=3, critical=4
+	}
+	writePromMetric(&b, "concert_assets_waiting_priority", "gauge", "Highest priority tier currently queued on the global asset cap (0=none, 1=low, 2=normal, 3=high, 4=critical).", waitPrioVal)
 	writePromMetric(&b, "concert_assets_active_passes", "gauge", "Active per-pass asset concurrency pools.", g.assets.users.count.Load())
 	writePromMetric(&b, "concert_assets_served_total", "counter", "Total asset requests served.", stats.assetServed.Load())
 	writePromMetric(&b, "concert_assets_denied_total", "counter", "Total asset requests denied (missing/invalid pass).", stats.assetDenied.Load())
@@ -116,6 +127,11 @@ func (a *app) renderPrometheusMetrics() string {
 	// Streams
 	writePromMetric(&b, "concert_streams_cap", "gauge", "Maximum concurrent WebSocket/SSE stream connections.", g.streams.sem.Cap())
 	writePromMetric(&b, "concert_streams_active", "gauge", "Current open stream connections.", g.streams.sem.Len())
+	streamsDraining := 0
+	if g.streams.sem.Len() > g.streams.sem.Cap() {
+		streamsDraining = 1
+	}
+	writePromMetric(&b, "concert_streams_cap_draining", "gauge", "1 while active stream connections are draining down to a lower cap.", streamsDraining)
 	writePromMetric(&b, "concert_streams_served_total", "counter", "Total stream connections served.", stats.streamServed.Load())
 	writePromMetric(&b, "concert_streams_denied_total", "counter", "Total stream connections denied.", stats.streamDenied.Load())
 	writePromMetric(&b, "concert_streams_throttled_total", "counter", "Total stream connections throttled.", stats.streamThrottled.Load())
@@ -158,36 +174,8 @@ func (a *app) renderPrometheusMetrics() string {
 	writePromMetric(&b, "concert_upstream_errors_total", "counter", "Total upstream transport/circuit errors.", stats.upstreamErrors.Load())
 	stats.upstreamLatency.writePrometheus(&b, "concert_upstream_duration_seconds", "Upstream origin round-trip latency in seconds.")
 
-	// Audit & cluster sync
-	var auditEvents, auditErrors int64
-	if a.audit != nil {
-		auditEvents = a.audit.written.Load()
-		auditErrors = a.audit.errors.Load()
-	}
-	writePromMetric(&b, "concert_audit_events_total", "counter", "Total tamper-evident audit log events written.", auditEvents)
-	writePromMetric(&b, "concert_audit_errors_total", "counter", "Total audit log write errors.", auditErrors)
-	writePromMetric(&b, "concert_cluster_sync_sent_total", "counter", "Total cluster ban sync events published.", stats.clusterSyncSent.Load())
-	writePromMetric(&b, "concert_cluster_sync_received_total", "counter", "Total cluster ban sync events applied from peers.", stats.clusterSyncRecv.Load())
-	writePromMetric(&b, "concert_cluster_sync_errors_total", "counter", "Total cluster state synchronization errors.", stats.clusterSyncErrors.Load())
-
-	var emailQueued int
-	var emailSent, emailErrs int64
-	if a.mailer != nil {
-		emailQueued, emailSent, emailErrs = a.mailer.Metrics()
-	}
-	writePromMetric(&b, "concert_email_queued_events", "gauge", "Pending operational events queued for scheduled administrator email digest.", emailQueued)
-	writePromMetric(&b, "concert_email_sent_total", "counter", "Total administrator digest emails successfully delivered.", emailSent)
-	writePromMetric(&b, "concert_email_errors_total", "counter", "Total administrator digest email delivery failures.", emailErrs)
-	writePromMetric(&b, "concert_email_cluster_deduped_total", "counter", "Shared cluster alert events deduplicated via Redis peer lease.", stats.emailClusterDeduped.Load())
-
-	if a.fastlane != nil {
-		used, maxRec, unresolved := a.fastlane.JournalStats()
-		writePromMetric(&b, "concert_fastlane_records_used", "gauge", "Fast-lane receipt records currently stored in fastlane.jsonl.", used)
-		writePromMetric(&b, "concert_fastlane_records_max", "gauge", "Configured max_records ceiling for fastlane.jsonl.", maxRec)
-		writePromMetric(&b, "concert_fastlane_unresolved", "gauge", "Unresolved fast-lane receipts in pending or unknown state awaiting reconciliation.", unresolved)
-	}
-
-	a.writeTierMetrics(&b)
+	writeWordPressMetrics(&b, g, stats)
+	a.writeEnterpriseMetrics(&b, stats)
 
 	readyVal := 1
 	if a.draining.Load() || (totalBackends > 0 && healthyBackends == 0) {
@@ -201,42 +189,4 @@ func (a *app) renderPrometheusMetrics() string {
 func serveMetrics(c *gin.Context, a *app) {
 	c.Header("Cache-Control", "no-store")
 	c.Data(http.StatusOK, "text/plain; version=0.0.4; charset=utf-8", []byte(a.renderPrometheusMetrics()))
-}
-
-// writeTierMetrics adds the edge or leaf tier's metrics; see topology.go.
-func (a *app) writeTierMetrics(b *strings.Builder) {
-	t := a.topo
-	if t == nil {
-		return
-	}
-	fmt.Fprintf(b, "# HELP concert_node_info Node role and ID.\n# TYPE concert_node_info gauge\nconcert_node_info{role=%q,node=%q} 1\n", t.role, t.node)
-	switch {
-	case t.isEdge():
-		e := t.edge
-		if p := e.lastPlan.Load(); p != nil {
-			writePromMetric(b, "concert_edge_leaves_usable", "gauge", "Leaves counted in the last capacity plan.", p.Leaves)
-			writePromMetric(b, "concert_edge_leaf_slots", "gauge", "Page slots the leaves offer this edge.", p.Total)
-			writePromMetric(b, "concert_edge_planned_cap", "gauge", "Room capacity planned from the leaves.", p.Cap)
-		}
-		writePromMetric(b, "concert_edge_leaf_backpressure_total", "counter", "Leaf answers refusing a request for capacity.", e.backpressure.Load())
-		writePromMetric(b, "concert_edge_upstream_retries_total", "counter", "Requests re-sent to another upstream.", e.retries.Load())
-		writePromMetric(b, "concert_edge_leaf_poll_errors_total", "counter", "Failed leaf state reads.", e.pollErrors.Load())
-		writePromMetric(b, "concert_edge_ban_push_errors_total", "counter", "Failed ban snapshot pushes.", e.pushErrors.Load())
-	case t.isLeaf():
-		l := t.leaf
-		writePromMetric(b, "concert_leaf_host_cap", "gauge", "Page requests the host serves at once.", l.gate.Cap())
-		writePromMetric(b, "concert_leaf_hop_in_flight", "gauge", "Edge page requests holding host slots.", l.gate.InUse(capacity.HopPriority)+l.gate.InUse(capacity.Hop))
-		writePromMetric(b, "concert_leaf_direct_in_flight", "gauge", "Direct page requests holding host slots.", l.gate.InUse(capacity.Direct))
-		writePromMetric(b, "concert_leaf_hop_accepted_total", "counter", "Verified hop claims.", l.accepted.Load())
-		writePromMetric(b, "concert_leaf_hop_rejected_total", "counter", "Refused hop claims.", l.rejected.Load())
-		writePromMetric(b, "concert_leaf_hop_replayed_total", "counter", "Hop claims refused as replayed nonces.", l.replayed.Load())
-		writePromMetric(b, "concert_leaf_hop_mtls_rejected_total", "counter", "Hop claims refused for missing verified mTLS client certificate.", l.mtlsRejected.Load())
-		writePromMetric(b, "concert_leaf_hop_backpressure_total", "counter", "Hop requests refused for capacity.", l.backpressed.Load())
-		writePromMetric(b, "concert_leaf_rebench_total", "counter", "Completed drained on-demand capacity re-benchmarks.", l.rebenchTotal.Load())
-		silent := 0
-		if _, r := l.monitor.view(); r != nil && r.Recovered.IsZero() {
-			silent = 1
-		}
-		writePromMetric(b, "concert_leaf_app_silent", "gauge", "1 while the application is silent.", silent)
-	}
 }

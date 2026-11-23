@@ -311,18 +311,65 @@ func semIdle(s sema.Semaphore) bool {
 
 // assetGuard admits asset requests through two semaphores: the caller's
 // per-pass pool first, so an abusive pass is rejected before it can take a
-// global slot, then the global pool that protects the host.
+// global slot, then the global PrioritySemaphore (sema v1.3.0) that protects
+// the host while giving admitted and priority-ranked visitors O(1) priority
+// ahead of unauthenticated public assets under contention.
 //
 // This is the hot path: no logging, counters only.
 type assetGuard struct {
 	admit       *admitter
+	prio        *priorityGrants
+	laneRank    priorityRank
 	users       *userStore
-	global      sema.Semaphore
+	global      sema.PrioritySemaphore
 	userWait    time.Duration
 	globalWait  time.Duration
 	protoHeader string
 	stats       *counters
 	strike      func(*gin.Context, int)
+}
+
+// priorityForPass maps an already-verified admission pass and optional
+// concert_priority cookie onto sema v1.3.0's O(1) priority tiers. When no
+// concert_priority cookie is present (the common case), it returns
+// PriorityNormal immediately with zero HMAC work.
+func (g *assetGuard) priorityForPass(r *http.Request, id passID, now time.Time) sema.Priority {
+	if g.prio == nil {
+		return sema.PriorityNormal
+	}
+	ck, err := r.Cookie(priorityCookie)
+	if err != nil || ck.Value == "" {
+		return sema.PriorityNormal
+	}
+	rank, ok := g.prio.verify(ck.Value, id, now)
+	if !ok {
+		return sema.PriorityNormal
+	}
+	if rank >= rankCheckout {
+		return sema.PriorityCritical
+	}
+	if g.laneRank > 0 && rank >= g.laneRank {
+		return sema.PriorityHigh
+	}
+	return sema.PriorityNormal
+}
+
+// priorityForRequest classifies an arbitrary request (used by staticOffload):
+// unauthenticated requests take PriorityLow, while visitors holding a valid
+// admission pass take PriorityNormal or higher based on any priority grant.
+func (g *assetGuard) priorityForRequest(r *http.Request, now time.Time) sema.Priority {
+	if g.admit == nil {
+		return sema.PriorityLow
+	}
+	ck, err := r.Cookie(admitCookie)
+	if err != nil || ck.Value == "" {
+		return sema.PriorityLow
+	}
+	id, _, status := g.admit.verify(ck.Value, now)
+	if status != passValid {
+		return sema.PriorityLow
+	}
+	return g.priorityForPass(r, id, now)
 }
 
 // private requires a valid admission pass.
@@ -348,16 +395,17 @@ func (g *assetGuard) private(c *gin.Context) {
 	}
 	defer func() { _ = userSem.Release() }()
 
-	g.serve(c)
+	g.serve(c, g.priorityForPass(c.Request, id, now))
 }
 
-// public skips the pass check but still counts against the global cap.
+// public skips the pass check and runs at PriorityLow on the global asset cap
+// so unauthenticated asset floods never starve admitted visitors.
 func (g *assetGuard) public(c *gin.Context) {
-	g.serve(c)
+	g.serve(c, sema.PriorityLow)
 }
 
-func (g *assetGuard) serve(c *gin.Context) {
-	if !acquire(c.Request.Context(), g.global, g.globalWait) {
+func (g *assetGuard) serve(c *gin.Context, p sema.Priority) {
+	if !acquirePriority(c.Request.Context(), g.global, p, g.globalWait) {
 		g.stats.assetGlobalThrottled.Add(1)
 		c.Header("Retry-After", "1")
 		c.AbortWithStatus(http.StatusServiceUnavailable)
@@ -382,6 +430,20 @@ func acquire(ctx context.Context, s sema.Semaphore, wait time.Duration) bool {
 	ctx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
 	return s.AcquireWith(ctx) == nil
+}
+
+// acquirePriority acquires a slot on s at priority p, taking the non-barging
+// O(1) fast path before allocating a timeout context.
+func acquirePriority(ctx context.Context, s sema.PrioritySemaphore, p sema.Priority, wait time.Duration) bool {
+	if s.TryAcquireWithPriority(ctx, p) == nil {
+		return true
+	}
+	if wait <= 0 {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, wait)
+	defer cancel()
+	return s.AcquireWithPriority(ctx, p) == nil
 }
 
 // isMultiplexed reports whether the client speaks HTTP/2 or HTTP/3. Behind a

@@ -15,6 +15,13 @@
 
     // Set once the portal has moved away from this page's address; stops polling.
     let portalMoved = false;
+    let activeSite = '';
+
+    function withSiteParam(url) {
+        if (!activeSite || url.startsWith('/api/sites') || url.startsWith('/api/reload')) return url;
+        const sep = url.includes('?') ? '&' : '?';
+        return url + sep + 'site=' + encodeURIComponent(activeSite);
+    }
 
     async function api(method, url, body) {
         const opts = { method, credentials: 'same-origin', headers: { Accept: 'application/json' } };
@@ -23,7 +30,7 @@
             opts.headers['Content-Type'] = 'application/json';
             opts.body = JSON.stringify(body);
         }
-        const res = await fetch(url, opts);
+        const res = await fetch(withSiteParam(url), opts);
         if (res.status === 401) {
             window.location.reload();
             throw new Error('Your session expired.');
@@ -2127,8 +2134,83 @@
         });
     });
 
+    // ── Multi-vhost site selector & All-Sites summary ──────────────────────
+    async function refreshSites() {
+        const bar = byId('vhost-bar');
+        const sel = byId('site-selector');
+        const sumEl = byId('vhost-summary');
+        const ovBadge = byId('badge-runtime-override');
+        const reloadBtn = byId('vhost-reload-btn');
+        if (!bar || !sel) return;
+        try {
+            const d = await api('GET', '/api/sites');
+            const sites = Array.isArray(d.sites) ? d.sites : [];
+            const showBar = Boolean(d.config_managed) || sites.length > 1;
+            bar.classList.toggle('d-none', !showBar);
+            if (!showBar) return;
+            if (!activeSite && sites.length > 0) activeSite = sites[0].host;
+            if (sites.length > 0 && !sites.some((s) => s.host === activeSite)) {
+                activeSite = sites[0].host;
+            }
+            const curOpts = Array.from(sel.options).map((o) => o.value).join('\n');
+            const nextOpts = sites.map((s) => s.host).join('\n');
+            if (curOpts !== nextOpts) {
+                sel.replaceChildren();
+                for (const s of sites) {
+                    const opt = document.createElement('option');
+                    opt.value = s.host;
+                    opt.textContent = s.preset ? `${s.host} (${s.preset})` : s.host;
+                    sel.append(opt);
+                }
+            }
+            sel.value = activeSite;
+            const cur = sites.find((s) => s.host === activeSite);
+            if (ovBadge) ovBadge.classList.toggle('d-none', !(cur && cur.runtime_override));
+            if (reloadBtn) reloadBtn.classList.toggle('d-none', !d.config_managed);
+            if (sumEl && d.totals) {
+                const t = d.totals;
+                let text = `${plural(t.sites || sites.length, 'site')} · ${fmtNum(t.active || 0)}/${fmtNum(t.cap || 0)} active · ${fmtNum(t.queued || 0)} queued · ${fmtNum(t.static_served || 0)} static`;
+                if ((t.microcache_hits || 0) > 0) text += ` · ${fmtNum(t.microcache_hits)} cache hits`;
+                if ((t.unhealthy_sites || 0) > 0) text += ` · ${plural(t.unhealthy_sites, 'unhealthy site')}`;
+                sumEl.textContent = text;
+            }
+        } catch (_) {
+            // Single-site or older server without /api/sites: leave hidden.
+        }
+    }
+
+    const siteSelector = byId('site-selector');
+    if (siteSelector) {
+        siteSelector.addEventListener('change', () => {
+            activeSite = siteSelector.value;
+            refreshOverview();
+            const t = activeTable();
+            if (t) { t.loaded = false; t.refresh(); }
+            if (activeTab() === 'tab-settings') loadSettings();
+            refreshSites();
+        });
+    }
+    const vhostReloadBtn = byId('vhost-reload-btn');
+    if (vhostReloadBtn) {
+        vhostReloadBtn.addEventListener('click', async () => {
+            vhostReloadBtn.disabled = true;
+            try {
+                const res = await api('POST', '/api/reload', {});
+                toast(`Reloaded config (${plural((res.sites || []).length, 'site')}).`);
+                await refreshSites();
+                refreshOverview();
+                if (activeTab() === 'tab-settings') loadSettings();
+            } catch (err) {
+                toast('Reload failed: ' + err.message, 'danger');
+            } finally {
+                vhostReloadBtn.disabled = false;
+            }
+        });
+    }
+
     setInterval(() => {
         if (document.hidden || portalMoved) return;
+        refreshSites();
         refreshOverview();
         const tab = activeTab();
         if (tab === 'tab-email') loadEmail(false);
@@ -2142,5 +2224,5 @@
         if (pane) tickRelative(pane, Date.now());
     }, 1000);
 
-    refreshOverview();
+    refreshSites().then(() => refreshOverview());
 })();

@@ -6,11 +6,12 @@ require (
 	filippo.io/edwards25519 v1.2.0
 	github.com/andreimerlescu/goenv v1.1.0
 	github.com/andreimerlescu/naddr v0.0.1
-	github.com/andreimerlescu/room v1.6.0
-	github.com/andreimerlescu/sema v1.2.0
+	github.com/andreimerlescu/room v1.8.0
+	github.com/andreimerlescu/sema v1.3.0
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1
 	github.com/gin-gonic/gin v1.12.0
 	github.com/hiero-ledger/hiero-sdk-go/v2 v2.85.1
+	github.com/quic-go/quic-go v0.65.0
 	github.com/stellar/go-stellar-sdk v0.9.0
 	golang.org/x/crypto v0.59.0
 	golang.org/x/net v0.62.0
@@ -43,7 +44,6 @@ require (
 	github.com/pelletier/go-toml/v2 v2.4.3 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
-	github.com/quic-go/quic-go v0.65.0 // indirect
 	github.com/rs/zerolog v1.35.1 // indirect
 	github.com/stellar/go-xdr v0.0.0-20260806060815-dc590f17552a // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect

@@ -18,21 +18,18 @@ import (
 // names one, otherwise the server. cmd/concert is a thin wrapper around it.
 func Main() {
 	if len(os.Args) > 1 {
+		sub := os.Args[1]
 		var runSub func([]string, io.Writer) error
-		switch os.Args[1] {
-		case "reconcile":
-			runSub = runReconcile
-		case "archive-receipts":
-			runSub = runArchiveReceipts
-		case "example":
-			runSub = runExample
-		case "audit":
-			runSub = runAudit
-		case "hash-password":
-			runSub = runHashPassword
+		switch sub {
 		case "bench":
 			runSub = func(args []string, out io.Writer) error {
 				return bench.CLI(args, out, os.Stderr)
+			}
+		default:
+			if fn := wordpressSubcommand(sub); fn != nil {
+				runSub = fn
+			} else if fn := enterpriseSubcommand(sub); fn != nil {
+				runSub = fn
 			}
 		}
 		if runSub != nil {

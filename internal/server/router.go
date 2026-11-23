@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/andreimerlescu/concert/internal/hop"
 	"github.com/andreimerlescu/concert/internal/static"
 	"github.com/gin-gonic/gin"
 )
@@ -70,14 +69,19 @@ func buildRouter(g *generation) (engine *gin.Engine, err error) {
 	registerOps(r, g)
 	registerHopControl(r, g)
 	registerConcertRoutes(r, g)
-	registerPaths(r, parsePaths(cfg.bypass), g.serveStaticOrForward(false, hop.ClassBypass))
-	registerPaths(r, parsePaths(cfg.assets), g.assets.private, g.serveStaticOrForward(true, hop.ClassAsset))
-	registerPaths(r, parsePaths(cfg.assetPublic), g.assets.public, g.serveStaticOrForward(true, hop.ClassAsset))
-	registerPaths(r, parsePaths(cfg.streamPaths), g.streams.handle, g.forwardAs(hop.ClassStream))
+	registerPaths(r, parsePaths(cfg.bypass), g.serveStaticOrForward(false, classBypass))
+	registerPaths(r, parsePaths(cfg.assets), g.assets.private, g.serveStaticOrForward(true, classAsset))
+	registerPaths(r, parsePaths(cfg.assetPublic), g.assets.public, g.serveStaticOrForward(true, classAsset))
+	registerPaths(r, parsePaths(cfg.streamPaths), g.streams.handle, g.forwardAs(classStream))
 
 	// ---- Offload remaining mounted/root static files before the waiting room. ----
 	if g.static != nil {
 		r.Use(g.staticOffload)
+	}
+
+	// ---- Serve eligible anonymous GET/HEAD pages from the bounded micro-cache. ----
+	if g.microCache != nil {
+		r.Use(g.microCacheMiddleware)
 	}
 
 	// ---- Run ahead of room's middleware on gated requests only. ----
@@ -130,7 +134,7 @@ func (g *generation) tryStatic(c *gin.Context, authoritative bool) bool {
 	}
 }
 
-func (g *generation) serveStaticOrForward(authoritative bool, class hop.Class) gin.HandlerFunc {
+func (g *generation) serveStaticOrForward(authoritative bool, class trafficClass) gin.HandlerFunc {
 	fwd := g.forwardAs(class)
 	return func(c *gin.Context) {
 		if g.tryStatic(c, authoritative) {
@@ -156,7 +160,8 @@ func (g *generation) staticOffload(c *gin.Context) {
 	if !inMount && !g.static.HasRootStaticFile(c.Request) {
 		return
 	}
-	if !acquire(c.Request.Context(), g.assets.global, g.cfg.assetWait) {
+	prio := g.assets.priorityForRequest(c.Request, time.Now())
+	if !acquirePriority(c.Request.Context(), g.assets.global, prio, g.cfg.assetWait) {
 		g.a.stats.assetGlobalThrottled.Add(1)
 		c.Header("Retry-After", "1")
 		c.AbortWithStatus(http.StatusServiceUnavailable)

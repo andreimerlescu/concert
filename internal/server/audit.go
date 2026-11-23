@@ -1,3 +1,5 @@
+//go:build enterprise
+
 package server
 
 import (
@@ -37,20 +39,7 @@ const (
 	auditGenesisHash = "0000000000000000000000000000000000000000000000000000000000000000"
 )
 
-type auditEvent struct {
-	Seq       uint64         `json:"seq"`
-	Timestamp string         `json:"ts"`
-	Actor     string         `json:"actor"`
-	Role      string         `json:"role,omitempty"`
-	Source    string         `json:"source"`
-	Action    string         `json:"action"`
-	Target    string         `json:"target,omitempty"`
-	Outcome   string         `json:"outcome"`
-	ClientIP  string         `json:"ip,omitempty"`
-	Details   map[string]any `json:"details,omitempty"`
-	PrevHash  string         `json:"prev_hash"`
-	Hash      string         `json:"hash"`
-}
+// auditEvent is declared in edition_core.go.
 
 type auditLogger struct {
 	mu       sync.Mutex

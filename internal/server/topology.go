@@ -1,3 +1,5 @@
+//go:build enterprise
+
 package server
 
 import (
@@ -23,6 +25,7 @@ import (
 	"github.com/andreimerlescu/concert/internal/capacity"
 	"github.com/andreimerlescu/concert/internal/hop"
 	"github.com/andreimerlescu/concert/internal/mailer"
+	"github.com/andreimerlescu/sema"
 	"github.com/gin-gonic/gin"
 )
 
@@ -49,11 +52,7 @@ import (
 //
 // See docs/TOPOLOGY.md.
 
-const (
-	roleStandalone = "standalone"
-	roleEdge       = "edge"
-	roleLeaf       = "leaf"
-)
+// roleStandalone, roleEdge, and roleLeaf are declared in edition_core.go.
 
 func checkRole(v any) error {
 	switch v.(string) {
@@ -248,12 +247,10 @@ func (t *topology) isLeaf() bool { return t != nil && t.leaf != nil }
 
 // ─── request context ─────────────────────────────────────────────────────────
 
-// Gin context keys for tier state on a request.
+// Gin context keys for tier state on a request (ctxHopRank & ctxHopPaid live in edition_core.go).
 const (
 	ctxHopIn    = "concert.hop_in"    // leaf: the verified hop.Claim the request carried
 	ctxHopRaw   = "concert.hop_raw"   // leaf: the raw Concert-Hop value, for control requests
-	ctxHopRank  = "concert.hop_rank"  // edge: the rank priorityGate established
-	ctxHopPaid  = "concert.hop_paid"  // edge: the fast lane found the client eligible
 	ctxHopClass = "concert.hop_class" // edge: which tier admitted the request
 )
 
@@ -562,7 +559,13 @@ func (g *generation) hopFastPath(c *gin.Context) {
 		}
 		defer l.gate.Release(cls)
 	case hop.ClassAsset:
-		if !acquire(c.Request.Context(), g.assets.global, g.cfg.assetWait) {
+		prio := sema.PriorityNormal
+		if claim.Paid || claim.Rank >= uint8(rankCheckout) {
+			prio = sema.PriorityCritical
+		} else if g.cfg.priorityLaneRank > 0 && int(claim.Rank) >= g.cfg.priorityLaneRank {
+			prio = sema.PriorityHigh
+		}
+		if !acquirePriority(c.Request.Context(), g.assets.global, prio, g.cfg.assetWait) {
 			g.a.stats.assetGlobalThrottled.Add(1)
 			g.backpressure(c)
 			return
@@ -611,9 +614,10 @@ func (g *generation) gateDirect(next gin.HandlerFunc) gin.HandlerFunc {
 
 // forwardAs marks which tier admitted a request, so an edge's claim says
 // so, then forwards it.
-func (g *generation) forwardAs(class hop.Class) gin.HandlerFunc {
+func (g *generation) forwardAs(class trafficClass) gin.HandlerFunc {
+	hc := toHopClass(class)
 	return func(c *gin.Context) {
-		c.Set(ctxHopClass, class)
+		c.Set(ctxHopClass, hc)
 		g.forward(c)
 	}
 }
@@ -694,39 +698,7 @@ func (a *app) tierResponse(next func(*http.Response) error) func(*http.Response)
 	}
 }
 
-// stripTierHeaders removes the headers only Concert's tiers may set from an
-// application's response.
-func stripTierHeaders(h http.Header) {
-	h.Del(hop.BackpressureHeader)
-	h.Del(hop.NodeHeader)
-}
-
-// stripConcertSetCookies removes Set-Cookie headers naming a Concert cookie.
-func stripConcertSetCookies(h http.Header) {
-	vals := h.Values("Set-Cookie")
-	if len(vals) == 0 {
-		return
-	}
-	keep := vals[:0:0]
-	for _, v := range vals {
-		name, _, _ := strings.Cut(v, "=")
-		name = strings.TrimSpace(name)
-		drop := false
-		for _, n := range proxyCookies {
-			if name == n {
-				drop = true
-				break
-			}
-		}
-		if !drop {
-			keep = append(keep, v)
-		}
-	}
-	h.Del("Set-Cookie")
-	for _, v := range keep {
-		h.Add("Set-Cookie", v)
-	}
-}
+// stripTierHeaders and stripConcertSetCookies live in edition_core.go.
 
 // ─── first start ─────────────────────────────────────────────────────────────
 

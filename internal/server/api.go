@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/andreimerlescu/concert/internal/mailer"
 	"github.com/andreimerlescu/room"
 	"github.com/gin-gonic/gin"
 )
@@ -140,9 +139,9 @@ func (w *apiQueueWriter) translate(code int) (int, []byte) {
 	case http.StatusServiceUnavailable:
 		// Breaker tripped or admission timed out.
 		if w.a != nil {
-			w.a.notifyEvent(mailer.Event{
-				Category:    mailer.CatQueue,
-				Severity:    mailer.SevCritical,
+			w.a.notifyAlert(alertEvent{
+				Category:    alertCatQueue,
+				Severity:    alertSevCritical,
 				Title:       "Waiting room refused request (503)",
 				Summary:     "Waiting room queue-full breaker or admission timeout returned 503 Service Unavailable.",
 				Fingerprint: "queue:breaker-503",
@@ -187,10 +186,18 @@ func stripCookies(req *http.Request, names ...string) {
 // ─── API: overview ───────────────────────────────────────────────────────────
 
 func (p *portal) apiOverview(c *gin.Context) {
-	a, g := p.a, p.a.current()
+	a, ok := p.targetApp(c)
+	if !ok {
+		return
+	}
+	g := a.current()
 	wr, stats := a.room, a.stats
 	rate, surge := a.pricing()
 	h := gin.H{
+		"site":                         g.cfg.siteHost,
+		"preset":                       g.cfg.preset,
+		"config_managed":               g.cfg.configManaged,
+		"runtime_override":             a.runtimeCapOverride.Load(),
 		"cap":                          wr.Cap(),
 		"occupancy":                    wr.Len(),
 		"cap_draining":                 wr.Len() > int(wr.Cap()),
@@ -204,6 +211,8 @@ func (p *portal) apiOverview(c *gin.Context) {
 		"timeouts_total":               stats.timeouts.Load(),
 		"promoted_total":               stats.promoted.Load(),
 		"removed_total":                stats.removed.Load(),
+		"token_rejected_total":         stats.tokenRejected.Load(),
+		"lease_ceiling":                wr.LeaseCeiling(),
 		"asset_cap":                    g.assets.global.Cap(),
 		"asset_in_flight":              g.assets.global.Len(),
 		"asset_users":                  g.assets.users.count.Load(),
@@ -242,147 +251,8 @@ func (p *portal) apiOverview(c *gin.Context) {
 	for k, v := range g.agentView() {
 		h[k] = v
 	}
-	if a.mailer != nil {
-		st := a.mailer.Status()
-		h["email_enabled"] = st.Enabled
-		h["email_paused"] = st.Paused
-		h["email_queued"] = st.QueuedTotal
-		h["email_sent_total"] = st.SentTotal
-		h["email_errors_total"] = st.ErrorTotal
-	}
-	if a.topo != nil {
-		h["role"] = a.topo.role
-		h["node"] = a.topo.node
-		switch {
-		case a.topo.isEdge():
-			h["edge"] = a.edgeView()
-		case a.topo.isLeaf():
-			h["leaf"] = a.leafView(time.Now())
-		}
-	}
+	a.populateOverviewEnterprise(h)
 	c.JSON(http.StatusOK, h)
-}
-
-func (p *portal) apiTopologyRebench(c *gin.Context) {
-	handleRebench(c, p.a, portalPrincipal(c), "portal")
-}
-
-func handleRebench(c *gin.Context, a *app, actor principal, source string) {
-	var body struct {
-		Leaf             string `json:"leaf"`
-		Force            bool   `json:"force"`
-		DrainWaitSeconds int    `json:"drain_wait_seconds"`
-	}
-	if c.Request.ContentLength != 0 {
-		if err := json.NewDecoder(io.LimitReader(c.Request.Body, 4096)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid JSON payload"})
-			return
-		}
-	}
-	drainWait := time.Duration(body.DrainWaitSeconds) * time.Second
-	var (
-		res    any
-		status int
-		err    error
-		target string
-	)
-	switch {
-	case a.topo.isLeaf():
-		target = a.topo.node
-		res, status, err = a.rebenchLeaf(c.Request.Context(), drainWait)
-	case a.topo.isEdge():
-		target = body.Leaf
-		res, status, err = a.triggerLeafRebench(c.Request.Context(), body.Leaf, body.Force, drainWait)
-	default:
-		c.JSON(http.StatusBadRequest, gin.H{"error": "drained re-benchmarking is only available on edge or leaf nodes"})
-		return
-	}
-	if err != nil {
-		a.recordAudit(auditEvent{
-			Actor:    actor.Actor,
-			Role:     actor.Role.String(),
-			Source:   source,
-			Action:   "topology.rebench",
-			Target:   target,
-			Outcome:  "error",
-			ClientIP: actor.IP.String(),
-			Details:  map[string]any{"force": body.Force, "error": err.Error()},
-		})
-		c.JSON(status, gin.H{"error": err.Error()})
-		return
-	}
-	a.recordAudit(auditEvent{
-		Actor:    actor.Actor,
-		Role:     actor.Role.String(),
-		Source:   source,
-		Action:   "topology.rebench",
-		Target:   target,
-		Outcome:  "allow",
-		ClientIP: actor.IP.String(),
-		Details:  map[string]any{"force": body.Force},
-	})
-	c.JSON(http.StatusOK, res)
-}
-
-func (p *portal) apiFastlaneReconcile(c *gin.Context) {
-	handleFastlaneReconcile(c, p.a, portalPrincipal(c), "portal")
-}
-
-func handleFastlaneReconcile(c *gin.Context, a *app, actor principal, source string) {
-	if a.fastlane == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "fast lane is not enabled"})
-		return
-	}
-	var body struct {
-		Fingerprint string `json:"fingerprint"`
-		StellarHash string `json:"stellar_hash"`
-	}
-	if err := c.ShouldBindJSON(&body); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
-		return
-	}
-	fp := strings.ToLower(strings.TrimSpace(body.Fingerprint))
-	if fp == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "fingerprint is required"})
-		return
-	}
-	res, err := a.fastlane.ReconcileOnline(c.Request.Context(), fp, body.StellarHash)
-	if err != nil {
-		a.recordAudit(auditEvent{
-			Actor:    actor.Actor,
-			Role:     actor.Role.String(),
-			Source:   source,
-			Action:   "fastlane.reconcile",
-			Target:   fp,
-			Outcome:  "error",
-			ClientIP: actor.IP.String(),
-			Details:  map[string]any{"error": err.Error()},
-		})
-		status := http.StatusConflict
-		msg := err.Error()
-		if strings.Contains(msg, "invalid payment fingerprint") || strings.Contains(msg, "stellar reconciliation requires") {
-			status = http.StatusBadRequest
-		} else if strings.Contains(msg, "receipt not found") {
-			status = http.StatusNotFound
-		}
-		c.JSON(status, gin.H{"error": msg})
-		return
-	}
-	a.recordAudit(auditEvent{
-		Actor:    actor.Actor,
-		Role:     actor.Role.String(),
-		Source:   source,
-		Action:   "fastlane.reconcile",
-		Target:   fp,
-		Outcome:  "allow",
-		ClientIP: actor.IP.String(),
-		Details:  map[string]any{"network": res.Network, "transaction": res.Transaction, "payer": res.Payer},
-	})
-	c.JSON(http.StatusOK, gin.H{
-		"reconciled": true,
-		"settlement": res,
-		"fastlane":   a.fastlane.Summary(),
-	})
 }
 
 // ─── API: queue ──────────────────────────────────────────────────────────────
@@ -423,8 +293,8 @@ func occupantID(token string) string {
 
 // queueViews lists the front of room's line, in line order, with the path
 // and browser noted when each visitor joined.
-func (p *portal) queueViews(now time.Time) []occupantView {
-	line := p.a.room.Queue(portalQueueLimit)
+func (p *portal) queueViewsFor(a *app, now time.Time) []occupantView {
+	line := a.room.Queue(portalQueueLimit)
 	out := make([]occupantView, 0, len(line))
 	for _, t := range line {
 		note, _ := p.notes.get(t.Token)
@@ -447,10 +317,16 @@ func (p *portal) queueViews(now time.Time) []occupantView {
 	return out
 }
 
-// lookup finds a listed visitor by the ID the UI shows. Only visitors the
-// queue view lists can be acted on.
+func (p *portal) queueViews(now time.Time) []occupantView {
+	return p.queueViewsFor(p.a, now)
+}
+
 func (p *portal) lookup(id string) (room.TicketInfo, bool) {
-	for _, t := range p.a.room.Queue(portalQueueLimit) {
+	return p.lookupFor(p.a, id)
+}
+
+func (p *portal) lookupFor(a *app, id string) (room.TicketInfo, bool) {
+	for _, t := range a.room.Queue(portalQueueLimit) {
 		if occupantID(t.Token) == id {
 			return t, true
 		}
@@ -459,13 +335,17 @@ func (p *portal) lookup(id string) (room.TicketInfo, bool) {
 }
 
 func (p *portal) apiQueue(c *gin.Context) {
-	list := p.queueViews(time.Now())
+	a, ok := p.targetApp(c)
+	if !ok {
+		return
+	}
+	list := p.queueViewsFor(a, time.Now())
 	c.JSON(http.StatusOK, gin.H{
 		"occupants":        list,
 		"listed":           len(list),
 		"limit":            portalQueueLimit,
 		"kicked":           p.kicked.count(),
-		"live_queue_depth": p.a.room.LiveQueueDepth(),
+		"live_queue_depth": a.room.LiveQueueDepth(),
 	})
 }
 
@@ -478,23 +358,27 @@ type occupantAction struct {
 // promotion: no price, and no VIP pass, because only the visitor's own
 // response could carry the pass cookie.
 func (p *portal) apiPromote(c *gin.Context) {
+	a, ok := p.targetApp(c)
+	if !ok {
+		return
+	}
 	var body occupantAction
 	if err := c.ShouldBindJSON(&body); err != nil || body.ID == "" {
 		jsonError(c, http.StatusBadRequest, "id is required")
 		return
 	}
-	t, ok := p.lookup(body.ID)
+	t, ok := p.lookupFor(a, body.ID)
 	if !ok {
 		jsonError(c, http.StatusNotFound, "that visitor is no longer in line")
 		return
 	}
-	if err := p.a.room.AdminPromote(t.Token, 1); err != nil {
+	if err := a.room.AdminPromote(t.Token, 1); err != nil {
 		jsonError(c, http.StatusConflict, "room refused the promotion: "+err.Error())
 		return
 	}
 	log.Printf("portal: %s moved %s (%s) to the front", portalActor(c), body.ID, t.ClientKey)
 	pr := portalPrincipal(c)
-	p.a.recordAudit(auditEvent{
+	a.recordAudit(auditEvent{
 		Actor:    pr.Actor,
 		Role:     pr.Role.String(),
 		Source:   "portal",
@@ -512,12 +396,16 @@ func (p *portal) apiPromote(c *gin.Context) {
 // and they can rejoin at the back. A banned visitor's reload shows the block
 // notice, and the ban drops everyone else waiting from the same address.
 func (p *portal) apiKick(c *gin.Context) {
+	a, ok := p.targetApp(c)
+	if !ok {
+		return
+	}
 	var body occupantAction
 	if err := c.ShouldBindJSON(&body); err != nil || body.ID == "" {
 		jsonError(c, http.StatusBadRequest, "id is required")
 		return
 	}
-	t, ok := p.lookup(body.ID)
+	t, ok := p.lookupFor(a, body.ID)
 	if !ok {
 		jsonError(c, http.StatusNotFound, "that visitor is no longer in line")
 		return
@@ -526,7 +414,7 @@ func (p *portal) apiKick(c *gin.Context) {
 	now := time.Now()
 	var banFor time.Duration
 	if body.Ban {
-		reg := p.a.current().abuse
+		reg := a.current().abuse
 		if reg == nil {
 			jsonError(c, http.StatusConflict, errAbuseDisabled.Error())
 			return
@@ -545,12 +433,12 @@ func (p *portal) apiKick(c *gin.Context) {
 		if k, ok := abuseKey(ip); ok {
 			p.history.noteSource(keyPrefix(k), "removed from the line and banned in the portal by "+portalActor(c))
 		}
-		p.a.saveBansNow()
+		a.saveBansNow()
 	} else {
-		p.kicked.add(t.Token, now.Add(p.a.room.TokenTTL()+time.Minute))
+		p.kicked.add(t.Token, now.Add(a.room.TokenTTL()+time.Minute))
 	}
 
-	if err := p.a.room.RemoveToken(t.Token); err != nil {
+	if err := a.room.RemoveToken(t.Token); err != nil {
 		var notFound room.ErrTokenNotFound
 		if !errors.As(err, &notFound) {
 			log.Printf("portal: removing %s: %v", body.ID, err)
@@ -558,11 +446,11 @@ func (p *portal) apiKick(c *gin.Context) {
 	}
 	p.notes.remove(t.Token)
 	if t.Key != "" {
-		p.a.agents.forget(t.Key)
+		a.agents.forget(t.Key)
 	}
 	log.Printf("portal: %s removed %s (%s) from the line, ban=%v", portalActor(c), body.ID, t.ClientKey, body.Ban)
 	pr := portalPrincipal(c)
-	p.a.recordAudit(auditEvent{
+	a.recordAudit(auditEvent{
 		Actor:    pr.Actor,
 		Role:     pr.Role.String(),
 		Source:   "portal",
@@ -587,12 +475,16 @@ func (p *portal) apiKick(c *gin.Context) {
 // ─── API: bans ───────────────────────────────────────────────────────────────
 
 func (p *portal) apiBans(c *gin.Context) {
-	reg := p.a.current().abuse
+	a, ok := p.targetApp(c)
+	if !ok {
+		return
+	}
+	reg := a.current().abuse
 	c.JSON(http.StatusOK, gin.H{
 		"enabled":   reg != nil,
 		"tracked":   reg.tracked(),
 		"ranges":    reg.rangeCount(),
-		"persisted": p.a.bansPath != "",
+		"persisted": a.bansPath != "",
 		"bans":      reg.bans(time.Now()),
 	})
 }
@@ -602,6 +494,10 @@ func (p *portal) apiBans(c *gin.Context) {
 // 203.0.0.0/16. A permanent ban lasts until it is lifted. Waiting visitors
 // the ban covers are removed from the line at once; "dropped" counts them.
 func (p *portal) apiBanSave(c *gin.Context) {
+	a, ok := p.targetApp(c)
+	if !ok {
+		return
+	}
 	var body struct {
 		Client    string `json:"client"`
 		Duration  string `json:"duration"`
@@ -611,7 +507,7 @@ func (p *portal) apiBanSave(c *gin.Context) {
 		jsonError(c, http.StatusBadRequest, "client and duration are required")
 		return
 	}
-	reg := p.a.current().abuse
+	reg := a.current().abuse
 	if reg == nil {
 		jsonError(c, http.StatusConflict, errAbuseDisabled.Error())
 		return
@@ -624,7 +520,7 @@ func (p *portal) apiBanSave(c *gin.Context) {
 	pr := portalPrincipal(c)
 	// Permanent bans and CIDR range bans require the admin role.
 	if (body.Permanent || !target.single) && !pr.Role.allows(roleAdmin) {
-		p.a.recordAudit(auditEvent{
+		a.recordAudit(auditEvent{
 			Actor:    pr.Actor,
 			Role:     pr.Role.String(),
 			Source:   "portal",
@@ -667,12 +563,9 @@ func (p *portal) apiBanSave(c *gin.Context) {
 			return
 		}
 		p.history.noteSource(target.scope(), source)
-		// The ban's own drop runs moments later in a batch; removing now
-		// gives the operator an exact count. The batch catches anyone who
-		// joined in between.
-		dropped := p.a.dropWaiting(target.scope())
-		p.a.saveBansNow()
-		p.a.recordAudit(auditEvent{
+		dropped := a.dropWaiting(target.scope())
+		a.saveBansNow()
+		a.recordAudit(auditEvent{
 			Actor:    pr.Actor,
 			Role:     pr.Role.String(),
 			Source:   "portal",
@@ -698,10 +591,10 @@ func (p *portal) apiBanSave(c *gin.Context) {
 		return
 	}
 	p.history.noteSource(target.scope(), source)
-	dropped := p.a.dropWaiting(target.scope())
-	p.a.saveBansNow()
+	dropped := a.dropWaiting(target.scope())
+	a.saveBansNow()
 	exempt := reg.exemptWithin(target.prefix)
-	p.a.recordAudit(auditEvent{
+	a.recordAudit(auditEvent{
 		Actor:    pr.Actor,
 		Role:     pr.Role.String(),
 		Source:   "portal",
@@ -724,7 +617,11 @@ func (p *portal) apiBanSave(c *gin.Context) {
 }
 
 func (p *portal) apiUnban(c *gin.Context) {
-	reg := p.a.current().abuse
+	a, ok := p.targetApp(c)
+	if !ok {
+		return
+	}
+	reg := a.current().abuse
 	if reg == nil {
 		jsonError(c, http.StatusConflict, errAbuseDisabled.Error())
 		return
@@ -739,10 +636,10 @@ func (p *portal) apiUnban(c *gin.Context) {
 		return
 	}
 	p.history.lifted(target.scope(), time.Now(), "the portal ("+portalActor(c)+")")
-	p.a.saveBansNow()
-	p.a.cluster.publishUnban(target)
+	a.saveBansNow()
+	a.publishClusterUnban(target)
 	pr := portalPrincipal(c)
-	p.a.recordAudit(auditEvent{
+	a.recordAudit(auditEvent{
 		Actor:    pr.Actor,
 		Role:     pr.Role.String(),
 		Source:   "portal",
@@ -757,18 +654,26 @@ func (p *portal) apiUnban(c *gin.Context) {
 
 // ─── API: settings ───────────────────────────────────────────────────────────
 
-func (p *portal) settingsView() gin.H {
-	views, file := p.a.settingsViews()
+func (p *portal) settingsViewFor(a *app) gin.H {
+	views, file := a.settingsViews()
+	g := a.current()
 	return gin.H{
-		"settings":  views,
-		"persisted": file != "",
-		"file":      file,
-		"fixed":     p.a.fixedSettings(),
+		"site":             g.cfg.siteHost,
+		"config_managed":   g.cfg.configManaged,
+		"runtime_override": a.runtimeCapOverride.Load(),
+		"settings":         views,
+		"persisted":        file != "" && !g.cfg.configManaged,
+		"file":             file,
+		"fixed":            a.fixedSettings(),
 	}
 }
 
 func (p *portal) apiSettings(c *gin.Context) {
-	c.JSON(http.StatusOK, p.settingsView())
+	a, ok := p.targetApp(c)
+	if !ok {
+		return
+	}
+	c.JSON(http.StatusOK, p.settingsViewFor(a))
 }
 
 // apiSettingsSave takes a JSON object of setting keys to new values, for
@@ -776,6 +681,10 @@ func (p *portal) apiSettings(c *gin.Context) {
 // Every value is validated before any is saved or applied; see
 // app.changeSettings.
 func (p *portal) apiSettingsSave(c *gin.Context) {
+	a, ok := p.targetApp(c)
+	if !ok {
+		return
+	}
 	var set map[string]json.RawMessage
 	if err := json.NewDecoder(io.LimitReader(c.Request.Body, settingsBodyLimit)).Decode(&set); err != nil || len(set) == 0 {
 		jsonError(c, http.StatusBadRequest, "send a JSON object of the settings to change")
@@ -783,8 +692,8 @@ func (p *portal) apiSettingsSave(c *gin.Context) {
 	}
 	ip, _ := remoteAddr(c.Request)
 	pr := portalPrincipal(c)
-	if err := p.a.changeSettings(set, nil, ip); err != nil {
-		p.a.recordAudit(auditEvent{
+	if err := a.changeSettings(set, nil, ip); err != nil {
+		a.recordAudit(auditEvent{
 			Actor:    pr.Actor,
 			Role:     pr.Role.String(),
 			Source:   "portal",
@@ -796,7 +705,7 @@ func (p *portal) apiSettingsSave(c *gin.Context) {
 		jsonError(c, settingsStatus(err), err.Error())
 		return
 	}
-	p.a.recordAudit(auditEvent{
+	a.recordAudit(auditEvent{
 		Actor:    pr.Actor,
 		Role:     pr.Role.String(),
 		Source:   "portal",
@@ -805,21 +714,25 @@ func (p *portal) apiSettingsSave(c *gin.Context) {
 		ClientIP: pr.IP.String(),
 		Details:  map[string]any{"keys": sortedKeys(set)},
 	})
-	p.a.notifyEvent(mailer.Event{
-		Category:    mailer.CatSecurity,
-		Severity:    mailer.SevInfo,
+	a.notifyAlert(alertEvent{
+		Category:    alertCatSecurity,
+		Severity:    alertSevInfo,
 		Title:       "Portal settings modified",
 		Summary:     fmt.Sprintf("Administrator %s updated settings: %s", pr.Actor, strings.Join(sortedKeys(set), ", ")),
 		Fingerprint: "security:settings:" + pr.Actor,
 		Details:     map[string]string{"actor": pr.Actor, "keys": strings.Join(sortedKeys(set), ", ")},
 	})
 	log.Printf("portal: %s changed settings: %s", portalActor(c), strings.Join(sortedKeys(set), ", "))
-	c.JSON(http.StatusOK, p.settingsView())
+	c.JSON(http.StatusOK, p.settingsViewFor(a))
 }
 
 // apiSettingsReset removes ?key=… (repeatable) from settings.json, so those
 // settings follow flags, environment or defaults again, and applies them.
 func (p *portal) apiSettingsReset(c *gin.Context) {
+	a, ok := p.targetApp(c)
+	if !ok {
+		return
+	}
 	keys := c.QueryArray("key")
 	if len(keys) == 0 {
 		jsonError(c, http.StatusBadRequest, "key is required")
@@ -827,8 +740,8 @@ func (p *portal) apiSettingsReset(c *gin.Context) {
 	}
 	ip, _ := remoteAddr(c.Request)
 	pr := portalPrincipal(c)
-	if err := p.a.changeSettings(nil, keys, ip); err != nil {
-		p.a.recordAudit(auditEvent{
+	if err := a.changeSettings(nil, keys, ip); err != nil {
+		a.recordAudit(auditEvent{
 			Actor:    pr.Actor,
 			Role:     pr.Role.String(),
 			Source:   "portal",
@@ -840,7 +753,7 @@ func (p *portal) apiSettingsReset(c *gin.Context) {
 		jsonError(c, settingsStatus(err), err.Error())
 		return
 	}
-	p.a.recordAudit(auditEvent{
+	a.recordAudit(auditEvent{
 		Actor:    pr.Actor,
 		Role:     pr.Role.String(),
 		Source:   "portal",
@@ -849,16 +762,16 @@ func (p *portal) apiSettingsReset(c *gin.Context) {
 		ClientIP: pr.IP.String(),
 		Details:  map[string]any{"keys": keys},
 	})
-	p.a.notifyEvent(mailer.Event{
-		Category:    mailer.CatSecurity,
-		Severity:    mailer.SevInfo,
+	a.notifyAlert(alertEvent{
+		Category:    alertCatSecurity,
+		Severity:    alertSevInfo,
 		Title:       "Portal settings reset",
 		Summary:     fmt.Sprintf("Administrator %s reset settings: %s", pr.Actor, strings.Join(keys, ", ")),
 		Fingerprint: "security:settings-reset:" + pr.Actor,
 		Details:     map[string]string{"actor": pr.Actor, "keys": strings.Join(keys, ", ")},
 	})
 	log.Printf("portal: %s reset settings: %s", portalActor(c), strings.Join(keys, ", "))
-	c.JSON(http.StatusOK, p.settingsView())
+	c.JSON(http.StatusOK, p.settingsViewFor(a))
 }
 
 // ─── the main listener: history, kicks and visitor notes ─────────────────────
