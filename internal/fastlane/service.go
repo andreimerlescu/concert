@@ -58,15 +58,13 @@ type challenge struct {
 	Expires time.Time
 }
 type nftLease struct {
-	Network string
-	Payer   string
-	Rule    string
-	Expires time.Time
-}
-
-type rateWindow struct {
-	start time.Time
-	n     int
+	Network     string
+	Payer       string
+	Rule        string
+	Kind        string // "nft" or "token"
+	Issued      time.Time
+	Expires     time.Time
+	HardExpires time.Time
 }
 
 const (
@@ -93,23 +91,80 @@ type Gateway interface {
 }
 
 type Service struct {
-	cfg            Config
-	key            []byte
-	gateway        Gateway
-	policyToken    string
-	http           *http.Client
-	ledger         *ledger
-	mu             sync.Mutex
-	active         map[string]bool
-	challenges     map[string]challenge
-	nfts           map[string]nftLease
-	limits         map[string]*rateWindow
-	work           chan struct{}
-	now            func() time.Time
-	onUnknown      func(network, session string)
-	onCapacityWarn func(used, max, pct int)
-	warned80       bool
-	warned95       bool
+	cfgMu            sync.RWMutex
+	cfg              Config
+	key              []byte
+	prevKey          []byte
+	gateway          Gateway
+	policyToken      string
+	blocklist        blocklistCache
+	http             *http.Client
+	ledger           *ledger
+	mu               sync.Mutex
+	active           map[string]bool
+	challenges       map[string]challenge
+	directChallenges map[string]directChallenge
+	nfts             map[string]nftLease
+	revoked          map[string]time.Time
+	revokedCheck     func(string) bool
+	revokedPublish   func(string, time.Duration)
+	limits           *rateLimiter
+	work             chan struct{}
+	now              func() time.Time
+	onUnknown        func(network, session string)
+	onCapacityWarn   func(used, max, pct int)
+	warned80         bool
+	warned95         bool
+}
+
+func (s *Service) currentConfig() Config {
+	s.cfgMu.RLock()
+	c := s.cfg
+	s.cfgMu.RUnlock()
+	return c
+}
+
+// UpdateConfig validates and hot-swaps the fast-lane configuration in memory
+// without restarting Concert or interrupting in-flight settlements.
+func (s *Service) UpdateConfig(c Config) error {
+	if s == nil {
+		return errors.New("fast lane is not enabled")
+	}
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	if c.EffectivePolicyMode() == PolicyModeWebhook && c.PolicyURL != "" && len(s.policyToken) < 32 {
+		return errors.New("CONCERT_POLICY_TOKEN must be at least 32 bytes for webhook policy_mode")
+	}
+	s.cfgMu.Lock()
+	s.cfg = c
+	s.cfgMu.Unlock()
+	if s.ledger != nil && c.MaxRecords > 0 {
+		s.ledger.setMax(c.MaxRecords)
+	}
+	return nil
+}
+
+// ArchiveOnline compacts expired settled receipts older than olderThan while
+// Concert stays live and resets latched capacity alerts if usage drops below 80%.
+func (s *Service) ArchiveOnline(olderThan time.Duration, dryRun bool) (ArchiveReport, error) {
+	if s == nil || s.ledger == nil {
+		return ArchiveReport{}, errors.New("fast lane is not enabled")
+	}
+	rep, err := s.ledger.archiveOnline(olderThan, dryRun, s.now())
+	if err != nil {
+		return rep, err
+	}
+	if !dryRun && rep.Archived > 0 {
+		used, maxRec, _ := s.ledger.stats()
+		if maxRec > 0 && (used*100)/maxRec < 80 {
+			s.mu.Lock()
+			s.warned80 = false
+			s.warned95 = false
+			s.mu.Unlock()
+		}
+	}
+	return rep, nil
 }
 
 // ReceiptView is the redacted operator-facing view of an unresolved fast-lane
@@ -322,7 +377,7 @@ func New(c Config, dir string, key []byte, gw Gateway, policyToken string) (*Ser
 	if gw == nil {
 		return nil, errors.New("no chain gateway")
 	}
-	if c.PolicyURL != "" && len(policyToken) < 32 {
+	if c.EffectivePolicyMode() == PolicyModeWebhook && c.PolicyURL != "" && len(policyToken) < 32 {
 		return nil, errors.New("CONCERT_POLICY_TOKEN must be at least 32 bytes")
 	}
 	l, err := openLedger(dir, c.MaxRecords)
@@ -332,8 +387,15 @@ func New(c Config, dir string, key []byte, gw Gateway, policyToken string) (*Ser
 	s := &Service{cfg: c, key: key, gateway: gw, policyToken: policyToken, ledger: l,
 		// Every call sets its own deadline: settlement may legitimately outlast
 		// an ordinary verification request.
-		http:   &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
-		active: map[string]bool{}, challenges: map[string]challenge{}, nfts: map[string]nftLease{}, limits: map[string]*rateWindow{}, work: make(chan struct{}, 32), now: time.Now}
+		http:             &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
+		active:           map[string]bool{},
+		challenges:       map[string]challenge{},
+		directChallenges: map[string]directChallenge{},
+		nfts:             map[string]nftLease{},
+		revoked:          map[string]time.Time{},
+		limits:           newRateLimiter(maxRateEntries, postsPerMinute, time.Minute),
+		work:             make(chan struct{}, 32),
+		now:              time.Now}
 	var capabilities struct {
 		Kinds []struct {
 			Version int    `json:"x402Version"`
@@ -360,16 +422,32 @@ func New(c Config, dir string, key []byte, gw Gateway, policyToken string) (*Ser
 	return s, nil
 }
 func (s *Service) Close()         { s.ledger.close(); s.http.CloseIdleConnections() }
-func (s *Service) Config() Config { return s.cfg }
+func (s *Service) Config() Config { return s.currentConfig() }
 func (s *Service) Summary() map[string]any {
+	cfg := s.currentConfig()
 	v := s.ledger.summary()
-	v["enabled"] = true
-	v["test_mode"] = s.cfg.TestMode
-	v["merchant"] = s.cfg.Merchant
-	v["offers"] = s.cfg.Offers
-	v["collections"] = s.cfg.Collections
-	v["pass_seconds"] = s.cfg.PassSeconds
-	v["nft_pass_seconds"] = s.cfg.NFTPassSeconds
+	v["enabled"] = cfg.Enabled
+	v["origin"] = cfg.Origin
+	v["test_mode"] = cfg.TestMode
+	v["policy_mode"] = cfg.EffectivePolicyMode()
+	v["policy_url"] = cfg.PolicyURL
+	v["policy_blocklist_file"] = cfg.PolicyBlocklistFile
+	v["allow_unscreened_mainnet"] = cfg.AllowUnscreenedMainnet
+	v["merchant"] = cfg.Merchant
+	v["terms_url"] = cfg.TermsURL
+	v["privacy_url"] = cfg.PrivacyURL
+	v["refund_url"] = cfg.RefundURL
+	v["offers"] = cfg.Offers
+	v["collections"] = cfg.Collections
+	v["token_gates"] = cfg.TokenGates
+	v["verify_addresses"] = cfg.VerifyAddresses
+	v["pass_seconds"] = cfg.PassSeconds
+	v["pass_idle_seconds"] = cfg.PassIdleSeconds
+	v["pass_max_seconds"] = cfg.PassMaxSeconds
+	v["pass_sliding"] = cfg.IsSliding()
+	v["nft_pass_seconds"] = cfg.NFTPassSeconds
+	v["direct_pay_enabled"] = cfg.IsDirectPayEnabled()
+	v["direct_challenge_seconds"] = cfg.DirectChallengeSeconds
 	v["unresolved"] = s.UnresolvedReceipts()
 	return v
 }
@@ -450,42 +528,13 @@ func (s *Service) allow(remote string, now time.Time) bool {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	w := s.limits[key]
-	if w == nil || now.Sub(w.start) >= time.Minute {
-		if w == nil && len(s.limits) >= maxRateEntries {
-			for k, v := range s.limits {
-				if now.Sub(v.start) >= time.Minute {
-					delete(s.limits, k)
-				}
-			}
-			if len(s.limits) >= maxRateEntries {
-				return false
-			}
-		}
-		w = &rateWindow{start: now}
-		s.limits[key] = w
-	}
-	w.n++
-	return w.n <= postsPerMinute
+	return s.limits.allow(key, now)
 }
 
-// Eligible reads a durable, unexpired grant. Bans and the bounded priority pool
-// still run in Concert. A receipt never authorizes an unbounded proxy bypass.
+// Eligible reads a durable, unexpired grant (or valid cross-edge pass cookie).
+// Bans and the bounded priority pool still run in Concert.
 func (s *Service) Eligible(r *http.Request) bool {
-	if !s.ledger.healthy() {
-		return false
-	}
-	id, _, _, ok := s.session(r)
-	if !ok {
-		return false
-	}
-	if x, ok := s.ledger.get(id); ok && x.State == "settled" && s.now().Before(x.Expires) {
-		return true
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	x, ok := s.nfts[id]
-	return ok && s.now().Before(x.Expires)
+	return s.EligibleAndRefresh(nil, r)
 }
 
 // gatewayCall runs a gateway operation, waiting at most timeout. A
@@ -568,19 +617,7 @@ func (s *Service) call(ctx context.Context, timeout time.Duration, endpoint, tok
 }
 
 func (s *Service) screen(ctx context.Context, r *http.Request, network, payer, action string, req Requirements) (string, error) {
-	if s.cfg.PolicyURL == "" && s.cfg.TestMode {
-		return "test-mode-no-screening", nil
-	}
-	var a assessment
-	err := s.call(ctx, callTimeout, s.cfg.PolicyURL, s.policyToken, map[string]any{"network": network, "payer": payer, "action": action, "requirements": req, "client_ip": r.RemoteAddr, "merchant": s.cfg.Merchant}, &a)
-	if err != nil {
-		return "", err
-	}
-	now := s.now()
-	if a.Decision != "allow" || a.ID == "" || !a.Expires.After(now) || a.Expires.After(now.Add(10*time.Minute)) {
-		return "", errors.New("admission not approved by policy service")
-	}
-	return a.ID, nil
+	return s.screenPolicy(ctx, r, s.currentConfig(), network, payer, action, req)
 }
 
 func reply(w http.ResponseWriter, code int, v any) {
@@ -626,7 +663,8 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		failure(w, 405, "method_not_allowed")
 		return
 	}
-	if (r.Header.Get("Origin") != "" && r.Header.Get("Origin") != s.cfg.Origin) || r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+	cfg := s.currentConfig()
+	if (r.Header.Get("Origin") != "" && r.Header.Get("Origin") != cfg.Origin) || r.Header.Get("Sec-Fetch-Site") == "cross-site" {
 		failure(w, 403, "origin_rejected")
 		return
 	}
@@ -680,6 +718,10 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.makeChallenge(w, r, id)
 	case "/nft/verify":
 		s.proveNFT(w, r, id)
+	case "/direct/challenge":
+		s.makeDirectChallenge(w, r, id)
+	case "/direct/verify":
+		s.verifyDirectChallenge(w, r, id)
 	default:
 		failure(w, 404, "not_found")
 	}
@@ -688,6 +730,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // startSession issues a session, or renews a valid one under the same ID with
 // a fresh expiry. Renewal preserves receipts and unresolved payments.
 func (s *Service) startSession(w http.ResponseWriter, r *http.Request) {
+	cfg := s.currentConfig()
 	token := r.Header.Get(SessionHeader)
 	if token == "" {
 		if c, e := r.Cookie(Cookie); e == nil {
@@ -705,25 +748,45 @@ func (s *Service) startSession(w http.ResponseWriter, r *http.Request) {
 	exp := s.now().Add(sessionLifetime)
 	body := nonce + "." + strconv.FormatInt(exp.Unix(), 10)
 	t := body + "." + s.mac(body)
-	http.SetCookie(w, &http.Cookie{Name: Cookie, Value: t, Path: "/", MaxAge: int(sessionLifetime / time.Second), Secure: strings.HasPrefix(s.cfg.Origin, "https://"), HttpOnly: true, SameSite: http.SameSiteStrictMode})
+	http.SetCookie(w, &http.Cookie{Name: Cookie, Value: t, Path: "/", MaxAge: int(sessionLifetime / time.Second), Secure: strings.HasPrefix(cfg.Origin, "https://"), HttpOnly: true, SameSite: http.SameSiteStrictMode})
 	reply(w, 200, map[string]any{"session": t, "csrf": s.mac("csrf/" + t), "expires": exp.UTC()})
 }
 func (s *Service) status(w http.ResponseWriter, r *http.Request) {
 	id, _, _, ok := s.session(r)
 	if !ok {
+		if ck, err := r.Cookie(PassCookie); err == nil {
+			if p, valid := s.verifyPassCookieValue(ck.Value, s.now()); valid && !s.isRevoked("", p.PassID) {
+				kind := "payment"
+				if p.Kind == passKindNFT {
+					kind = "nft"
+				} else if p.Kind == passKindToken {
+					kind = "token"
+				}
+				reply(w, 200, map[string]any{"eligible": s.ledger.healthy(), "kind": kind, "expires": p.IdleExp, "hard_expires": p.HardExp})
+				return
+			}
+		}
 		reply(w, 200, map[string]any{"eligible": false})
+		return
+	}
+	if s.isRevoked(id, "") {
+		reply(w, 200, map[string]any{"eligible": false, "revoked": true})
 		return
 	}
 	paid, exists := s.ledger.get(id)
 	if exists && paid.State == "settled" && s.now().Before(paid.Expires) {
-		reply(w, 200, map[string]any{"eligible": s.ledger.healthy(), "state": paid.State, "kind": "payment", "expires": paid.Expires, "receipt": paid.Response})
+		reply(w, 200, map[string]any{"eligible": s.ledger.healthy(), "state": paid.State, "kind": paid.Kind, "expires": paid.Expires, "receipt": paid.Response})
 		return
 	}
 	s.mu.Lock()
 	nft, hasNFT := s.nfts[id]
 	s.mu.Unlock()
 	if hasNFT && s.now().Before(nft.Expires) {
-		reply(w, 200, map[string]any{"eligible": s.ledger.healthy(), "kind": "nft", "expires": nft.Expires})
+		kind := nft.Kind
+		if kind == "" {
+			kind = "nft"
+		}
+		reply(w, 200, map[string]any{"eligible": s.ledger.healthy(), "kind": kind, "expires": nft.Expires, "hard_expires": nft.HardExpires})
 		return
 	}
 	if exists {
@@ -734,22 +797,77 @@ func (s *Service) status(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) PublicConfig() map[string]any {
-	return map[string]any{"enabled": true, "test_mode": s.cfg.TestMode, "merchant": s.cfg.Merchant, "offers": s.cfg.Offers, "collections": s.cfg.Collections, "pass_seconds": s.cfg.PassSeconds, "nft_pass_seconds": s.cfg.NFTPassSeconds, "terms_url": s.cfg.TermsURL, "privacy_url": s.cfg.PrivacyURL, "refund_url": s.cfg.RefundURL}
+	cfg := s.currentConfig()
+	offersOut := make([]map[string]any, 0, len(cfg.Offers))
+	for _, o := range cfg.Offers {
+		offersOut = append(offersOut, map[string]any{
+			"label":               o.Label,
+			"requirements":        o.Requirements,
+			"display_amount":      o.EffectiveDisplayAmount(),
+			"asset_symbol":        o.EffectiveSymbol(),
+			"asset_decimals":      o.EffectiveDecimals(),
+			"asset_type":          o.AssetType,
+			"require_collections": o.RequireCollections,
+			"require_token_gates": o.RequireTokenGates,
+			"gate_mode":           o.GateMode,
+		})
+	}
+	entryCols := make([]Collection, 0, len(cfg.Collections))
+	for _, c := range cfg.Collections {
+		if c.AllowsEntry() {
+			entryCols = append(entryCols, c)
+		}
+	}
+	entryTokens := make([]TokenGate, 0, len(cfg.TokenGates))
+	for _, tg := range cfg.TokenGates {
+		if tg.AllowsEntry() {
+			entryTokens = append(entryTokens, tg)
+		}
+	}
+	return map[string]any{
+		"enabled":                  cfg.Enabled,
+		"test_mode":                cfg.TestMode,
+		"merchant":                 cfg.Merchant,
+		"offers":                   offersOut,
+		"collections":              entryCols,
+		"all_collections":          cfg.Collections,
+		"token_gates":              entryTokens,
+		"all_token_gates":          cfg.TokenGates,
+		"pass_seconds":             cfg.PassSeconds,
+		"pass_idle_seconds":        cfg.PassIdleSeconds,
+		"pass_max_seconds":         cfg.PassMaxSeconds,
+		"pass_sliding":             cfg.IsSliding(),
+		"nft_pass_seconds":         cfg.NFTPassSeconds,
+		"direct_pay_enabled":       cfg.IsDirectPayEnabled(),
+		"direct_challenge_seconds": cfg.DirectChallengeSeconds,
+		"terms_url":                cfg.TermsURL,
+		"privacy_url":              cfg.PrivacyURL,
+		"refund_url":               cfg.RefundURL,
+	}
 }
 
 func (s *Service) prepareSOL(w http.ResponseWriter, r *http.Request) {
+	cfg := s.currentConfig()
 	var in struct {
 		Network string `json:"network"`
 		Address string `json:"address"`
+		Asset   string `json:"asset"`
 	}
 	if decode(r, &in) != nil || !solAddress.MatchString(in.Address) {
 		failure(w, 400, "invalid_wallet_address")
 		return
 	}
 	found := false
-	for _, o := range s.cfg.Offers {
-		if o.Requirements.Network == in.Network && o.Requirements.Scheme == "concert-native-sol" {
+	for _, o := range cfg.Offers {
+		if o.Requirements.Network != in.Network || chain(o.Requirements.Network) != "solana" {
+			continue
+		}
+		if in.Asset == "" || o.Requirements.Asset == in.Asset {
 			found = true
+			if in.Asset == "" {
+				in.Asset = o.Requirements.Asset
+			}
+			break
 		}
 	}
 	if !found {
@@ -771,15 +889,16 @@ func (s *Service) prepareSOL(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) required(w http.ResponseWriter) {
-	accepts := make([]Requirements, 0, len(s.cfg.Offers))
-	for _, o := range s.cfg.Offers {
+	cfg := s.currentConfig()
+	accepts := make([]Requirements, 0, len(cfg.Offers))
+	for _, o := range cfg.Offers {
 		accepts = append(accepts, o.Requirements)
 	}
 	if len(accepts) == 0 {
 		failure(w, 404, "payments_disabled")
 		return
 	}
-	body := map[string]any{"x402Version": 2, "resource": Resource{URL: s.cfg.Origin + Prefix + "/payment", Description: fmt.Sprintf("%d seconds of Concert fast-lane eligibility; capacity limits apply", s.cfg.PassSeconds), MimeType: "application/json"}, "accepts": accepts}
+	body := map[string]any{"x402Version": 2, "resource": Resource{URL: cfg.Origin + Prefix + "/payment", Description: fmt.Sprintf("%d seconds of Concert fast-lane eligibility; capacity limits apply", cfg.PassSeconds), MimeType: "application/json"}, "accepts": accepts}
 	b, _ := json.Marshal(body)
 	w.Header().Set("PAYMENT-REQUIRED", base64.StdEncoding.EncodeToString(b))
 	reply(w, 402, body)
@@ -791,6 +910,7 @@ func (s *Service) receipt(w http.ResponseWriter, x Receipt) {
 }
 
 func (s *Service) payment(w http.ResponseWriter, r *http.Request, id string) {
+	cfg := s.currentConfig()
 	prior, exists := s.ledger.get(id)
 	if exists && prior.State == "settled" && s.now().Before(prior.Expires) {
 		s.receipt(w, prior)
@@ -815,14 +935,16 @@ func (s *Service) payment(w http.ResponseWriter, r *http.Request, id string) {
 		failure(w, 400, "invalid_payment_payload")
 		return
 	}
-	if p.Resource != nil && p.Resource.URL != s.cfg.Origin+Prefix+"/payment" {
+	if p.Resource != nil && p.Resource.URL != cfg.Origin+Prefix+"/payment" {
 		failure(w, 400, "wrong_resource")
 		return
 	}
+	var matchedOffer Offer
 	var req Requirements
 	found := false
-	for _, o := range s.cfg.Offers {
+	for _, o := range cfg.Offers {
 		if same(p.Accepted, o.Requirements) {
+			matchedOffer = o
 			req = o.Requirements
 			found = true
 			break
@@ -873,7 +995,19 @@ func (s *Service) payment(w http.ResponseWriter, r *http.Request, id string) {
 			failure(w, 402, "payment_not_verified")
 			return
 		}
-		policy, err := s.screen(r.Context(), r, req.Network, v.Payer, "payment", req)
+		// Enforce NFT / Token-Trustline purchase prerequisites against v.Payer BEFORE charging!
+		if len(matchedOffer.RequireCollections) > 0 || len(matchedOffer.RequireTokenGates) > 0 {
+			gateOK, _, gerr := s.checkGatesForWallet(r.Context(), cfg, v.Payer, matchedOffer.RequireCollections, matchedOffer.RequireTokenGates, matchedOffer.GateMode, "")
+			if gerr != nil {
+				failure(w, 503, "gate_check_unavailable")
+				return
+			}
+			if !gateOK {
+				failure(w, 403, "wallet_does_not_meet_purchase_requirements")
+				return
+			}
+		}
+		policy, err := s.screenPolicy(r.Context(), r, cfg, req.Network, v.Payer, "payment", req)
 		if err != nil {
 			failure(w, 403, "policy_not_approved")
 			return
@@ -887,7 +1021,7 @@ func (s *Service) payment(w http.ResponseWriter, r *http.Request, id string) {
 	} else {
 		// Retry only the identical authorization. Native chain replay protection
 		// plus the gateway's durable settlement cache prevents another debit.
-		if _, err := s.screen(r.Context(), r, req.Network, x.Payer, "payment_retry", req); err != nil {
+		if _, err := s.screenPolicy(r.Context(), r, cfg, req.Network, x.Payer, "payment_retry", req); err != nil {
 			failure(w, 403, "policy_not_approved")
 			return
 		}
@@ -911,19 +1045,25 @@ func (s *Service) payment(w http.ResponseWriter, r *http.Request, id string) {
 		failure(w, 503, "settlement_unresolved_retry_identical_payment_do_not_pay_again")
 		return
 	}
+	now := s.now()
+	idleExp, hardExp := s.grantWindow(cfg, passKindPayment, now)
 	x.State = "settled"
 	x.Transaction = settled.Transaction
-	x.Settled = s.now()
-	x.Expires = x.Settled.Add(time.Duration(s.cfg.PassSeconds) * time.Second)
+	x.Settled = now
+	x.Expires = idleExp
 	x.Response = &settled
 	if e = s.ledger.write(x); e != nil {
 		failure(w, 503, "receipt_not_saved_contact_merchant_do_not_pay_again")
 		return
 	}
+	if r.Header.Get(SessionHeader) == "" {
+		s.setPassCookie(w, cfg, id, passKindPayment, now, idleExp, hardExp, "")
+	}
 	s.receipt(w, x)
 }
 
 func (s *Service) makeChallenge(w http.ResponseWriter, r *http.Request, id string) {
+	cfg := s.currentConfig()
 	var in struct {
 		Rule    string `json:"rule"`
 		Address string `json:"address"`
@@ -935,8 +1075,8 @@ func (s *Service) makeChallenge(w http.ResponseWriter, r *http.Request, id strin
 	}
 	var rule Collection
 	found := false
-	for _, x := range s.cfg.Collections {
-		if x.ID == in.Rule {
+	for _, x := range cfg.Collections {
+		if x.ID == in.Rule && x.AllowsEntry() {
 			rule = x
 			found = true
 		}
@@ -945,12 +1085,12 @@ func (s *Service) makeChallenge(w http.ResponseWriter, r *http.Request, id strin
 		failure(w, 400, "unknown_collection_rule")
 		return
 	}
-	// Solana ownership is checked per mint. Stellar's SEP-50 balance() check
-	// covers the collection only, so a token there would never be verified.
+	// Solana now auto-scans the wallet's NFTs when token_id is empty, while still
+	// validating optional explicit mint addresses.
 	switch chain(rule.Network) {
 	case "solana":
-		if !solAddress.MatchString(in.Token) {
-			failure(w, 400, "nft_mint_required")
+		if in.Token != "" && !solAddress.MatchString(in.Token) {
+			failure(w, 400, "invalid_nft_mint")
 			return
 		}
 	case "stellar":
@@ -972,7 +1112,7 @@ func (s *Service) makeChallenge(w http.ResponseWriter, r *http.Request, id strin
 	}
 	now := s.now()
 	exp := now.Add(2 * time.Minute)
-	msg := fmt.Sprintf("Concert NFT admission v1\nOrigin: %s\nNetwork: %s\nWallet: %s\nCollection: %s\nToken: %s\nSession: %s\nNonce: %s\nIssued: %s\nExpires: %s\nPurpose: prove wallet control for a short fast-lane lease. No payment or transaction authorization.", s.cfg.Origin, rule.Network, in.Address, rule.Collection, in.Token, id, nonce, now.UTC().Format(time.RFC3339), exp.UTC().Format(time.RFC3339))
+	msg := fmt.Sprintf("Concert NFT admission v1\nOrigin: %s\nNetwork: %s\nWallet: %s\nCollection: %s\nToken: %s\nSession: %s\nNonce: %s\nIssued: %s\nExpires: %s\nPurpose: prove wallet control for a short fast-lane lease. No payment or transaction authorization.", cfg.Origin, rule.Network, in.Address, rule.Collection, in.Token, id, nonce, now.UTC().Format(time.RFC3339), exp.UTC().Format(time.RFC3339))
 	s.mu.Lock()
 	for k, v := range s.challenges {
 		if !now.Before(v.Expires) {
@@ -1000,6 +1140,7 @@ func (s *Service) makeChallenge(w http.ResponseWriter, r *http.Request, id strin
 	reply(w, 200, map[string]any{"nonce": nonce, "message": msg, "expires": exp, "network": rule.Network, "rule": rule.ID})
 }
 func (s *Service) proveNFT(w http.ResponseWriter, r *http.Request, id string) {
+	cfg := s.currentConfig()
 	var in struct {
 		Nonce     string `json:"nonce"`
 		Signature string `json:"signature"`
@@ -1026,7 +1167,7 @@ func (s *Service) proveNFT(w http.ResponseWriter, r *http.Request, id string) {
 		Collection string `json:"collection"`
 		Token      string `json:"token_id"`
 	}
-	err := s.gatewayCall(r.Context(), callTimeout, "/nft/verify", map[string]any{"network": ch.Rule.Network, "address": ch.Address, "collection": ch.Rule.Collection, "token_id": ch.Token, "message": ch.Message, "signature": in.Signature, "public_key": in.PublicKey}, &proof)
+	err := s.gatewayCall(r.Context(), callTimeout, "/nft/verify", map[string]any{"network": ch.Rule.Network, "address": ch.Address, "collection": ch.Rule.Collection, "issuer": ch.Rule.Issuer, "token_id": ch.Token, "message": ch.Message, "signature": in.Signature, "public_key": in.PublicKey}, &proof)
 	if err != nil {
 		failure(w, 503, "nft_verification_unavailable")
 		return
@@ -1035,18 +1176,22 @@ func (s *Service) proveNFT(w http.ResponseWriter, r *http.Request, id string) {
 		failure(w, 403, "ownership_not_verified")
 		return
 	}
-	if _, err = s.screen(r.Context(), r, ch.Rule.Network, ch.Address, "nft", Requirements{}); err != nil {
+	if _, err = s.screenPolicy(r.Context(), r, cfg, ch.Rule.Network, ch.Address, "nft", Requirements{}); err != nil {
 		failure(w, 403, "policy_not_approved")
 		return
 	}
-	exp := s.now().Add(time.Duration(s.cfg.NFTPassSeconds) * time.Second)
+	now := s.now()
+	idleExp, hardExp := s.grantWindow(cfg, passKindNFT, now)
 	s.mu.Lock()
 	if len(s.nfts) >= 10000 {
 		s.mu.Unlock()
 		failure(w, 503, "lease_capacity")
 		return
 	}
-	s.nfts[id] = nftLease{ch.Rule.Network, ch.Address, ch.Rule.ID, exp}
+	s.nfts[id] = nftLease{Network: ch.Rule.Network, Payer: ch.Address, Rule: ch.Rule.ID, Kind: "nft", Issued: now, Expires: idleExp, HardExpires: hardExp}
 	s.mu.Unlock()
-	reply(w, 200, map[string]any{"eligible": true, "kind": "nft", "expires": exp, "token_id": proof.Token})
+	if r.Header.Get(SessionHeader) == "" {
+		s.setPassCookie(w, cfg, id, passKindNFT, now, idleExp, hardExp, "")
+	}
+	reply(w, 200, map[string]any{"eligible": true, "kind": "nft", "expires": idleExp, "hard_expires": hardExp, "token_id": proof.Token})
 }

@@ -110,12 +110,22 @@ type Claim struct {
 
 // Errors returned by Verify. Callers treat every one as "no claim".
 var (
-	ErrMissing       = errors.New("hop: no claim")
-	ErrMalformed     = errors.New("hop: malformed claim")
-	ErrSignature     = errors.New("hop: bad signature")
-	ErrSkew          = errors.New("hop: claim outside the clock skew window")
-	ErrReplay        = errors.New("hop: replayed claim")
-	ErrNonceRequired = errors.New("hop: claim missing nonce")
+	ErrMissing         = errors.New("hop: no claim")
+	ErrMalformed       = errors.New("hop: malformed claim")
+	ErrSignature       = errors.New("hop: bad signature")
+	ErrSkew            = errors.New("hop: claim outside the clock skew window")
+	ErrReplay          = errors.New("hop: replayed claim")
+	ErrReplaySaturated = errors.New("hop: replay cache saturated")
+	ErrNonceRequired   = errors.New("hop: claim missing nonce")
+)
+
+const (
+	// DefaultReplayMax is the default maximum number of single-use nonces tracked
+	// across all shards of a Verifier's replay cache (1,048,576 = 256 * 4096).
+	DefaultReplayMax = 1 << 20
+	// MinReplayMax and MaxReplayMax bound -hop-replay-max.
+	MinReplayMax = 1024
+	MaxReplayMax = 16 << 20
 )
 
 // ValidNodeID reports whether id can name a node: 1 to 32 characters from
@@ -259,7 +269,7 @@ type Verifier struct {
 	now          func() time.Time
 	replayGuard  atomic.Bool
 	requireNonce atomic.Bool
-	replay       *replayCache
+	replay       atomic.Pointer[replayCache]
 }
 
 // NewVerifier returns a verifier accepting claims signed with any of
@@ -272,8 +282,8 @@ func NewVerifier(maxSkew time.Duration, secrets ...[]byte) (*Verifier, error) {
 	v := &Verifier{
 		maxSkew: maxSkew,
 		now:     time.Now,
-		replay:  newReplayCache(),
 	}
+	v.replay.Store(newReplayCache(DefaultReplayMax, false, nil))
 	for _, s := range secrets {
 		if len(s) == 0 {
 			continue
@@ -294,6 +304,13 @@ func NewVerifier(maxSkew time.Duration, secrets ...[]byte) (*Verifier, error) {
 func (v *Verifier) SetReplayGuard(enabled, requireNonce bool) {
 	v.replayGuard.Store(enabled)
 	v.requireNonce.Store(requireNonce)
+}
+
+// SetReplayOptions configures the replay cache's capacity, fail-closed
+// saturation mode, and eviction/saturation callback. Safe for concurrent use;
+// call during initialization before serving traffic.
+func (v *Verifier) SetReplayOptions(maxEntries int, failClosed bool, onEvict func()) {
+	v.replay.Store(newReplayCache(maxEntries, failClosed, onEvict))
 }
 
 // Verify parses header and checks its signature against method, uri and
@@ -330,8 +347,8 @@ func (v *Verifier) Verify(header, method, uri, bodyHash string) (Claim, error) {
 	}
 	if v.replayGuard.Load() && c.Nonce != "" {
 		ttlMs := (2 * v.maxSkew).Milliseconds()
-		if v.replay.seenOrRecord(c.Edge, c.Nonce, now.UnixMilli(), ttlMs) {
-			return Claim{}, ErrReplay
+		if err := v.replay.Load().checkAndRecord(c.Edge, c.Nonce, now.UnixMilli(), ttlMs); err != nil {
+			return Claim{}, err
 		}
 	}
 	return c, nil

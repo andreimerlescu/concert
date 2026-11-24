@@ -8,6 +8,7 @@ import (
 
 	"github.com/andreimerlescu/concert/internal/x402"
 	"github.com/stellar/go-stellar-sdk/keypair"
+	"github.com/stellar/go-stellar-sdk/network"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
@@ -165,4 +166,88 @@ func anyAddress(s string) (xdr.ScVal, error) {
 		return xdr.ScVal{Type: xdr.ScValTypeScvAddress, Address: &a}, nil
 	}
 	return scAddress(s)
+}
+
+// NewClassicPayment builds and signs a payer-paid classic Stellar Payment
+// envelope for native XLM or any CODE:ISSUER asset (with optional text memo).
+func NewClassicPayment(ctx context.Context, horizon Horizon, netName string, payer *keypair.Full, r x402.Requirements) (string, error) {
+	pass, err := Passphrase(netName)
+	if err != nil {
+		return "", err
+	}
+	pa, err := ParseAsset(r.Asset, pass)
+	if err != nil {
+		return "", err
+	}
+	var xdrAsset xdr.Asset
+	switch pa.Kind {
+	case AssetNative:
+		xdrAsset = xdr.MustNewNativeAsset()
+	case AssetClassic:
+		xdrAsset, err = xdr.NewCreditAsset(pa.Code, pa.Issuer)
+		if err != nil {
+			return "", err
+		}
+	default:
+		return "", errors.New("classic payment requires XLM or CODE:ISSUER")
+	}
+	amount, ok := new(big.Int).SetString(r.Amount, 10)
+	if !ok || !amount.IsInt64() || amount.Sign() <= 0 {
+		return "", errors.New("invalid Stellar amount")
+	}
+	acct, err := horizon.Account(ctx, payer.Address())
+	if err != nil {
+		return "", err
+	}
+	seq, err := atoi64(acct.Sequence)
+	if err != nil {
+		return "", err
+	}
+	src, err := xdr.AddressToMuxedAccount(payer.Address())
+	if err != nil {
+		return "", err
+	}
+	dst, err := xdr.AddressToMuxedAccount(r.PayTo)
+	if err != nil {
+		return "", err
+	}
+	timeout := r.MaxTimeoutSeconds
+	if timeout <= 0 {
+		timeout = defaultTimeoutSeconds
+	}
+	bounds := xdr.TimeBounds{MaxTime: xdr.TimePoint(time.Now().Add(time.Duration(timeout) * time.Second).Unix())}
+	memo := xdr.Memo{Type: xdr.MemoTypeMemoNone}
+	if m, ok := r.Extra["memo"].(string); ok && m != "" {
+		if len(m) > 28 {
+			return "", errors.New("Stellar text memo exceeds 28 bytes")
+		}
+		mt := m
+		memo = xdr.Memo{Type: xdr.MemoTypeMemoText, Text: &mt}
+	}
+	tx := xdr.Transaction{
+		SourceAccount: src,
+		Fee:           inclusionFeeStroops,
+		SeqNum:        xdr.SequenceNumber(seq + 1),
+		Cond:          xdr.Preconditions{Type: xdr.PreconditionTypePrecondTime, TimeBounds: &bounds},
+		Memo:          memo,
+		Operations: []xdr.Operation{{Body: xdr.OperationBody{
+			Type: xdr.OperationTypePayment,
+			PaymentOp: &xdr.PaymentOp{
+				Destination: dst,
+				Asset:       xdrAsset,
+				Amount:      xdr.Int64(amount.Int64()),
+			},
+		}}},
+	}
+	env := xdr.TransactionEnvelope{Type: xdr.EnvelopeTypeEnvelopeTypeTx, V1: &xdr.TransactionV1Envelope{Tx: tx}}
+	hash, err := network.HashTransactionInEnvelope(env, pass)
+	if err != nil {
+		return "", err
+	}
+	sig, err := payer.SignDecorated(hash[:])
+	if err != nil {
+		return "", err
+	}
+	env.V1.Signatures = []xdr.DecoratedSignature{sig}
+	return xdr.MarshalBase64(env)
 }

@@ -1,0 +1,158 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 640" width="1200" height="640">
+  <defs>
+    <style>
+      .sans { font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+      .mono { font-family: 'SF Mono', 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    </style>
+    <marker id="arr-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#1a8cd8"/>
+    </marker>
+    <marker id="arr-teal" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#0d9488"/>
+    </marker>
+    <marker id="arr-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#d97706"/>
+    </marker>
+    <marker id="arr-purple" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#8b5cf6"/>
+    </marker>
+    <marker id="arr-rose" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#d9468f"/>
+    </marker>
+  </defs>
+
+  <!-- Header -->
+  <rect x="28" y="18" width="322" height="28" rx="14" fill="#0369a1"/>
+  <text x="189" y="36" text-anchor="middle" class="sans" font-size="11.5" font-weight="700" letter-spacing="0.9" fill="#ffffff">06 · BUILT FOR WORDPRESS &amp; MULTI-SITE</text>
+  <text x="364" y="37" class="sans" font-size="13.8" font-weight="600" fill="#747c90">wpconcert shields PHP-FPM from spikes, bots &amp; static load — zero Nginx</text>
+  <rect x="1044" y="18" width="128" height="28" rx="14" fill="#1a8cd8" fill-opacity="0.12" stroke="#1a8cd8" stroke-width="1.5"/>
+  <text x="1108" y="36" text-anchor="middle" class="mono" font-size="11.5" font-weight="700" fill="#1a8cd8">wpconcert</text>
+  <line x1="28" y1="60" x2="1172" y2="60" stroke="#747c90" stroke-opacity="0.25" stroke-width="1"/>
+
+  <!-- Stage 1: Internet Entry -->
+  <rect x="28" y="186" width="166" height="196" rx="14" fill="#1a8cd8" fill-opacity="0.09" stroke="#1a8cd8" stroke-width="2"/>
+  <rect x="43" y="202" width="136" height="24" rx="12" fill="#0369a1"/>
+  <text x="111" y="218" text-anchor="middle" class="sans" font-size="10.3" font-weight="700" letter-spacing="0.8" fill="#ffffff">INTERNET TRAFFIC</text>
+  <text x="111" y="252" text-anchor="middle" class="mono" font-size="12" font-weight="700" fill="#1a8cd8">:80 / :443</text>
+  <text x="111" y="274" text-anchor="middle" class="sans" font-size="11.5" font-weight="600" fill="#747c90">ACME TLS 1.3</text>
+  <text x="111" y="294" text-anchor="middle" class="sans" font-size="11.5" font-weight="600" fill="#747c90">HTTP/2 &amp; HTTP/3</text>
+  <text x="111" y="314" text-anchor="middle" class="sans" font-size="11.5" font-weight="600" fill="#747c90">Multi-Site SNI</text>
+  <rect x="44" y="336" width="134" height="26" rx="13" fill="#252136"/>
+  <text x="111" y="353" text-anchor="middle" class="mono" font-size="10" fill="#7dd3fc">No Nginx / Apache</text>
+
+  <!-- Arrow 1 -> 2 -->
+  <line x1="194" y1="284" x2="226" y2="284" stroke="#1a8cd8" stroke-width="2.2" marker-end="url(#arr-blue)"/>
+
+  <!-- Stage 2: Security Shield -->
+  <rect x="230" y="138" width="214" height="292" rx="14" fill="#d9468f" fill-opacity="0.07" stroke="#d9468f" stroke-width="2"/>
+  <rect x="252" y="154" width="170" height="24" rx="12" fill="#be185d"/>
+  <text x="337" y="170" text-anchor="middle" class="sans" font-size="10.5" font-weight="700" letter-spacing="0.8" fill="#ffffff">WP SECURITY SHIELD</text>
+
+  <rect x="246" y="192" width="182" height="46" rx="8" fill="#d9468f" fill-opacity="0.11" stroke="#d9468f" stroke-width="1.3"/>
+  <text x="337" y="211" text-anchor="middle" class="mono" font-size="10.3" font-weight="700" fill="#d9468f">/wp-config.php → 403</text>
+  <text x="337" y="229" text-anchor="middle" class="mono" font-size="10" fill="#747c90">/uploads/*.php → 403</text>
+
+  <rect x="246" y="248" width="182" height="46" rx="8" fill="#d9468f" fill-opacity="0.11" stroke="#d9468f" stroke-width="1.3"/>
+  <text x="337" y="267" text-anchor="middle" class="mono" font-size="10.3" font-weight="700" fill="#d9468f">/xmlrpc.php · /.env</text>
+  <text x="337" y="285" text-anchor="middle" class="sans" font-size="10.5" fill="#747c90">Auto-banned (429 / 403)</text>
+
+  <rect x="246" y="304" width="182" height="62" rx="8" fill="#8b5cf6" fill-opacity="0.10" stroke="#8b5cf6" stroke-width="1.3"/>
+  <text x="337" y="324" text-anchor="middle" class="sans" font-size="11" font-weight="700" fill="#8b5cf6">FastCGI Hardening</text>
+  <text x="337" y="342" text-anchor="middle" class="sans" font-size="10.3" fill="#747c90">Authentic REMOTE_ADDR</text>
+  <text x="337" y="358" text-anchor="middle" class="sans" font-size="10.3" fill="#747c90">Drops "_" headers &amp; 404 probes</text>
+
+  <rect x="260" y="382" width="154" height="28" rx="14" fill="#252136"/>
+  <text x="337" y="400" text-anchor="middle" class="mono" font-size="10.8" font-weight="700" fill="#f9a8d4">0 PHP-FPM workers used</text>
+
+  <!-- Branch trunk from Shield to 3 Lanes -->
+  <path d="M 444 214 L 472 214 L 472 134 L 496 134" fill="none" stroke="#0d9488" stroke-width="2.2" marker-end="url(#arr-teal)"/>
+  <line x1="444" y1="274" x2="496" y2="274" stroke="#d97706" stroke-width="2.2" marker-end="url(#arr-amber)"/>
+  <path d="M 444 356 L 472 356 L 472 448 L 496 448" fill="none" stroke="#8b5cf6" stroke-width="2.2" marker-end="url(#arr-purple)"/>
+
+  <!-- LANE 1 (Top): Static Offload -->
+  <rect x="500" y="76" width="672" height="114" rx="14" fill="#0d9488" fill-opacity="0.07" stroke="#0d9488" stroke-width="2"/>
+  <rect x="518" y="90" width="194" height="22" rx="11" fill="#0f766e"/>
+  <text x="615" y="105" text-anchor="middle" class="sans" font-size="10" font-weight="700" letter-spacing="0.8" fill="#ffffff">1 · DISK STATIC OFFLOAD</text>
+  <text x="726" y="105" class="mono" font-size="11" font-weight="600" fill="#0d9488">/wp-content/*  ·  /wp-includes/*  ·  /robots.txt</text>
+
+  <rect x="518" y="122" width="212" height="54" rx="9" fill="#0d9488" fill-opacity="0.11" stroke="#0d9488" stroke-width="1.4"/>
+  <text x="624" y="145" text-anchor="middle" class="sans" font-size="11.5" font-weight="700" fill="#0d9488">os.Root Confined Disk</text>
+  <text x="624" y="164" text-anchor="middle" class="sans" font-size="10.5" fill="#747c90">.br / .gz sidecars · ETag · Range</text>
+
+  <line x1="730" y1="149" x2="762" y2="149" stroke="#0d9488" stroke-width="2" marker-end="url(#arr-teal)"/>
+
+  <rect x="766" y="122" width="204" height="54" rx="9" fill="#8b5cf6" fill-opacity="0.10" stroke="#8b5cf6" stroke-width="1.4"/>
+  <text x="868" y="145" text-anchor="middle" class="sans" font-size="11.5" font-weight="700" fill="#8b5cf6">Pass-Gated Assets</text>
+  <text x="868" y="164" text-anchor="middle" class="sans" font-size="10.5" fill="#747c90">Requires concert_admit cookie</text>
+
+  <line x1="970" y1="149" x2="1002" y2="149" stroke="#0d9488" stroke-width="2" marker-end="url(#arr-teal)"/>
+
+  <rect x="1006" y="122" width="148" height="54" rx="9" fill="#252136"/>
+  <text x="1080" y="145" text-anchor="middle" class="sans" font-size="11.5" font-weight="700" fill="#99f6e4">Served Off Disk</text>
+  <text x="1080" y="164" text-anchor="middle" class="mono" font-size="10.5" fill="#cbd5e1">0 PHP load</text>
+
+  <!-- LANE 2 (Middle): Micro-Cache -->
+  <rect x="500" y="206" width="672" height="132" rx="14" fill="#d97706" fill-opacity="0.07" stroke="#d97706" stroke-width="2"/>
+  <rect x="518" y="220" width="248" height="22" rx="11" fill="#b45309"/>
+  <text x="642" y="235" text-anchor="middle" class="sans" font-size="10" font-weight="700" letter-spacing="0.8" fill="#ffffff">2 · ANONYMOUS GET MICRO-CACHE</text>
+  <text x="780" y="235" class="sans" font-size="11.5" font-weight="600" fill="#747c90">Absorbs bursts without leaking sessions or carts</text>
+
+  <rect x="518" y="254" width="234" height="68" rx="9" fill="#d97706" fill-opacity="0.11" stroke="#d97706" stroke-width="1.4"/>
+  <text x="635" y="276" text-anchor="middle" class="sans" font-size="11.5" font-weight="700" fill="#d97706">Singleflight Stampede Collapse</text>
+  <text x="635" y="294" text-anchor="middle" class="sans" font-size="10.5" fill="#747c90">100s of concurrent anonymous GETs</text>
+  <text x="635" y="311" text-anchor="middle" class="sans" font-size="10.5" fill="#747c90">coalesce into 1 upstream miss</text>
+
+  <line x1="752" y1="288" x2="788" y2="288" stroke="#0d9488" stroke-width="2" marker-end="url(#arr-teal)"/>
+  <rect x="753" y="261" width="34" height="18" rx="9" fill="#0f766e"/>
+  <text x="770" y="273.5" text-anchor="middle" class="mono" font-size="9.5" font-weight="700" fill="#ffffff">HIT</text>
+
+  <rect x="792" y="254" width="362" height="68" rx="9" fill="#0d9488" fill-opacity="0.11" stroke="#0d9488" stroke-width="1.4"/>
+  <text x="973" y="276" text-anchor="middle" class="sans" font-size="11.8" font-weight="700" fill="#0d9488">&lt; 1 ms Cache HIT  +  Fresh concert_admit Pass</text>
+  <text x="973" y="295" text-anchor="middle" class="sans" font-size="10.5" fill="#747c90">Issues per-visitor pass so page assets load off disk (0 PHP)</text>
+  <text x="973" y="312" text-anchor="middle" class="mono" font-size="10" fill="#0d9488">Never caches Set-Cookie, private, or Vary: Cookie</text>
+
+  <!-- Bypass/Miss arrow down from Lane 2 -> Lane 3 -->
+  <line x1="635" y1="338" x2="635" y2="380" stroke="#d97706" stroke-width="2.2" marker-end="url(#arr-amber)"/>
+  <rect x="652" y="348" width="498" height="24" rx="12" fill="#252136"/>
+  <text x="901" y="364" text-anchor="middle" class="mono" font-size="10.2" font-weight="600" fill="#fde68a">Auto BYPASS → wordpress_logged_in_* · /wp-admin · WooCommerce carts · POST</text>
+
+  <!-- LANE 3 (Bottom): Waiting Room + FastCGI -> PHP-FPM -->
+  <rect x="500" y="384" width="672" height="132" rx="14" fill="#8b5cf6" fill-opacity="0.07" stroke="#8b5cf6" stroke-width="2"/>
+  <rect x="518" y="398" width="282" height="22" rx="11" fill="#7c3aed"/>
+  <text x="659" y="413" text-anchor="middle" class="sans" font-size="10" font-weight="700" letter-spacing="0.8" fill="#ffffff">3 · DYNAMIC PAGES, CARTS &amp; CHECKOUT</text>
+  <text x="814" y="413" class="mono" font-size="10.8" font-weight="700" fill="#8b5cf6">cap + priority_cap ≤ pm.max_children</text>
+
+  <rect x="518" y="432" width="206" height="68" rx="9" fill="#8b5cf6" fill-opacity="0.11" stroke="#8b5cf6" stroke-width="1.4"/>
+  <text x="621" y="454" text-anchor="middle" class="sans" font-size="11.5" font-weight="700" fill="#8b5cf6">FIFO Waiting Room</text>
+  <text x="621" y="472" text-anchor="middle" class="sans" font-size="10.5" fill="#747c90">Priority lane for carts &amp; login</text>
+  <text x="621" y="489" text-anchor="middle" class="sans" font-size="10.5" fill="#747c90">Excess visitors queue cleanly</text>
+
+  <line x1="724" y1="466" x2="754" y2="466" stroke="#8b5cf6" stroke-width="2" marker-end="url(#arr-purple)"/>
+
+  <rect x="758" y="432" width="198" height="68" rx="9" fill="#1a8cd8" fill-opacity="0.11" stroke="#1a8cd8" stroke-width="1.4"/>
+  <text x="857" y="454" text-anchor="middle" class="sans" font-size="11.5" font-weight="700" fill="#1a8cd8">Pure-Stdlib FastCGI</text>
+  <text x="857" y="472" text-anchor="middle" class="mono" font-size="10" fill="#747c90">try_files → index.php</text>
+  <text x="857" y="489" text-anchor="middle" class="sans" font-size="10.5" fill="#747c90">Upload &amp; slowloris timeouts</text>
+
+  <line x1="956" y1="466" x2="986" y2="466" stroke="#1a8cd8" stroke-width="2" marker-end="url(#arr-blue)"/>
+
+  <rect x="990" y="432" width="164" height="68" rx="9" fill="#252136"/>
+  <text x="1072" y="454" text-anchor="middle" class="mono" font-size="11.5" font-weight="700" fill="#7dd3fc">php-fpm.sock</text>
+  <text x="1072" y="473" text-anchor="middle" class="sans" font-size="10.5" fill="#cbd5e1">Workers stay in fast zone</text>
+  <text x="1072" y="490" text-anchor="middle" class="sans" font-size="10.5" fill="#99f6e4">Zero 502 / 504 crashes</text>
+
+  <!-- Bottom Operator CLI Strip -->
+  <rect x="28" y="538" width="1144" height="74" rx="14" fill="#1a8cd8" fill-opacity="0.06" stroke="#1a8cd8" stroke-width="1.75"/>
+  <rect x="46" y="563" width="174" height="24" rx="12" fill="#0369a1"/>
+  <text x="133" y="579" text-anchor="middle" class="sans" font-size="10.5" font-weight="700" letter-spacing="0.8" fill="#ffffff">ONE-COMMAND SETUP</text>
+
+  <rect x="236" y="553" width="446" height="44" rx="10" fill="#252136"/>
+  <text x="252" y="572" class="mono" font-size="11" font-weight="700" fill="#7dd3fc">wpconcert init</text>
+  <text x="366" y="572" class="sans" font-size="11" fill="#e2e8f0">Reads PHP-FPM pm.max_children &amp; generates</text>
+  <text x="252" y="588" class="sans" font-size="10.5" fill="#cbd5e1">a tuned Concertfile with preset wordpress, micro_cache &amp; HTTP/3</text>
+
+  <rect x="698" y="553" width="454" height="44" rx="10" fill="#252136"/>
+  <text x="714" y="572" class="mono" font-size="11" font-weight="700" fill="#99f6e4">wpconcert doctor</text>
+  <text x="844" y="572" class="sans" font-size="11" fill="#e2e8f0">Audits php-fpm sockets, pool headroom,</text>
+  <text x="714" y="588" class="sans" font-size="10.5" fill="#cbd5e1">static root containment &amp; wp-config.php permissions before launch</text>
+</svg>

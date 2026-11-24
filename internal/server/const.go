@@ -10,6 +10,7 @@ const (
 	// ctxAdmitted is set the moment a request reaches the proxy handler.
 	// Anything written before that point was written by room.
 	ctxAdmitted = "concert.admitted"
+	ctxIsStream = "concert.is_stream"
 	// ctxClientIP holds the resolved client netip.Addr for the request.
 	ctxClientIP = "concert.client_ip"
 	// ctxAgentKey holds the room key of a request agentGate identified by

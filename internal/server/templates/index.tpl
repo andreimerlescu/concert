@@ -10,7 +10,7 @@
         <form method="post" action="/login" autocomplete="off">
           {{if .MultiUser}}
           <label for="user" class="form-label">Username</label>
-          <input type="text" class="form-control mb-3" id="user" name="user" autocomplete="username" autofocus>
+          <input type="text" class="form-control mb-3" id="user" name="user" autocomplete="username" autofocus required>
           <label for="pass" class="form-label">Password</label>
           <input type="password" class="form-control mb-3" id="pass" name="pass" required>
           <label for="totp" class="form-label">MFA code <span class="text-body-secondary small">(if enabled)</span></label>
@@ -90,22 +90,61 @@
 
   <div class="tab-content">
     <div class="tab-pane fade" id="tab-fastlane" role="tabpanel" aria-labelledby="tab-fastlane-btn" tabindex="0">
-      <div class="d-flex justify-content-between align-items-center mb-3"><div><p class="concert-eyebrow">X402 + COLLECTION ACCESS</p><h2 class="h3">A clearer path through.</h2></div><button class="btn btn-outline-info" id="fastlane-refresh"><i aria-hidden="true" class="bi bi-arrow-repeat"></i> Refresh</button></div>
+      <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+        <div>
+          <p class="concert-eyebrow mb-1">X402 + MULTI-CHAIN FAST-LANE</p>
+          <h2 class="h3 mb-0">Crypto Passes, NFTs &amp; Token Gates</h2>
+        </div>
+        <div class="d-flex flex-wrap align-items-center gap-2">
+          <span class="badge d-none" id="fastlane-mode-badge"></span>
+          <span class="badge d-none" id="fastlane-policy-badge"></span>
+          <span class="badge text-bg-secondary d-none" id="fastlane-lock-badge"><i aria-hidden="true" class="bi bi-lock-fill"></i> Wallets Locked</span>
+          <button class="btn btn-outline-info btn-sm" id="fastlane-refresh" type="button"><i aria-hidden="true" class="bi bi-arrow-repeat"></i> Refresh</button>
+          <button class="btn btn-primary btn-sm d-none" id="fastlane-save-top" type="button"><i aria-hidden="true" class="bi bi-check2-circle"></i> Save &amp; Apply Live</button>
+        </div>
+      </div>
+
       <div id="fastlane-state" class="alert alert-info" role="status">Loading fast-lane configuration…</div>
+      <div id="fastlane-save-feedback" class="alert d-none" role="status"></div>
       <div id="fastlane-capacity-alert" class="alert d-none" role="alert"></div>
       <div class="row g-3 mb-4" id="fastlane-stats"></div>
+
+      <!-- Receipt Journal Headroom + Zero-Downtime Online Archival -->
       <div class="card stat-card mb-4 d-none" id="fastlane-headroom-card">
         <div class="card-body">
           <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
-            <h3 class="h6 mb-0"><i aria-hidden="true" class="bi bi-journal-check"></i> Receipt journal headroom</h3>
+            <h3 class="h6 mb-0"><i aria-hidden="true" class="bi bi-journal-check"></i> Receipt journal headroom &amp; live archival</h3>
             <span class="small font-monospace" id="fastlane-headroom-text">–</span>
           </div>
           <div class="progress mb-2" role="progressbar" aria-label="Fast-lane receipt journal usage" aria-valuemin="0" aria-valuemax="100">
             <div class="progress-bar" id="fastlane-headroom-bar"></div>
           </div>
-          <div class="small text-body-secondary">Proactive alerts fire at 80% and 95% of <code>max_records</code>. Archive expired settled receipts offline with <code>concert archive-receipts -data-dir … -older-than 720h</code>.</div>
+          <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-2">
+            <span class="small text-body-secondary">Alerts fire at 80% and 95%. Compact expired settled receipts live without downtime.</span>
+            <div class="d-flex flex-wrap align-items-center gap-2">
+              <select class="form-select form-select-sm w-auto" id="fastlane-archive-age" aria-label="Archive receipts older than">
+                <option value="24h">Older than 24h</option>
+                <option value="168h">Older than 7d</option>
+                <option value="720h" selected>Older than 30d</option>
+                <option value="2160h">Older than 90d</option>
+              </select>
+              <button class="btn btn-sm btn-outline-secondary" id="fastlane-archive-dry" type="button">Dry Run</button>
+              <button class="btn btn-sm btn-outline-warning" id="fastlane-archive-run" type="button"><i aria-hidden="true" class="bi bi-archive"></i> Archive Live</button>
+            </div>
+          </div>
+          <div class="small mt-2 d-none" id="fastlane-archive-status" role="status"></div>
         </div>
       </div>
+
+      <!-- Optional Fee-Sponsor Balance Health -->
+      <div class="card stat-card mb-4 d-none" id="fastlane-sponsor-card">
+        <div class="card-body">
+          <h3 class="h6 mb-2"><i aria-hidden="true" class="bi bi-fuel-pump"></i> Optional fee-sponsor accounts</h3>
+          <div class="row g-2" id="fastlane-sponsor-rows"></div>
+        </div>
+      </div>
+
+      <!-- Unresolved Receipts (Zero-Downtime Online Reconciliation) -->
       <div class="card stat-card mb-4 d-none" id="fastlane-unresolved-card">
         <div class="card-body">
           <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
@@ -130,8 +169,200 @@
           </div>
         </div>
       </div>
-      <div class="row g-4"><section class="col-lg-6"><h3 class="h5">Accepted payments</h3><div id="fastlane-offers"></div></section><section class="col-lg-6"><h3 class="h5">NFT collection rules</h3><div id="fastlane-collections"></div></section></div>
-      <div class="card mt-4"><div class="card-body"><h3 class="h6">Configure access</h3><p class="small text-body-secondary mb-0">Set CONCERT_FASTLANE_CONFIG in the environment, and CONCERT_NETWORKS_CONFIG, then edit the payment offers and collection rules and restart Concert; the chain gateway runs inside it. Existing receipts retain their expiry. The setup guide describes each chain’s collection identifier and supported wallet proof formats.</p></div></div>
+
+      <!-- Live Fast-Lane Configuration Studio -->
+      <div id="fastlane-editor" class="d-none">
+        <!-- General, Policy Screening & Sliding Session Timing -->
+        <div class="card stat-card mb-4">
+          <div class="card-body">
+            <h3 class="h5 mb-3"><i aria-hidden="true" class="bi bi-sliders2"></i> General, Mainnet Policy &amp; Pass Timing</h3>
+            <div class="row g-3">
+              <div class="col-md-3">
+                <div class="form-check form-switch mt-2">
+                  <input class="form-check-input" type="checkbox" id="fl-enabled">
+                  <label class="form-check-label fw-semibold" for="fl-enabled">Fast-lane enabled</label>
+                </div>
+                <div class="form-check form-switch mt-2">
+                  <input class="form-check-input" type="checkbox" id="fl-test-mode">
+                  <label class="form-check-label" for="fl-test-mode">Testnet mode only</label>
+                </div>
+              </div>
+              <div class="col-md-4">
+                <label class="form-label small" for="fl-merchant">Merchant display name</label>
+                <input class="form-control form-control-sm" id="fl-merchant" type="text">
+              </div>
+              <div class="col-md-5">
+                <label class="form-label small" for="fl-origin">Public origin URL</label>
+                <input class="form-control form-control-sm font-monospace" id="fl-origin" type="url" placeholder="https://shop.example.com">
+              </div>
+              <div class="col-md-4">
+                <label class="form-label small" for="fl-terms-url">Terms URL</label>
+                <input class="form-control form-control-sm font-monospace" id="fl-terms-url" type="url">
+              </div>
+              <div class="col-md-4">
+                <label class="form-label small" for="fl-privacy-url">Privacy URL</label>
+                <input class="form-control form-control-sm font-monospace" id="fl-privacy-url" type="url">
+              </div>
+              <div class="col-md-4">
+                <label class="form-label small" for="fl-refund-url">Refund / support URL</label>
+                <input class="form-control form-control-sm font-monospace" id="fl-refund-url" type="url">
+              </div>
+            </div>
+            <hr class="my-3">
+            <div class="row g-3 align-items-end">
+              <div class="col-md-3">
+                <label class="form-label small" for="fl-policy-mode">Mainnet screening policy</label>
+                <select class="form-select form-select-sm" id="fl-policy-mode">
+                  <option value="blocklist">Local Blocklist File (OFAC / Denylist)</option>
+                  <option value="webhook">External Screening Webhook</option>
+                  <option value="none">None (Explicit Operator Opt-In)</option>
+                </select>
+              </div>
+              <div class="col-md-5" id="fl-policy-url-wrap">
+                <label class="form-label small" for="fl-policy-url">Policy webhook URL (HTTPS)</label>
+                <input class="form-control form-control-sm font-monospace" id="fl-policy-url" type="url" placeholder="https://compliance.internal/screen">
+              </div>
+              <div class="col-md-5 d-none" id="fl-policy-file-wrap">
+                <label class="form-label small" for="fl-policy-file">Local blocklist file path</label>
+                <input class="form-control form-control-sm font-monospace" id="fl-policy-file" type="text" placeholder="/etc/concert/blocklist.txt">
+              </div>
+              <div class="col-md-4">
+                <div class="form-check mt-2" id="fl-unscreened-wrap">
+                  <input class="form-check-input" type="checkbox" id="fl-allow-unscreened">
+                  <label class="form-check-label small" for="fl-allow-unscreened">Allow unscreened mainnet (override hardened guard)</label>
+                </div>
+              </div>
+            </div>
+            <hr class="my-3">
+            <div class="row g-3 align-items-end">
+              <div class="col-6 col-md-2">
+                <label class="form-label small" for="fl-pass-secs">Initial pass (s)</label>
+                <input class="form-control form-control-sm" id="fl-pass-secs" type="number" min="30" max="86400">
+              </div>
+              <div class="col-6 col-md-2">
+                <label class="form-label small" for="fl-pass-idle">Sliding idle (s)</label>
+                <input class="form-control form-control-sm" id="fl-pass-idle" type="number" min="30" max="86400">
+              </div>
+              <div class="col-6 col-md-2">
+                <label class="form-label small" for="fl-pass-max">Hard max cap (s)</label>
+                <input class="form-control form-control-sm" id="fl-pass-max" type="number" min="60" max="86400">
+              </div>
+              <div class="col-6 col-md-2">
+                <label class="form-label small" for="fl-nft-secs">NFT / token lease (s)</label>
+                <input class="form-control form-control-sm" id="fl-nft-secs" type="number" min="30" max="3600">
+              </div>
+              <div class="col-md-4">
+                <div class="form-check form-switch">
+                  <input class="form-check-input" type="checkbox" id="fl-pass-sliding">
+                  <label class="form-check-label small" for="fl-pass-sliding">Sliding pass (keeps active browsers &amp; 45s+ PHP checkouts admitted)</label>
+                </div>
+                <div class="form-check form-switch mt-1">
+                  <input class="form-check-input" type="checkbox" id="fl-direct-pay">
+                  <label class="form-check-label small" for="fl-direct-pay">Direct QR + Destination Tag / Memo wallet flow</label>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Paid Pass Offers Editor with Multi-Chain Presets -->
+        <div class="card stat-card mb-4">
+          <div class="card-body">
+            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+              <div>
+                <h3 class="h5 mb-0"><i aria-hidden="true" class="bi bi-coin"></i> Paid Fast-Lane Passes</h3>
+                <div class="small text-body-secondary">Choose any combination of XRP/RLUSD, XLM/USDC, SOL/USDC, or HBAR/HTS tokens. Payer pays network fees by default (zero hot keys).</div>
+              </div>
+              <div class="d-flex flex-wrap gap-1" id="fl-offer-presets">
+                <button class="btn btn-sm btn-outline-primary" type="button" data-preset="xrpl-rlusd">+ XRPL RLUSD</button>
+                <button class="btn btn-sm btn-outline-primary" type="button" data-preset="xrpl-xrp">+ XRP</button>
+                <button class="btn btn-sm btn-outline-info" type="button" data-preset="stellar-usdc">+ Stellar USDC</button>
+                <button class="btn btn-sm btn-outline-info" type="button" data-preset="stellar-xlm">+ XLM</button>
+                <button class="btn btn-sm btn-outline-success" type="button" data-preset="solana-usdc">+ Solana USDC</button>
+                <button class="btn btn-sm btn-outline-success" type="button" data-preset="solana-sol">+ SOL</button>
+                <button class="btn btn-sm btn-outline-warning" type="button" data-preset="hedera-usdc">+ Hedera USDC</button>
+                <button class="btn btn-sm btn-outline-warning" type="button" data-preset="hedera-hbar">+ HBAR</button>
+              </div>
+            </div>
+            <div id="fastlane-offers" class="d-flex flex-column gap-3"></div>
+          </div>
+        </div>
+
+        <!-- NFT Collection Rules & Token/Trustline Balance Rules -->
+        <div class="row g-4 mb-4">
+          <section class="col-lg-6">
+            <div class="card stat-card h-100">
+              <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center gap-2 mb-3">
+                  <div>
+                    <h3 class="h5 mb-0"><i aria-hidden="true" class="bi bi-gem"></i> NFT Collection Rules</h3>
+                    <div class="small text-body-secondary">Grant free entry, require holding before purchasing a pass, or both.</div>
+                  </div>
+                  <button class="btn btn-sm btn-outline-primary" id="fl-add-collection" type="button">+ Add NFT Rule</button>
+                </div>
+                <div id="fastlane-collections" class="d-flex flex-column gap-3"></div>
+              </div>
+            </div>
+          </section>
+          <section class="col-lg-6">
+            <div class="card stat-card h-100">
+              <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center gap-2 mb-3">
+                  <div>
+                    <h3 class="h5 mb-0"><i aria-hidden="true" class="bi bi-wallet2"></i> Token &amp; Trustline Balance Rules</h3>
+                    <div class="small text-body-secondary">Require holding a minimum token balance (e.g. 10 RLUSD or 100 USDC) to enter or buy.</div>
+                  </div>
+                  <button class="btn btn-sm btn-outline-primary" id="fl-add-token-gate" type="button">+ Add Token Rule</button>
+                </div>
+                <div id="fastlane-token-gates" class="d-flex flex-column gap-3"></div>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <!-- Optional Verification Receiving Addresses + Live Save Bar -->
+        <div class="card stat-card mb-4">
+          <div class="card-body">
+            <div class="row g-3 align-items-end">
+              <div class="col-lg-8">
+                <h3 class="h6 mb-1"><i aria-hidden="true" class="bi bi-qr-code-scan"></i> 1-Drop / Memo Ownership Proof Receiving Wallets (Optional)</h3>
+                <p class="small text-body-secondary mb-2">Defaults to the matching paid offer’s receiving wallet. Set here only if you run free NFT/Token gates without a paid offer on that chain.</p>
+                <div class="row g-2">
+                  <div class="col-md-6"><input class="form-control form-control-sm font-monospace" id="fl-verify-xrpl" placeholder="XRPL verify address (r...)"></div>
+                  <div class="col-md-6"><input class="form-control form-control-sm font-monospace" id="fl-verify-stellar" placeholder="Stellar verify address (G...)"></div>
+                  <div class="col-md-6"><input class="form-control form-control-sm font-monospace" id="fl-verify-solana" placeholder="Solana verify address (base58)"></div>
+                  <div class="col-md-6"><input class="form-control form-control-sm font-monospace" id="fl-verify-hedera" placeholder="Hedera verify account (0.0.N)"></div>
+                </div>
+              </div>
+              <div class="col-lg-4">
+                <div class="d-none mb-2" id="fl-mfa-wrap">
+                  <label class="form-label small text-warning mb-1" for="fl-mfa-code">TOTP MFA code (required to change receiving wallets in hardened mode)</label>
+                  <input class="form-control form-control-sm font-monospace" id="fl-mfa-code" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code">
+                </div>
+                <button class="btn btn-primary w-100" id="fastlane-save-bottom" type="button"><i aria-hidden="true" class="bi bi-check2-circle"></i> Save &amp; Apply Live (Zero Downtime)</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Live Pass / Session Revocation -->
+      <div class="card stat-card mb-4 d-none" id="fastlane-revoke-card">
+        <div class="card-body">
+          <div class="row g-2 align-items-end">
+            <div class="col-md-8">
+              <label class="form-label small fw-semibold mb-1" for="fastlane-revoke-target"><i aria-hidden="true" class="bi bi-slash-circle"></i> Revoke an active fast-lane session or pass ID immediately</label>
+              <input class="form-control form-control-sm font-monospace" id="fastlane-revoke-target" type="text" placeholder="Session ID or Pass ID (propagates across Redis edges)">
+            </div>
+            <div class="col-md-4">
+              <button class="btn btn-sm btn-outline-danger w-100" id="fastlane-revoke-btn" type="button">Revoke Pass Live</button>
+            </div>
+          </div>
+          <div class="small mt-2 d-none" id="fastlane-revoke-status" role="status"></div>
+        </div>
+      </div>
+
+      <div class="card mt-3" id="fastlane-help-card"><div class="card-body"><h3 class="h6">Multi-chain fast-lane setup</h3><p class="small text-body-secondary mb-0">Start <code>econcert</code> with <code>-fastlane-config</code> (or <code>fastlane_config</code> in <code>Concertfile</code>) and <code>-networks-config</code>. Live edits apply immediately with zero downtime, persist atomically (<code>0600</code>), write to the hash-chained audit log, and trigger a Critical email alert whenever receiving wallets change.</p></div></div>
     </div>
 
     <!-- Overview -->

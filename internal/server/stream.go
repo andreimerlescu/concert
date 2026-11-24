@@ -55,5 +55,6 @@ func (s *streamGuard) handle(c *gin.Context) {
 	defer func() { _ = s.sem.Release() }()
 
 	s.stats.streamServed.Add(1)
+	c.Set(ctxIsStream, true)
 	c.Next() // proxy the connection while the slot is held
 }

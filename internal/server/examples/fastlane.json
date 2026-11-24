@@ -1,10 +1,17 @@
 {
   "enabled": false,
   "origin": "https://queue.example.com",
+  "policy_mode": "blocklist",
+  "policy_blocklist_file": "/etc/concert/blocklist.txt",
   "policy_url": "",
   "test_mode": true,
   "pass_seconds": 300,
-  "nft_pass_seconds": 30,
+  "pass_idle_seconds": 180,
+  "pass_max_seconds": 1800,
+  "pass_sliding": true,
+  "nft_pass_seconds": 300,
+  "direct_pay_enabled": true,
+  "direct_challenge_seconds": 600,
   "max_records": 100000,
   "merchant": "Example Tickets LLC",
   "terms_url": "https://www.example.com/terms",
@@ -12,7 +19,28 @@
   "refund_url": "https://www.example.com/refunds",
   "offers": [
     {
+      "label": "RLUSD · XRPL Testnet",
+      "display_amount": "0.99",
+      "asset_symbol": "RLUSD",
+      "asset_type": "iou",
+      "requirements": {
+        "scheme": "exact",
+        "network": "xrpl:1",
+        "amount": "0.99",
+        "asset": "RLUSD:rQhWct2fv4Vc4KRjRgMrxa8xPN9Zx9iLKV",
+        "payTo": "rQLTGGRoGbQZLK2ErVKio1pxViAR8fvMBT",
+        "maxTimeoutSeconds": 60,
+        "extra": {
+          "areFeesSponsored": false
+        }
+      }
+    },
+    {
       "label": "XRP · Testnet",
+      "display_amount": "0.1",
+      "asset_symbol": "XRP",
+      "asset_decimals": 6,
+      "asset_type": "native",
       "requirements": {
         "scheme": "exact",
         "network": "xrpl:1",
@@ -21,27 +49,34 @@
         "payTo": "rQLTGGRoGbQZLK2ErVKio1pxViAR8fvMBT",
         "maxTimeoutSeconds": 60,
         "extra": {
-          "areFeesSponsored": false,
-          "assetTransferMethod": "sequence"
+          "areFeesSponsored": false
         }
       }
     },
     {
-      "label": "XLM · Testnet",
+      "label": "XLM · Testnet (payer pays fee)",
+      "display_amount": "0.1",
+      "asset_symbol": "XLM",
+      "asset_decimals": 7,
+      "asset_type": "native",
       "requirements": {
         "scheme": "exact",
         "network": "stellar:testnet",
         "amount": "1000000",
-        "asset": "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+        "asset": "XLM",
         "payTo": "GAJCHOYDKVA34FOL4NTDILX6T7XIEQXWJZ7ZT4PV2RSUVVXCHW4CC5LA",
         "maxTimeoutSeconds": 60,
         "extra": {
-          "areFeesSponsored": true
+          "areFeesSponsored": false
         }
       }
     },
     {
-      "label": "HBAR · Testnet",
+      "label": "HBAR · Testnet (payer pays fee)",
+      "display_amount": "0.1",
+      "asset_symbol": "HBAR",
+      "asset_decimals": 8,
+      "asset_type": "native",
       "requirements": {
         "scheme": "exact",
         "network": "hedera:testnet",
@@ -50,12 +85,34 @@
         "payTo": "0.0.4815162",
         "maxTimeoutSeconds": 60,
         "extra": {
-          "feePayer": "0.0.4815342"
+          "areFeesSponsored": false
+        }
+      }
+    },
+    {
+      "label": "USDC · Solana Devnet",
+      "display_amount": "0.99",
+      "asset_symbol": "USDC",
+      "asset_decimals": 6,
+      "asset_type": "spl",
+      "requirements": {
+        "scheme": "exact",
+        "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+        "amount": "990000",
+        "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+        "payTo": "HnsoZ8ePhw43Zf3vSpTt71LGbdRG3NzFepQWxXBosRWo",
+        "maxTimeoutSeconds": 60,
+        "extra": {
+          "areFeesSponsored": false
         }
       }
     },
     {
       "label": "SOL · Devnet",
+      "display_amount": "0.0015",
+      "asset_symbol": "SOL",
+      "asset_decimals": 9,
+      "asset_type": "native",
       "requirements": {
         "scheme": "concert-native-sol",
         "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
@@ -74,25 +131,41 @@
       "id": "xrpl-founders",
       "label": "Founders Club (XRPL)",
       "network": "xrpl:1",
-      "collection": "rN1ZgJLAwHdVCZL3vY5nqudgEsCc5sEyZX:42"
+      "collection": "rN1ZgJLAwHdVCZL3vY5nqudgEsCc5sEyZX:42",
+      "usage": "both"
     },
     {
       "id": "stellar-backstage",
       "label": "Backstage Pass (Stellar)",
       "network": "stellar:testnet",
-      "collection": "CAR6LMNBSEDJ7EJPZ5GM2STC5ZGN7AVTPA6UALCUCPQQ2L4PHDVJJAXM"
+      "collection": "CAR6LMNBSEDJ7EJPZ5GM2STC5ZGN7AVTPA6UALCUCPQQ2L4PHDVJJAXM",
+      "usage": "entry"
     },
     {
       "id": "hedera-vip",
       "label": "VIP Lounge (Hedera)",
       "network": "hedera:testnet",
-      "collection": "0.0.2233445"
+      "collection": "0.0.2233445",
+      "usage": "entry"
     },
     {
       "id": "solana-season",
       "label": "Season Holders (Solana)",
       "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
-      "collection": "EBiEQxgHYcCBPN8zoUSZxbEsKd46TBPtphdcQQd28Ey"
+      "collection": "EBiEQxgHYcCBPN8zoUSZxbEsKd46TBPtphdcQQd28Ey",
+      "usage": "both"
+    }
+  ],
+  "token_gates": [
+    {
+      "id": "xrpl-rlusd-holders",
+      "label": "RLUSD Trustline Holders (10+ RLUSD)",
+      "network": "xrpl:1",
+      "asset": "RLUSD:rQhWct2fv4Vc4KRjRgMrxa8xPN9Zx9iLKV",
+      "asset_symbol": "RLUSD",
+      "min_amount": "10",
+      "display_min_amount": "10",
+      "usage": "both"
     }
   ]
 }

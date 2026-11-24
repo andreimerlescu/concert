@@ -200,26 +200,29 @@ func (a *app) initEnterpriseEarly(config) error {
 	return nil
 }
 
-func (a *app) initEnterpriseFastlane(config, *room.WaitingRoom) error { return nil }
-func (a *app) initEnterpriseServices(config)                          {}
-func (a *app) startEnterpriseLoops()                                  {}
-func (a *app) closeEnterpriseOnStartupErr()                           {}
-func (a *app) maybeBenchOnStart(context.Context, config)              {}
-func (a *app) notifyAlert(alertEvent)                                 {}
-func (a *app) recordAudit(auditEvent)                                 {}
-func (a *app) publishClusterBan(banTarget, int64, int)                {}
-func (a *app) publishClusterUnban(banTarget)                          {}
-func (a *app) emailScopeLabel(scope netip.Prefix) string              { return scope.String() }
-func (a *app) emailIPLabel(ip netip.Addr) string                      { return ip.String() }
-func (a *app) eraseMailerIP(netip.Addr, string) int                   { return 0 }
-func (a *app) applyEnterpriseReload(config)                           {}
-func untrackedEnterprisePaths() []pathRule                            { return nil }
-func (a *app) fastlaneEligible(*http.Request) bool                    { return false }
-func (a *app) fastlaneSessionID(*http.Request) (string, bool)         { return "", false }
-func (a *app) fastlaneEnabled() bool                                  { return false }
-func (a *app) populateOverviewEnterprise(h gin.H)                     { h["edition"] = Edition() }
-func (a *app) populateStatsEnterprise(out gin.H)                      { out["edition"] = Edition() }
-func (a *app) writeEnterpriseMetrics(*strings.Builder, *counters)     {}
+func (a *app) initEnterpriseFastlane(config, *room.WaitingRoom) error             { return nil }
+func (a *app) initEnterpriseServices(config)                                      {}
+func (a *app) startEnterpriseLoops()                                              {}
+func (a *app) closeEnterpriseOnStartupErr()                                       {}
+func (a *app) maybeBenchOnStart(context.Context, config)                          {}
+func (a *app) notifyAlert(alertEvent)                                             {}
+func (a *app) recordAudit(auditEvent)                                             {}
+func (a *app) publishClusterBan(banTarget, int64, int)                            {}
+func (a *app) publishClusterUnban(banTarget)                                      {}
+func (a *app) emailScopeLabel(scope netip.Prefix) string                          { return scope.String() }
+func (a *app) emailIPLabel(ip netip.Addr) string                                  { return ip.String() }
+func (a *app) eraseMailerIP(netip.Addr, string) int                               { return 0 }
+func (a *app) applyEnterpriseReload(config)                                       {}
+func untrackedEnterprisePaths() []pathRule                                        { return nil }
+func (a *app) fastlaneEligible(*http.Request) bool                                { return false }
+func (a *app) fastlaneEligibleAndRefresh(http.ResponseWriter, *http.Request) bool { return false }
+func (a *app) fastlaneSessionID(*http.Request) (string, bool)                     { return "", false }
+func (a *app) fastlaneEnabled() bool                                              { return false }
+func validateFastlaneReloadConfig(config) error                                   { return nil }
+func (a *app) transferFastlaneFrom(*app, config) error                            { return nil }
+func (a *app) populateOverviewEnterprise(h gin.H)                                 { h["edition"] = Edition() }
+func (a *app) populateStatsEnterprise(out gin.H)                                  { out["edition"] = Edition() }
+func (a *app) writeEnterpriseMetrics(*strings.Builder, *counters)                 {}
 func (a *app) describeEnterpriseSecrets(_ config, out map[string]string) {
 	out["Edition"] = Edition()
 }
@@ -264,6 +267,7 @@ func movedEnterpriseFlags() map[string]string {
 		"hop-max-skew":            "econcert",
 		"hop-wait":                "econcert",
 		"hop-replay-guard":        "econcert",
+		"hop-replay-max":          "econcert",
 		"hop-require-nonce":       "econcert",
 		"hop-require-mtls":        "econcert",
 		"host-cap":                "econcert",

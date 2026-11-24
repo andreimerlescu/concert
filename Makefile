@@ -9,7 +9,7 @@ os   = $(word 1,$(subst /, ,$1))
 arch = $(word 2,$(subst /, ,$1))
 ext  = $(if $(filter windows,$(call os,$1)),.exe,)
 
-.PHONY: all test test-race lint clean bench build build-fips sbom vulncheck checksums $(PLATFORMS)
+.PHONY: all test test-race test-testnet lint clean bench build build-fips sbom vulncheck checksums $(PLATFORMS)
 
 all: lint clean test test-race bench summary build sbom checksums
 
@@ -22,6 +22,9 @@ test-race:
 	go test -race -count=1 ./internal/... ./cmd/concert ./cmd/bench-concert
 	go test -race -count=1 -tags wordpress ./internal/... ./cmd/wpconcert
 	go test -race -count=1 -tags "wordpress,enterprise" ./...
+
+test-testnet:
+	go test -v -count=1 -tags "wordpress,enterprise,livetestnet" -timeout 10m ./internal/server -run TestLiveTestnet
 
 bench:
 	go test -bench=. -benchmem -tags "wordpress,enterprise" ./...
@@ -74,7 +77,7 @@ build-fips:
 		-o $(BIN_DIR)/econcert-fips-linux-arm64 ./cmd/econcert
 
 checksums:
-	@cd $(BIN_DIR) && shasum -a 256 concert-* wpconcert-* econcert-* bench-concert-* > SHA256SUMS.txt
+	@cd $(BIN_DIR) && shasum -a 256 concert-* wpconcert-* econcert-* bench-concert-* concert-client-* > SHA256SUMS.txt
 
 $(PLATFORMS):
 	@mkdir -p $(BIN_DIR)
@@ -90,3 +93,6 @@ $(PLATFORMS):
 	CGO_ENABLED=0 GOOS=$(call os,$@) GOARCH=$(call arch,$@) \
 		go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS)" \
 		-o $(BIN_DIR)/bench-concert-$(call os,$@)-$(call arch,$@)$(call ext,$@) ./cmd/bench-concert
+	CGO_ENABLED=0 GOOS=$(call os,$@) GOARCH=$(call arch,$@) \
+		go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS)" \
+		-o $(BIN_DIR)/concert-client-$(call os,$@)-$(call arch,$@)$(call ext,$@) ./cmd/concert-client

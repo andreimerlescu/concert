@@ -536,3 +536,77 @@ func (c *respConn) readReply() (any, error) {
 		return nil, errors.New("unexpected RESP prefix")
 	}
 }
+
+// ─── Cross-Edge Fast-Lane Revocation & Settlement Deduplication (Fail-Open) ──
+
+func (cs *clusterSync) fastlaneRevokeKey(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	return cs.cfg.prefix + ":fl:rev:" + hex.EncodeToString(sum[:16])
+}
+
+func (cs *clusterSync) fastlaneSettleKey(fp string) string {
+	return cs.cfg.prefix + ":fl:settle:" + fp
+}
+
+// isFastlaneRevoked checks Redis for a revoked pass/session ID. Fail-open on Redis error.
+func (cs *clusterSync) isFastlaneRevoked(id string) bool {
+	if cs == nil || id == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	rc, err := cs.dial(ctx)
+	if err != nil {
+		return false
+	}
+	defer rc.close()
+	res, err := rc.do("EXISTS", cs.fastlaneRevokeKey(id))
+	if err != nil {
+		return false
+	}
+	n, _ := res.(int64)
+	return n > 0
+}
+
+// publishFastlaneRevoke records a revoked pass/session ID in Redis with TTL.
+func (cs *clusterSync) publishFastlaneRevoke(id string, ttl time.Duration) {
+	if cs == nil || id == "" {
+		return
+	}
+	secs := int64(ttl.Seconds())
+	if secs < 60 {
+		secs = 60
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		rc, err := cs.dial(ctx)
+		if err != nil {
+			return
+		}
+		defer rc.close()
+		_, _ = rc.do("SET", cs.fastlaneRevokeKey(id), "1", "EX", strconv.FormatInt(secs, 10))
+	}()
+}
+
+// claimFastlaneSettlement attempts an atomic Redis SET NX EX to prevent two
+// active-active edges from settling the identical payment fingerprint concurrently.
+// Fail-open on Redis error so local single-writer settlement never stalls.
+func (cs *clusterSync) claimFastlaneSettlement(fp string) (bool, error) {
+	if cs == nil || fp == "" {
+		return true, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	rc, err := cs.dial(ctx)
+	if err != nil {
+		return true, err
+	}
+	defer rc.close()
+	res, err := rc.do("SET", cs.fastlaneSettleKey(fp), cs.nodeID, "NX", "EX", "600")
+	if err != nil {
+		return true, err
+	}
+	s, ok := res.(string)
+	return ok && strings.EqualFold(s, "OK"), nil
+}

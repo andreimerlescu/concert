@@ -126,6 +126,8 @@ func (w *apiQueueWriter) Flush() {
 	w.ResponseWriter.Flush()
 }
 
+func (w *apiQueueWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 func (w *apiQueueWriter) translate(code int) (int, []byte) {
 	switch code {
 	case http.StatusOK:

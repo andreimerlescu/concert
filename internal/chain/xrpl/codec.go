@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"math/big"
 	"sort"
 	"strconv"
 	"strings"
@@ -48,11 +49,19 @@ var names = map[fieldID]string{
 	{tUInt16, 2}: "TransactionType", {tUInt32, 1}: "NetworkID", {tUInt32, 2}: "Flags",
 	{tUInt32, 3}: "SourceTag", {tUInt32, 4}: "Sequence", {tUInt32, 14}: "DestinationTag",
 	{tUInt32, 27}: "LastLedgerSequence", {tUInt32, 41}: "TicketSequence", {tHash256, 17}: "InvoiceID",
+	{tHash256, 26}: "DomainID", {tVector256, 10}: "CredentialIDs",
 	{tAmount, 1}: "Amount", {tAmount, 8}: "Fee", {tAmount, 9}: "SendMax", {tAmount, 10}: "DeliverMin",
 	{tBlob, 3}: "SigningPubKey", {tBlob, 4}: "TxnSignature", {tAccountID, 1}: "Account",
 	{tAccountID, 3}: "Destination", {tAccountID, 12}: "Delegate", {tSTArray, 3}: "Signers",
 	{tSTArray, 9}: "Memos", {tPathSet, 1}: "Paths",
 }
+
+var (
+	memoObjID    = fieldID{tSTObject, 10}
+	memoTypeID   = fieldID{tBlob, 12}
+	memoDataID   = fieldID{tBlob, 13}
+	memoFormatID = fieldID{tBlob, 14}
+)
 
 var ids = func() map[string]fieldID {
 	m := map[string]fieldID{}
@@ -62,10 +71,23 @@ var ids = func() map[string]fieldID {
 	return m
 }()
 
-// Amount is a serialized amount. Only native XRP carries Drops.
+// Amount is a serialized XRPL amount: either native XRP (Drops) or an issued
+// currency (IOU) with canonical 20-byte currency code, issuer AccountID, and
+// exact decimal Value.
 type Amount struct {
-	Native bool
-	Drops  uint64
+	Native        bool
+	Drops         uint64
+	Currency      string
+	CurrencyBytes [20]byte
+	Issuer        [20]byte
+	Value         string
+}
+
+// Memo is one decoded entry inside a transaction's Memos STArray.
+type Memo struct {
+	Type   []byte
+	Data   []byte
+	Format []byte
 }
 
 type field struct {
@@ -87,7 +109,291 @@ type Tx struct {
 	SigningPubKey   []byte
 	TxnSignature    []byte
 	Accounts        map[string][20]byte
+	Memos           []Memo
 	Present         map[string]bool
+}
+
+// HasMemoText reports whether any decoded Memo carries exact UTF-8 text in
+// MemoData (or case-insensitive hex matching text).
+func (t *Tx) HasMemoText(want string) bool {
+	if want == "" {
+		return false
+	}
+	for _, m := range t.Memos {
+		if string(m.Data) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// NormalizeCurrency converts a 3-char ISO code ("USD"), human ticker up to 20
+// ASCII bytes ("RLUSD"), or 40-char hex code into its canonical 20-byte XRPL
+// representation and canonical rippled JSON currency string.
+func NormalizeCurrency(code string) ([20]byte, string, error) {
+	var out [20]byte
+	code = strings.TrimSpace(code)
+	if code == "" || strings.EqualFold(code, "XRP") {
+		return out, "", errors.New("invalid IOU currency code")
+	}
+	if len(code) == 3 {
+		for i := 0; i < 3; i++ {
+			c := code[i]
+			if c < 0x21 || c > 0x7e {
+				return out, "", errors.New("invalid 3-character currency code")
+			}
+		}
+		copy(out[12:15], code)
+		return out, code, nil
+	}
+	if len(code) == 40 {
+		b, err := hex.DecodeString(code)
+		if err == nil && len(b) == 20 {
+			copy(out[:], b)
+			return out, formatCurrencyBytes(out), nil
+		}
+	}
+	if len(code) >= 4 && len(code) <= 20 {
+		for i := 0; i < len(code); i++ {
+			if code[i] < 0x20 || code[i] > 0x7e {
+				return out, "", errors.New("currency code must be printable ASCII or 40-char hex")
+			}
+		}
+		copy(out[:], code)
+		return out, formatCurrencyBytes(out), nil
+	}
+	return out, "", errors.New("currency code must be 3-20 ASCII chars or 40-char hex")
+}
+
+func formatCurrencyBytes(b [20]byte) string {
+	isStd := true
+	for i := 0; i < 12; i++ {
+		if b[i] != 0 {
+			isStd = false
+			break
+		}
+	}
+	if isStd {
+		for i := 15; i < 20; i++ {
+			if b[i] != 0 {
+				isStd = false
+				break
+			}
+		}
+	}
+	if isStd && b[12] >= 0x21 && b[12] <= 0x7e && b[13] >= 0x21 && b[13] <= 0x7e && b[14] >= 0x21 && b[14] <= 0x7e {
+		s := string(b[12:15])
+		if !strings.EqualFold(s, "XRP") {
+			return s
+		}
+	}
+	return strings.ToUpper(hex.EncodeToString(b[:]))
+}
+
+// ParseAsset parses "XRP" or "CURRENCY:ISSUER" (e.g. "RLUSD:rMxCKb...").
+func ParseAsset(asset string) (isNative bool, curBytes [20]byte, curCanonical string, issuer [20]byte, issuerAddr string, err error) {
+	asset = strings.TrimSpace(asset)
+	if asset == "XRP" {
+		return true, curBytes, "XRP", issuer, "", nil
+	}
+	curPart, issPart, ok := strings.Cut(asset, ":")
+	if !ok || curPart == "" || issPart == "" {
+		return false, curBytes, "", issuer, "", errors.New("XRPL asset must be XRP or CURRENCY:ISSUER")
+	}
+	curBytes, curCanonical, err = NormalizeCurrency(curPart)
+	if err != nil {
+		return false, curBytes, "", issuer, "", err
+	}
+	issuer, err = DecodeAddress(issPart)
+	if err != nil {
+		return false, curBytes, "", issuer, "", errors.New("invalid XRPL token issuer address")
+	}
+	return false, curBytes, curCanonical, issuer, issPart, nil
+}
+
+// CompareDecimal compares two non-negative decimal strings exactly using
+// rational arithmetic.
+func CompareDecimal(a, b string) (int, error) {
+	ra, ok := parseNonNegRat(a)
+	if !ok {
+		return 0, errors.New("invalid decimal amount: " + a)
+	}
+	rb, ok := parseNonNegRat(b)
+	if !ok {
+		return 0, errors.New("invalid decimal amount: " + b)
+	}
+	return ra.Cmp(rb), nil
+}
+
+func parseNonNegRat(s string) (*big.Rat, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.HasPrefix(s, "-") || strings.HasPrefix(s, "+") || strings.Contains(s, "/") {
+		return nil, false
+	}
+	r, ok := new(big.Rat).SetString(s)
+	if !ok || r.Sign() < 0 {
+		return nil, false
+	}
+	return r, true
+}
+
+// DecodeIOUAmount decodes a 48-byte XRPL serialized IOU amount.
+func DecodeIOUAmount(b []byte) (Amount, error) {
+	if len(b) != 48 {
+		return Amount{}, errors.New("IOU amount must be 48 bytes")
+	}
+	u := binary.BigEndian.Uint64(b[0:8])
+	if u&(uint64(1)<<63) == 0 {
+		return Amount{}, errors.New("not an IOU amount")
+	}
+	var cur [20]byte
+	var iss [20]byte
+	copy(cur[:], b[8:28])
+	copy(iss[:], b[28:48])
+	a := Amount{
+		Native:        false,
+		CurrencyBytes: cur,
+		Currency:      formatCurrencyBytes(cur),
+		Issuer:        iss,
+	}
+	if u == (uint64(1) << 63) {
+		a.Value = "0"
+		return a, nil
+	}
+	positive := u&(uint64(1)<<62) != 0
+	if !positive {
+		return Amount{}, errors.New("negative IOU amount")
+	}
+	expBits := int((u >> 54) & 0xff)
+	exp := expBits - 97
+	if exp < -96 || exp > 80 {
+		return Amount{}, errors.New("IOU exponent out of range")
+	}
+	mantissa := u & ((uint64(1) << 54) - 1)
+	if mantissa < 1000000000000000 || mantissa > 9999999999999999 {
+		return Amount{}, errors.New("non-canonical IOU mantissa")
+	}
+	digits := strconv.FormatUint(mantissa, 10)
+	for len(digits) > 1 && digits[len(digits)-1] == '0' {
+		digits = digits[:len(digits)-1]
+		exp++
+	}
+	if exp >= 0 {
+		a.Value = digits + strings.Repeat("0", exp)
+	} else {
+		pos := len(digits) + exp
+		if pos > 0 {
+			a.Value = digits[:pos] + "." + digits[pos:]
+		} else {
+			a.Value = "0." + strings.Repeat("0", -pos) + digits
+		}
+	}
+	return a, nil
+}
+
+// EncodeIOUAmount encodes a positive decimal string, currency, and issuer into
+// the canonical 48-byte XRPL IOU amount format.
+func EncodeIOUAmount(valueStr string, cur [20]byte, issuer [20]byte) ([]byte, error) {
+	valueStr = strings.TrimSpace(valueStr)
+	if valueStr == "" || strings.HasPrefix(valueStr, "-") || strings.HasPrefix(valueStr, "+") {
+		return nil, errors.New("IOU amount must be positive")
+	}
+	var exp int
+	baseStr := valueStr
+	if idx := strings.IndexAny(valueStr, "eE"); idx >= 0 {
+		e, err := strconv.Atoi(valueStr[idx+1:])
+		if err != nil {
+			return nil, errors.New("invalid exponent")
+		}
+		exp = e
+		baseStr = valueStr[:idx]
+	}
+	intPart, fracPart, hasDot := strings.Cut(baseStr, ".")
+	if hasDot && strings.Contains(fracPart, ".") {
+		return nil, errors.New("invalid decimal")
+	}
+	rawDigits := intPart + fracPart
+	if rawDigits == "" {
+		return nil, errors.New("empty amount")
+	}
+	for i := 0; i < len(rawDigits); i++ {
+		if rawDigits[i] < '0' || rawDigits[i] > '9' {
+			return nil, errors.New("non-digit in amount")
+		}
+	}
+	exp -= len(fracPart)
+	n, ok := new(big.Int).SetString(rawDigits, 10)
+	if !ok {
+		return nil, errors.New("invalid amount digits")
+	}
+	var out [48]byte
+	copy(out[8:28], cur[:])
+	copy(out[28:48], issuer[:])
+	if n.Sign() == 0 {
+		binary.BigEndian.PutUint64(out[0:8], uint64(1)<<63)
+		return out[:], nil
+	}
+	minM := big.NewInt(1000000000000000)
+	maxM := big.NewInt(9999999999999999)
+	ten := big.NewInt(10)
+	rem := new(big.Int)
+	for n.Cmp(minM) < 0 {
+		n.Mul(n, ten)
+		exp--
+	}
+	for n.Cmp(maxM) > 0 {
+		n.QuoRem(n, ten, rem)
+		if rem.Sign() != 0 {
+			return nil, errors.New("IOU amount exceeds 16 significant digits")
+		}
+		exp++
+	}
+	if exp < -96 || exp > 80 {
+		return nil, errors.New("IOU amount exponent out of range")
+	}
+	u := (uint64(1) << 63) | (uint64(1) << 62) | (uint64(exp+97) << 54) | n.Uint64()
+	binary.BigEndian.PutUint64(out[0:8], u)
+	return out[:], nil
+}
+
+func decodeMemos(raw []byte) ([]Memo, error) {
+	var out []Memo
+	i := 0
+	for i < len(raw) {
+		id, err := readHeader(raw, &i)
+		if err != nil {
+			return nil, err
+		}
+		val, err := readValue(raw, &i, id, 1)
+		if err != nil {
+			return nil, err
+		}
+		if id != memoObjID {
+			continue
+		}
+		var m Memo
+		j := 0
+		for j < len(val) {
+			fid, err := readHeader(val, &j)
+			if err != nil {
+				return nil, err
+			}
+			fval, err := readValue(val, &j, fid, 2)
+			if err != nil {
+				return nil, err
+			}
+			switch fid {
+			case memoTypeID:
+				m.Type = append([]byte(nil), fval...)
+			case memoDataID:
+				m.Data = append([]byte(nil), fval...)
+			case memoFormatID:
+				m.Format = append([]byte(nil), fval...)
+			}
+		}
+		out = append(out, m)
+	}
+	return out, nil
 }
 
 func (t *Tx) Has(name string) bool { return t.Present[name] }
@@ -322,15 +628,24 @@ func Decode(blobHex string) (*Tx, error) {
 		case tUInt32:
 			t.UInt32[name] = binary.BigEndian.Uint32(val)
 		case tHash256:
-			t.InvoiceID = val
+			if name == "InvoiceID" {
+				t.InvoiceID = val
+			}
 		case tAmount:
 			a := Amount{}
-			if len(val) == 8 {
+			switch len(val) {
+			case 8:
 				v := binary.BigEndian.Uint64(val)
 				if v&(1<<62) == 0 && v&^(1<<62) != 0 {
 					return nil, errors.New("negative XRP amount")
 				}
 				a = Amount{Native: true, Drops: v &^ (1 << 62)}
+			case 48:
+				var err error
+				a, err = DecodeIOUAmount(val)
+				if err != nil {
+					return nil, err
+				}
 			}
 			t.Amounts[name] = a
 		case tBlob:
@@ -344,6 +659,14 @@ func Decode(blobHex string) (*Tx, error) {
 				return nil, errors.New("invalid account")
 			}
 			t.Accounts[name] = [20]byte(val)
+		case tSTArray:
+			if name == "Memos" {
+				memos, err := decodeMemos(val)
+				if err != nil {
+					return nil, err
+				}
+				t.Memos = memos
+			}
 		}
 	}
 	return t, nil
@@ -411,13 +734,38 @@ func (t *Tx) JSON(skip ...string) map[string]any {
 		case tHash256:
 			out[name] = strings.ToUpper(hex.EncodeToString(f.val))
 		case tAmount:
-			if a := t.Amounts[name]; a.Native {
+			a := t.Amounts[name]
+			if a.Native {
 				out[name] = strconv.FormatUint(a.Drops, 10)
+			} else if a.Currency != "" {
+				out[name] = map[string]any{
+					"currency": a.Currency,
+					"issuer":   EncodeAccountID(a.Issuer),
+					"value":    a.Value,
+				}
 			}
 		case tBlob:
 			out[name] = strings.ToUpper(hex.EncodeToString(f.val))
 		case tAccountID:
 			out[name] = EncodeAccountID(t.Accounts[name])
+		case tSTArray:
+			if name == "Memos" && len(t.Memos) > 0 {
+				arr := make([]map[string]any, 0, len(t.Memos))
+				for _, m := range t.Memos {
+					entry := map[string]any{}
+					if len(m.Type) > 0 {
+						entry["MemoType"] = strings.ToUpper(hex.EncodeToString(m.Type))
+					}
+					if len(m.Data) > 0 {
+						entry["MemoData"] = strings.ToUpper(hex.EncodeToString(m.Data))
+					}
+					if len(m.Format) > 0 {
+						entry["MemoFormat"] = strings.ToUpper(hex.EncodeToString(m.Format))
+					}
+					arr = append(arr, map[string]any{"Memo": entry})
+				}
+				out[name] = arr
+			}
 		}
 	}
 	return out
@@ -439,6 +787,32 @@ func (b *Builder) U32(name string, v uint32) *Builder {
 
 func (b *Builder) Drops(name string, v uint64) *Builder {
 	b.fields[ids[name]] = binary.BigEndian.AppendUint64(nil, v|1<<62)
+	return b
+}
+
+// IOUAmount sets an issued-currency Amount field (48 bytes).
+func (b *Builder) IOUAmount(name string, encoded48 []byte) *Builder {
+	b.fields[ids[name]] = append([]byte(nil), encoded48...)
+	return b
+}
+
+// Memo sets a single-entry Memos STArray with MemoType and MemoData (UTF-8).
+func (b *Builder) Memo(memoType, memoData string) *Builder {
+	var buf bytes.Buffer
+	writeHeader(&buf, memoObjID)
+	if memoType != "" {
+		writeHeader(&buf, memoTypeID)
+		writeVL(&buf, len(memoType))
+		buf.WriteString(memoType)
+	}
+	if memoData != "" {
+		writeHeader(&buf, memoDataID)
+		writeVL(&buf, len(memoData))
+		buf.WriteString(memoData)
+	}
+	buf.WriteByte(0xe1) // end Memo STObject
+	buf.WriteByte(0xf1) // end Memos STArray
+	b.fields[ids["Memos"]] = buf.Bytes()
 	return b
 }
 

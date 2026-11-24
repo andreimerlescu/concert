@@ -1,0 +1,167 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 640" width="1200" height="640">
+  <defs>
+    <style>
+      .sans { font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+      .mono { font-family: 'SF Mono', 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    </style>
+    <marker id="arr-teal" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#0d9488"/>
+    </marker>
+    <marker id="arr-purple" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#8b5cf6"/>
+    </marker>
+    <marker id="arr-rose" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#d9468f"/>
+    </marker>
+  </defs>
+
+  <!-- Header -->
+  <rect x="28" y="18" width="272" height="28" rx="14" fill="#7c3aed"/>
+  <text x="164" y="36" text-anchor="middle" class="sans" font-size="11.5" font-weight="700" letter-spacing="1.0" fill="#ffffff">04 · FASTER WAITING ROOM CORE</text>
+  <text x="314" y="37" class="sans" font-size="14" font-weight="600" fill="#747c90">sema v1.3.0 + room v1.8.0 keep queue latency flat under massive spikes</text>
+  <rect x="1044" y="18" width="128" height="28" rx="14" fill="#8b5cf6" fill-opacity="0.12" stroke="#8b5cf6" stroke-width="1.5"/>
+  <text x="1108" y="36" text-anchor="middle" class="mono" font-size="11.5" font-weight="700" fill="#8b5cf6">concert v0.3.0</text>
+  <line x1="28" y1="60" x2="1172" y2="60" stroke="#747c90" stroke-opacity="0.25" stroke-width="1"/>
+
+  <!-- Left Panel: sema v1.3.0 -->
+  <rect x="28" y="78" width="528" height="442" rx="14" fill="#0d9488" fill-opacity="0.06" stroke="#0d9488" stroke-width="2"/>
+  <rect x="46" y="94" width="108" height="24" rx="12" fill="#0f766e"/>
+  <text x="100" y="110" text-anchor="middle" class="mono" font-size="11" font-weight="700" fill="#ffffff">sema v1.3.0</text>
+  <text x="166" y="111" class="sans" font-size="13" font-weight="700" fill="#0d9488">PrioritySemaphore &amp; Safe Shrink</text>
+
+  <!-- 4 Priority Tiers -->
+  <rect x="48" y="132" width="262" height="44" rx="9" fill="#d9468f" fill-opacity="0.11" stroke="#d9468f" stroke-width="1.6"/>
+  <rect x="58" y="143" width="118" height="22" rx="11" fill="#be185d"/>
+  <text x="117" y="158" text-anchor="middle" class="mono" font-size="10.2" font-weight="700" fill="#ffffff">PriorityCritical</text>
+  <text x="184" y="158" class="sans" font-size="11" font-weight="600" fill="#747c90">checkout / staff</text>
+
+  <rect x="48" y="186" width="262" height="44" rx="9" fill="#d97706" fill-opacity="0.11" stroke="#d97706" stroke-width="1.6"/>
+  <rect x="58" y="197" width="118" height="22" rx="11" fill="#b45309"/>
+  <text x="117" y="212" text-anchor="middle" class="mono" font-size="10.2" font-weight="700" fill="#ffffff">PriorityHigh</text>
+  <text x="184" y="212" class="sans" font-size="11" font-weight="600" fill="#747c90">lane-ranked / paid</text>
+
+  <rect x="48" y="240" width="262" height="44" rx="9" fill="#1a8cd8" fill-opacity="0.11" stroke="#1a8cd8" stroke-width="1.6"/>
+  <rect x="58" y="251" width="118" height="22" rx="11" fill="#0369a1"/>
+  <text x="117" y="266" text-anchor="middle" class="mono" font-size="10.2" font-weight="700" fill="#ffffff">PriorityNormal</text>
+  <text x="184" y="266" class="sans" font-size="11" font-weight="600" fill="#747c90">admitted visitors</text>
+
+  <rect x="48" y="294" width="262" height="44" rx="9" fill="#747c90" fill-opacity="0.10" stroke="#747c90" stroke-width="1.5"/>
+  <rect x="58" y="305" width="118" height="22" rx="11" fill="#52586b"/>
+  <text x="117" y="320" text-anchor="middle" class="mono" font-size="10.2" font-weight="700" fill="#ffffff">PriorityLow</text>
+  <text x="184" y="320" class="sans" font-size="11" font-weight="600" fill="#747c90">public assets</text>
+
+  <!-- Tier arrows to Bitmask Dispatcher -->
+  <line x1="310" y1="154" x2="348" y2="194" stroke="#0d9488" stroke-width="1.8" marker-end="url(#arr-teal)"/>
+  <line x1="310" y1="208" x2="348" y2="218" stroke="#0d9488" stroke-width="1.8" marker-end="url(#arr-teal)"/>
+  <line x1="310" y1="262" x2="348" y2="246" stroke="#0d9488" stroke-width="1.8" marker-end="url(#arr-teal)"/>
+  <line x1="310" y1="316" x2="348" y2="274" stroke="#0d9488" stroke-width="1.8" marker-end="url(#arr-teal)"/>
+
+  <!-- O(1) Bitmask Dispatch Box -->
+  <rect x="352" y="152" width="186" height="164" rx="12" fill="#0d9488" fill-opacity="0.12" stroke="#0d9488" stroke-width="1.75"/>
+  <rect x="362" y="166" width="166" height="22" rx="11" fill="#0f766e"/>
+  <text x="445" y="181" text-anchor="middle" class="mono" font-size="10.2" font-weight="700" fill="#ffffff">O(1) BITMASK DISPATCH</text>
+  <text x="445" y="210" text-anchor="middle" class="sans" font-size="11.5" font-weight="600" fill="#747c90">Strict FIFO inside</text>
+  <text x="445" y="227" text-anchor="middle" class="sans" font-size="11.5" font-weight="600" fill="#747c90">every priority tier</text>
+  <line x1="370" y1="244" x2="520" y2="244" stroke="#0d9488" stroke-opacity="0.3" stroke-width="1"/>
+  <text x="445" y="266" text-anchor="middle" class="sans" font-size="11" font-weight="600" fill="#0d9488">100% Semaphore</text>
+  <text x="445" y="282" text-anchor="middle" class="sans" font-size="11" font-weight="600" fill="#0d9488">backward-compatible</text>
+  <text x="445" y="302" text-anchor="middle" class="mono" font-size="10" fill="#747c90">0-alloc uncontended</text>
+
+  <!-- Bottom 2 cards in sema panel -->
+  <rect x="48" y="356" width="236" height="146" rx="11" fill="#8b5cf6" fill-opacity="0.09" stroke="#8b5cf6" stroke-width="1.5"/>
+  <rect x="62" y="370" width="166" height="22" rx="11" fill="#7c3aed"/>
+  <text x="145" y="385" text-anchor="middle" class="mono" font-size="10.3" font-weight="700" fill="#ffffff">Non-Draining SetCap</text>
+  <text x="64" y="414" class="sans" font-size="11.5" font-weight="600" fill="#747c90">Shrinking capacity keeps</text>
+  <text x="64" y="432" class="sans" font-size="11.5" font-weight="600" fill="#747c90">in-flight occupancy intact.</text>
+  <text x="64" y="454" class="sans" font-size="11.5" font-weight="600" fill="#747c90">Zero over-admission until</text>
+  <text x="64" y="472" class="sans" font-size="11.5" font-weight="600" fill="#747c90">active slots drain below cap.</text>
+  <text x="64" y="492" class="mono" font-size="10" fill="#8b5cf6">cap_draining gauge</text>
+
+  <rect x="298" y="356" width="240" height="146" rx="11" fill="#1a8cd8" fill-opacity="0.09" stroke="#1a8cd8" stroke-width="1.5"/>
+  <rect x="312" y="370" width="194" height="22" rx="11" fill="#0369a1"/>
+  <text x="409" y="385" text-anchor="middle" class="mono" font-size="10.2" font-weight="700" fill="#ffffff">HighestWaitingPriority()</text>
+  <text x="314" y="414" class="sans" font-size="11.5" font-weight="600" fill="#747c90">Lock-free O(1) atomic</text>
+  <text x="314" y="432" class="sans" font-size="11.5" font-weight="600" fill="#747c90">contention snapshot.</text>
+  <text x="314" y="454" class="sans" font-size="11.5" font-weight="600" fill="#747c90">Surfaces live tier pressure</text>
+  <text x="314" y="472" class="sans" font-size="11.5" font-weight="600" fill="#747c90">without taking the mutex.</text>
+  <text x="314" y="492" class="mono" font-size="10" fill="#1a8cd8">assets_waiting_priority</text>
+
+  <!-- Bridge Arrow sema -> room -->
+  <line x1="556" y1="296" x2="610" y2="296" stroke="#8b5cf6" stroke-width="2.5" marker-end="url(#arr-purple)"/>
+  <rect x="558" y="264" width="54" height="22" rx="11" fill="#252136"/>
+  <text x="585" y="279" text-anchor="middle" class="mono" font-size="10" font-weight="600" fill="#ddd6fe">drives</text>
+
+  <!-- Right Panel: room v1.8.0 -->
+  <rect x="614" y="78" width="558" height="442" rx="14" fill="#8b5cf6" fill-opacity="0.06" stroke="#8b5cf6" stroke-width="2"/>
+  <rect x="632" y="94" width="108" height="24" rx="12" fill="#7c3aed"/>
+  <text x="686" y="110" text-anchor="middle" class="mono" font-size="11" font-weight="700" fill="#ffffff">room v1.8.0</text>
+  <text x="752" y="111" class="sans" font-size="13" font-weight="700" fill="#8b5cf6">Treap Queue, Parallel Polls &amp; Ed25519</text>
+
+  <!-- Top 2 cards in room panel -->
+  <rect x="634" y="132" width="252" height="114" rx="11" fill="#1a8cd8" fill-opacity="0.10" stroke="#1a8cd8" stroke-width="1.5"/>
+  <rect x="648" y="145" width="164" height="22" rx="11" fill="#0369a1"/>
+  <text x="730" y="160" text-anchor="middle" class="mono" font-size="10.5" font-weight="700" fill="#ffffff">O(log N) Treap Store</text>
+  <text x="650" y="188" class="sans" font-size="11.5" font-weight="600" fill="#747c90">Replaces O(N) linear scans for</text>
+  <text x="650" y="206" class="sans" font-size="11.5" font-weight="600" fill="#747c90">Enter, Position, SetTicketRank,</text>
+  <text x="650" y="224" class="sans" font-size="11.5" font-weight="600" fill="#747c90">Queue(limit), and ghost ledger.</text>
+
+  <rect x="900" y="132" width="252" height="114" rx="11" fill="#0d9488" fill-opacity="0.10" stroke="#0d9488" stroke-width="1.5"/>
+  <rect x="914" y="145" width="174" height="22" rx="11" fill="#0f766e"/>
+  <text x="1001" y="160" text-anchor="middle" class="mono" font-size="10.5" font-weight="700" fill="#ffffff">Parallel RLock Polling</text>
+  <text x="916" y="188" class="sans" font-size="11.5" font-weight="600" fill="#747c90">Status checks on /queue/status</text>
+  <text x="916" y="206" class="sans" font-size="11.5" font-weight="600" fill="#747c90">execute concurrently under RLock</text>
+  <text x="916" y="224" class="sans" font-size="11.5" font-weight="600" fill="#747c90">instead of serializing on a write lock.</text>
+
+  <!-- Middle wide card: Reaping & Compaction -->
+  <rect x="634" y="260" width="518" height="86" rx="11" fill="#d97706" fill-opacity="0.10" stroke="#d97706" stroke-width="1.5"/>
+  <rect x="648" y="273" width="280" height="22" rx="11" fill="#b45309"/>
+  <text x="788" y="288" text-anchor="middle" class="mono" font-size="10.5" font-weight="700" fill="#ffffff">Lazy Min-Heap Reaping &amp; Compaction</text>
+  <text x="650" y="315" class="sans" font-size="11.5" font-weight="600" fill="#747c90">• Instant runtime SetTokenTTL / SetFirstPollGrace updates with zero stall</text>
+  <text x="650" y="334" class="sans" font-size="11.5" font-weight="600" fill="#747c90">• Automatic low-water map &amp; heap compaction reclaims memory after spikes</text>
+
+  <!-- Bottom wide card: Stateless Ed25519 Split Mode -->
+  <rect x="634" y="360" width="518" height="142" rx="11" fill="#d9468f" fill-opacity="0.09" stroke="#d9468f" stroke-width="1.6"/>
+  <rect x="648" y="373" width="276" height="22" rx="11" fill="#be185d"/>
+  <text x="786" y="388" text-anchor="middle" class="mono" font-size="10.5" font-weight="700" fill="#ffffff">Stateless Ed25519 Split Mode (Zero Redis)</text>
+
+  <!-- Mini 3-step pipeline inside Ed25519 box -->
+  <rect x="650" y="408" width="142" height="78" rx="9" fill="#252136"/>
+  <text x="721" y="431" text-anchor="middle" class="mono" font-size="11" font-weight="700" fill="#f9a8d4">rm1 Pass / Lease</text>
+  <text x="721" y="451" text-anchor="middle" class="sans" font-size="10.5" fill="#cbd5e1">X-Room-Pass / Lease</text>
+  <text x="721" y="468" text-anchor="middle" class="sans" font-size="10.5" fill="#cbd5e1">Stripped before origin</text>
+
+  <line x1="792" y1="447" x2="818" y2="447" stroke="#d9468f" stroke-width="2" marker-end="url(#arr-rose)"/>
+
+  <rect x="822" y="408" width="152" height="78" rx="9" fill="#0d9488" fill-opacity="0.12" stroke="#0d9488" stroke-width="1.4"/>
+  <text x="898" y="431" text-anchor="middle" class="sans" font-size="11.5" font-weight="700" fill="#0d9488">Verify-Only Node</text>
+  <text x="898" y="450" text-anchor="middle" class="sans" font-size="10.5" fill="#747c90">Public keys only</text>
+  <text x="898" y="468" text-anchor="middle" class="sans" font-size="10.5" fill="#747c90">Fail-closed Validate()</text>
+
+  <line x1="974" y1="447" x2="1000" y2="447" stroke="#d9468f" stroke-width="2" marker-end="url(#arr-rose)"/>
+
+  <rect x="1004" y="408" width="132" height="78" rx="9" fill="#d9468f" fill-opacity="0.12" stroke="#d9468f" stroke-width="1.4"/>
+  <text x="1070" y="431" text-anchor="middle" class="mono" font-size="10" font-weight="700" fill="#d9468f">TokenRejected</text>
+  <text x="1070" y="450" text-anchor="middle" class="sans" font-size="10.5" fill="#747c90">Tamper → strike</text>
+  <text x="1070" y="468" text-anchor="middle" class="sans" font-size="10.5" fill="#747c90">Expiry → no strike</text>
+
+  <!-- Bottom Outcome Banner -->
+  <rect x="28" y="538" width="1144" height="74" rx="14" fill="#8b5cf6" fill-opacity="0.08" stroke="#8b5cf6" stroke-width="1.75"/>
+  <rect x="46" y="563" width="166" height="24" rx="12" fill="#7c3aed"/>
+  <text x="129" y="579" text-anchor="middle" class="sans" font-size="10.5" font-weight="700" letter-spacing="0.9" fill="#ffffff">SPIKE PERFORMANCE</text>
+
+  <rect x="228" y="553" width="218" height="44" rx="10" fill="#252136"/>
+  <text x="337" y="572" text-anchor="middle" class="mono" font-size="11" font-weight="700" fill="#99f6e4">O(N) scans → O(log N)</text>
+  <text x="337" y="588" text-anchor="middle" class="sans" font-size="10.2" fill="#cbd5e1">Treap token &amp; rank lookup</text>
+
+  <rect x="460" y="553" width="232" height="44" rx="10" fill="#252136"/>
+  <text x="576" y="572" text-anchor="middle" class="mono" font-size="11" font-weight="700" fill="#7dd3fc">Write lock → Parallel RLock</text>
+  <text x="576" y="588" text-anchor="middle" class="sans" font-size="10.2" fill="#cbd5e1">Non-blocking status polling</text>
+
+  <rect x="706" y="553" width="222" height="44" rx="10" fill="#252136"/>
+  <text x="817" y="572" text-anchor="middle" class="mono" font-size="11" font-weight="700" fill="#f9a8d4">Redis RTT → Local Ed25519</text>
+  <text x="817" y="588" text-anchor="middle" class="sans" font-size="10.2" fill="#cbd5e1">Zero-hop pass verification</text>
+
+  <rect x="942" y="553" width="212" height="44" rx="10" fill="#0f766e"/>
+  <text x="1048" y="572" text-anchor="middle" class="sans" font-size="12" font-weight="700" fill="#ffffff">Flat Queue Latency</text>
+  <text x="1048" y="588" text-anchor="middle" class="sans" font-size="10.5" fill="#ccfbf1">Under viral traffic bursts</text>
+</svg>

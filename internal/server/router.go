@@ -223,11 +223,24 @@ func (g *generation) gated(c *gin.Context) {
 }
 
 // proxyForward marks the request as admitted, picks its upstream, attaches
-// an edge's claim and hands it to the proxy.
+// the resolved client IP, body read deadlines (for non-stream requests), and
+// an edge's claim, and hands it to the proxy.
 func (g *generation) proxyForward(c *gin.Context) {
 	c.Set(ctxAdmitted, true)
 	req := selectBackendForRequest(c.Request, g.upstreams)
 	req = g.edgeClaim(c, req)
+	if hopIP, ok := hopInClientIP(req.Context()); ok {
+		req = withFastCGIClientIP(req, hopIP.String())
+	} else if ip := clientIPFrom(c); ip.IsValid() {
+		req = withFastCGIClientIP(req, ip.String())
+	}
+	if !c.GetBool(ctxIsStream) && req.Body != nil && req.Body != http.NoBody && req.ContentLength != 0 {
+		db := newDeadlineBody(c.Writer, req.Body, g.cfg.bodyReadIdleTimeout, g.cfg.maxUploadTime)
+		defer db.Finish()
+		r2 := req.Clone(req.Context())
+		r2.Body = db
+		req = withFastCGIBodyAbort(r2, db.Abort)
+	}
 	g.proxy.ServeHTTP(c.Writer, req)
 }
 

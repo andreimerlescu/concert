@@ -86,8 +86,12 @@ func (s *Scheme) envelope(p x402.Payload, r x402.Requirements) string {
 		return "invalid_exact_xrpl_invoice_mismatch"
 	case !extraEqual(a, r, "destinationTag"):
 		return "invalid_exact_xrpl_destination_tag_mismatch"
-	case r.Asset != "XRP":
-		return "invalid_exact_xrpl_asset_unsupported" // Concert settles native XRP only
+	case !extraEqual(a, r, "memo"):
+		return "invalid_exact_xrpl_memo_mismatch"
+	default:
+		if _, _, _, _, _, err := ParseAsset(r.Asset); err != nil {
+			return "invalid_exact_xrpl_asset_unsupported"
+		}
 	}
 	return ""
 }
@@ -163,13 +167,30 @@ func (s *Scheme) structure(t *Tx, r x402.Requirements) string {
 	if id > 1024 && nid != id {
 		return "invalid_exact_xrpl_payload_network_id_mismatch"
 	}
-	amt, ok := t.Amounts["Amount"]
-	if !ok || !amt.Native {
-		return "invalid_exact_xrpl_payload_amount_xrp"
+	isNative, wantCurBytes, _, wantIssuer, _, assetErr := ParseAsset(r.Asset)
+	if assetErr != nil {
+		return "invalid_exact_xrpl_asset_unsupported"
 	}
-	want, ok := new(big.Int).SetString(r.Amount, 10)
-	if !ok || new(big.Int).SetUint64(amt.Drops).Cmp(want) != 0 {
-		return "invalid_exact_xrpl_payload_amount_mismatch"
+	amt, ok := t.Amounts["Amount"]
+	if isNative {
+		if !ok || !amt.Native {
+			return "invalid_exact_xrpl_payload_amount_xrp"
+		}
+		want, ok := new(big.Int).SetString(r.Amount, 10)
+		if !ok || new(big.Int).SetUint64(amt.Drops).Cmp(want) != 0 {
+			return "invalid_exact_xrpl_payload_amount_mismatch"
+		}
+	} else {
+		if !ok || amt.Native || amt.CurrencyBytes != wantCurBytes || amt.Issuer != wantIssuer {
+			return "invalid_exact_xrpl_payload_asset_mismatch"
+		}
+		wantDec, err := ExpectedIOUValue(r)
+		if err != nil {
+			return "invalid_exact_xrpl_payload_amount_mismatch"
+		}
+		if cmp, err := CompareDecimal(amt.Value, wantDec); err != nil || cmp != 0 {
+			return "invalid_exact_xrpl_payload_amount_mismatch"
+		}
 	}
 	if t.Has("SendMax") {
 		return "invalid_exact_xrpl_payload_sendmax_not_allowed"
@@ -183,7 +204,13 @@ func (s *Scheme) structure(t *Tx, r x402.Requirements) string {
 	if f, _ := t.U32("Flags"); f&tfPartialPayment != 0 {
 		return "invalid_exact_xrpl_payload_partial_payment_not_allowed"
 	}
-	if t.Has("Memos") {
+	wantMemo, hasMemoReq := extraString(r, "memo")
+	allowMemos, _ := r.Extra["allowMemos"].(bool)
+	if hasMemoReq && wantMemo != "" {
+		if !t.HasMemoText(wantMemo) {
+			return "invalid_exact_xrpl_payload_memo_mismatch"
+		}
+	} else if t.Has("Memos") && !allowMemos {
 		return "invalid_exact_xrpl_payload_memos_not_allowed"
 	}
 	if raw, ok := r.Extra["invoiceId"]; ok {
@@ -402,6 +429,77 @@ func (s *Scheme) Settle(ctx context.Context, p x402.Payload, r x402.Requirements
 		if res.Result != "tesSUCCESS" {
 			return fail(hash, "transaction_failed: "+res.Result)
 		}
+		if res.DeliveredDrops != "" || res.DeliveredValue != "" {
+			if !deliveredMatches(res.DeliveredDrops, res.DeliveredCurrency, res.DeliveredIssuer, res.DeliveredValue, r) {
+				return fail(hash, "transaction_failed: delivered_amount_mismatch")
+			}
+		}
 		return x402.SettleResponse{Success: true, Transaction: hash, Network: r.Network, Payer: payer}, nil
 	}
+}
+
+// ExpectedIOUValue resolves the exact decimal amount expected for an XRPL IOU
+// offer: either r.Amount directly as a decimal string ("0.99") or scaled down
+// by extra.assetDecimals when provided as atomic integer units.
+func ExpectedIOUValue(r x402.Requirements) (string, error) {
+	if decRaw, ok := r.Extra["decimalAmount"].(string); ok && strings.TrimSpace(decRaw) != "" {
+		if _, ok := parseNonNegRat(decRaw); ok {
+			return strings.TrimSpace(decRaw), nil
+		}
+	}
+	if !strings.Contains(r.Amount, ".") {
+		if decs, ok := numericInt(r.Extra["assetDecimals"]); ok && decs > 0 && decs <= 15 {
+			n, ok := new(big.Int).SetString(r.Amount, 10)
+			if !ok || n.Sign() <= 0 {
+				return "", errors.New("invalid atomic amount")
+			}
+			den := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decs)), nil)
+			rat := new(big.Rat).SetFrac(n, den)
+			s := rat.FloatString(decs)
+			s = strings.TrimRight(strings.TrimRight(s, "0"), ".")
+			return s, nil
+		}
+	}
+	if _, ok := parseNonNegRat(r.Amount); !ok {
+		return "", errors.New("invalid decimal IOU amount")
+	}
+	return strings.TrimSpace(r.Amount), nil
+}
+
+func numericInt(v any) (int, bool) {
+	switch n := v.(type) {
+	case float64:
+		if n == math.Trunc(n) {
+			return int(n), true
+		}
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return int(i), true
+		}
+	}
+	return 0, false
+}
+
+func deliveredMatches(drops, cur, iss, val string, r x402.Requirements) bool {
+	isNative, wantCurBytes, _, _, wantIssuerAddr, err := ParseAsset(r.Asset)
+	if err != nil {
+		return false
+	}
+	if isNative {
+		return drops == r.Amount
+	}
+	gotCurBytes, _, err := NormalizeCurrency(cur)
+	if err != nil || gotCurBytes != wantCurBytes || iss != wantIssuerAddr {
+		return false
+	}
+	wantDec, err := ExpectedIOUValue(r)
+	if err != nil {
+		return false
+	}
+	cmp, err := CompareDecimal(val, wantDec)
+	return err == nil && cmp == 0
 }

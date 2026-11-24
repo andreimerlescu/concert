@@ -140,6 +140,12 @@ func (c *config) normalizeTopology() error {
 	if c.hopMaxSkew < time.Second || c.hopMaxSkew > 5*time.Minute {
 		return fmt.Errorf("invalid -hop-max-skew %s: must be between 1s and 5m", c.hopMaxSkew)
 	}
+	if c.hopReplayMax == 0 {
+		c.hopReplayMax = hop.DefaultReplayMax
+	}
+	if c.hopReplayMax < hop.MinReplayMax || c.hopReplayMax > hop.MaxReplayMax {
+		return fmt.Errorf("invalid -hop-replay-max %d: must be between %d and %d", c.hopReplayMax, hop.MinReplayMax, hop.MaxReplayMax)
+	}
 	if c.hopWait < 0 || c.hopWait > 30*time.Second {
 		return fmt.Errorf("invalid -hop-wait %s: must be between 0s and 30s", c.hopWait)
 	}
@@ -238,6 +244,23 @@ func newTopology(cfg config) (*topology, error) {
 		t.edge = newEdgeState(cfg)
 	case roleLeaf:
 		t.leaf = newLeafState(cfg)
+		leaf := t.leaf
+		maxEntries := cfg.hopReplayMax
+		hardened := cfg.hardened
+		t.verifier.SetReplayOptions(maxEntries, hardened, func() {
+			total := leaf.replayEvictions.Add(1)
+			nowNs := time.Now().UnixNano()
+			prev := leaf.replayWarnAt.Load()
+			if prev == 0 || nowNs-prev >= int64(30*time.Second) {
+				if leaf.replayWarnAt.CompareAndSwap(prev, nowNs) {
+					if hardened {
+						log.Printf("hop: replay cache saturated (max=%d, total=%d); hardened mode rejecting new claims rather than evicting unexpired nonces — raise -hop-replay-max", maxEntries, total)
+					} else {
+						log.Printf("hop: replay cache saturated (max=%d, evictions=%d); evicting unexpired nonces — raise -hop-replay-max", maxEntries, total)
+					}
+				}
+			}
+		})
 	}
 	return t, nil
 }
@@ -329,7 +352,9 @@ func (g *generation) identifyHop(c *gin.Context, ip netip.Addr) netip.Addr {
 		if errors.Is(err, hop.ErrReplay) {
 			t.leaf.replayed.Add(1)
 		}
-		if t.leaf.rejectLog.Add(1) <= 20 {
+		// Saturation already logs a dedicated rate-limited warning via onEvict;
+		// degrade gracefully to direct handling without awarding an abuse strike.
+		if !errors.Is(err, hop.ErrReplaySaturated) && t.leaf.rejectLog.Add(1) <= 20 {
 			log.Printf("hop: rejected claim from %s for %s %s: %v", peer, r.Method, clip(r.URL.Path, 128), err)
 		}
 		return ip
@@ -380,14 +405,16 @@ type leafState struct {
 
 	bans banMirror
 
-	accepted       atomic.Int64 // verified hop requests
-	rejected       atomic.Int64 // claims refused (bad signature, skew, peer, replay, mTLS)
-	replayed       atomic.Int64 // claims refused specifically as replayed single-use nonces
-	mtlsRejected   atomic.Int64 // claims refused due to missing verified mTLS client cert
-	backpressed    atomic.Int64 // hop requests refused for capacity
-	rebenchTotal   atomic.Int64 // completed drained re-benchmarks
-	rebenchmarking atomic.Bool  // true while drained for on-demand re-benchmark
-	rejectLog      atomic.Int64
+	accepted        atomic.Int64 // verified hop requests
+	rejected        atomic.Int64 // claims refused (bad signature, skew, peer, replay, mTLS, saturation)
+	replayed        atomic.Int64 // claims refused specifically as replayed single-use nonces
+	replayEvictions atomic.Int64 // unexpired nonce evictions (or fail-closed saturations in hardened mode)
+	replayWarnAt    atomic.Int64 // unix nanos of last rate-limited replay saturation warning
+	mtlsRejected    atomic.Int64 // claims refused due to missing verified mTLS client cert
+	backpressed     atomic.Int64 // hop requests refused for capacity
+	rebenchTotal    atomic.Int64 // completed drained re-benchmarks
+	rebenchmarking  atomic.Bool  // true while drained for on-demand re-benchmark
+	rejectLog       atomic.Int64
 
 	monitor silenceMonitor
 }
@@ -584,6 +611,7 @@ func (g *generation) hopFastPath(c *gin.Context) {
 		}
 		defer func() { _ = g.streams.sem.Release() }()
 		g.a.stats.streamServed.Add(1)
+		c.Set(ctxIsStream, true)
 	case hop.ClassBypass:
 	default:
 		c.AbortWithStatus(http.StatusBadRequest)

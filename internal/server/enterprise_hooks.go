@@ -16,6 +16,7 @@ import (
 
 	"github.com/andreimerlescu/concert/internal/capacity"
 	"github.com/andreimerlescu/concert/internal/fastlane"
+	"github.com/andreimerlescu/concert/internal/gateway"
 	"github.com/andreimerlescu/concert/internal/hop"
 	"github.com/andreimerlescu/concert/internal/mailer"
 	"github.com/andreimerlescu/room"
@@ -33,6 +34,7 @@ func init() {
 // enterpriseAppState holds the enterprise-only subsystems embedded in app.
 type enterpriseAppState struct {
 	fastlane     *fastlane.Service
+	fastlaneGW   fastlane.Gateway
 	gatewayClose func()
 	audit        *auditLogger
 	cluster      *clusterSync
@@ -123,6 +125,9 @@ func (c *config) validateHardened() error {
 	if c.portal.enabled() && c.portal.tlsCert == "" && !c.portal.secureCookie && len(c.portal.trustedProxies) == 0 {
 		errs = append(errs, "admin portal requires -portal-tls-cert/-portal-tls-key or -portal-secure-cookie behind a trusted TLS proxy")
 	}
+	if c.portal.users != nil && c.portal.users.count() > 0 && c.portal.pass != "" {
+		errs = append(errs, "CONCERT_PORTAL_PASS must not be set alongside CONCERT_PORTAL_USERS in enterprise-hardened mode")
+	}
 	if c.role == roleLeaf && (!c.hopReplayGuard || !c.hopRequireNonce) {
 		errs = append(errs, "leaf nodes require -hop-replay-guard=true and -hop-require-nonce=true in enterprise-hardened mode")
 	}
@@ -146,12 +151,15 @@ func (a *app) initEnterpriseEarly(cfg config) error {
 }
 
 func (a *app) initEnterpriseFastlane(cfg config, wr *room.WaitingRoom) error {
-	if cfg.fastlaneFile == "" {
+	if cfg.fastlaneFile == "" || cfg.skipFastlaneInit {
 		return nil
 	}
 	fc, err := fastlane.Load(cfg.fastlaneFile)
 	if err == nil && fc.Enabled && cfg.admitSecretGenerated {
 		err = fmt.Errorf("fast lane requires a stable CONCERT_ADMIT_SECRET")
+	}
+	if err == nil && fc.Enabled && cfg.hardened && !fc.TestMode && fc.EffectivePolicyMode() == fastlane.PolicyModeNone && !fc.AllowUnscreenedMainnet {
+		err = fmt.Errorf("policy_mode \"none\" on mainnet is refused in -enterprise-hardened mode unless allow_unscreened_mainnet is true")
 	}
 	var gw fastlane.Gateway
 	if err == nil && fc.Enabled {
@@ -162,51 +170,127 @@ func (a *app) initEnterpriseFastlane(cfg config, wr *room.WaitingRoom) error {
 		if err != nil {
 			closeGateway(gw)
 		} else if gw != nil {
+			a.fastlaneGW = gw
 			a.gatewayClose = func() { closeGateway(gw) }
 		}
 	}
 	if err != nil {
 		return fmt.Errorf("fast lane: %w", err)
 	}
-	if a.fastlane != nil {
+	a.attachFastlaneCallbacks(cfg, wr)
+	return nil
+}
+
+func (a *app) attachFastlaneCallbacks(cfg config, wr *room.WaitingRoom) {
+	if a.fastlane == nil {
+		return
+	}
+	if len(cfg.admitSecretPrev) > 0 {
+		a.fastlane.SetPrevKey(cfg.admitSecretPrev)
+	}
+	if wr != nil {
 		wr.SetStatusBaseURL(a.fastlane.Config().Origin + "/queue/status/")
-		a.agentOffer = newAgentOffer(a.fastlane)
-		a.fastlane.SetOnUnknown(func(network, session string) {
-			prefix := session
-			if len(prefix) > 8 {
-				prefix = prefix[:8]
-			}
-			a.notifyEvent(mailer.Event{
-				Category:    mailer.CatFastlane,
-				Severity:    mailer.SevCritical,
-				Title:       "Unresolved fast-lane payment settlement",
-				Summary:     fmt.Sprintf("A payment on network %s entered state \"unknown\" and requires reconciliation.", network),
-				Fingerprint: "fastlane:unknown:" + network,
-				Details:     map[string]string{"network": network, "session_prefix": prefix},
-			})
+	}
+	a.agentOffer.Store(newAgentOffer(a.fastlane))
+	a.fastlane.SetOnUnknown(func(network, session string) {
+		prefix := session
+		if len(prefix) > 8 {
+			prefix = prefix[:8]
+		}
+		a.notifyEvent(mailer.Event{
+			Category:    mailer.CatFastlane,
+			Severity:    mailer.SevCritical,
+			Title:       "Unresolved fast-lane payment settlement",
+			Summary:     fmt.Sprintf("A payment on network %s entered state \"unknown\" and requires reconciliation.", network),
+			Fingerprint: "fastlane:unknown:" + network,
+			Details:     map[string]string{"network": network, "session_prefix": prefix},
 		})
-		a.fastlane.SetOnCapacityWarn(func(used, max, pct int) {
-			sev := mailer.SevWarn
-			tier := "80"
-			if pct >= 95 {
-				sev = mailer.SevCritical
-				tier = "95"
-			}
-			a.notifyEvent(mailer.Event{
-				Category:    mailer.CatFastlane,
-				Severity:    sev,
-				Title:       fmt.Sprintf("Fast-lane receipt journal at %d%% capacity", pct),
-				Summary:     fmt.Sprintf("Fast-lane journal holds %d of %d records (%d%%). Schedule an offline archival window with `econcert archive-receipts` before reaching 100%%.", used, max, pct),
-				Fingerprint: "fastlane:capacity:" + tier,
-				Details: map[string]string{
-					"records_used": fmt.Sprintf("%d", used),
-					"max_records":  fmt.Sprintf("%d", max),
-					"usage_pct":    fmt.Sprintf("%d", pct),
-				},
-			})
+	})
+	a.fastlane.SetOnCapacityWarn(func(used, max, pct int) {
+		sev := mailer.SevWarn
+		tier := "80"
+		if pct >= 95 {
+			sev = mailer.SevCritical
+			tier = "95"
+		}
+		a.notifyEvent(mailer.Event{
+			Category:    mailer.CatFastlane,
+			Severity:    sev,
+			Title:       fmt.Sprintf("Fast-lane receipt journal at %d%% capacity", pct),
+			Summary:     fmt.Sprintf("Fast-lane journal holds %d of %d records (%d%%). Compact expired receipts live in the Admin Portal or with `econcert archive-receipts` before reaching 100%%.", used, max, pct),
+			Fingerprint: "fastlane:capacity:" + tier,
+			Details: map[string]string{
+				"records_used": fmt.Sprintf("%d", used),
+				"max_records":  fmt.Sprintf("%d", max),
+				"usage_pct":    fmt.Sprintf("%d", pct),
+			},
 		})
+	})
+}
+
+func validateFastlaneReloadConfig(cfg config) error {
+	if cfg.fastlaneFile == "" {
+		return nil
+	}
+	fc, err := fastlane.Load(cfg.fastlaneFile)
+	if err != nil {
+		return err
+	}
+	if fc.Enabled && cfg.hardened && !fc.TestMode && fc.EffectivePolicyMode() == fastlane.PolicyModeNone && !fc.AllowUnscreenedMainnet {
+		return errors.New("policy_mode \"none\" on mainnet is refused in -enterprise-hardened mode unless allow_unscreened_mainnet is true")
+	}
+	if fc.Enabled && cfg.networksFile != "" {
+		if _, err := gateway.LoadNetworks(cfg.networksFile); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// transferFastlaneFrom hot-reloads prev's live fast-lane service and gateway
+// from disk and hands ownership to a without releasing journal locks.
+func (a *app) transferFastlaneFrom(prev *app, cfg config) error {
+	if prev == nil || prev.fastlane == nil {
+		return nil
+	}
+	fc, err := fastlane.Load(cfg.fastlaneFile)
+	if err != nil {
+		return err
+	}
+	var nets map[string]gateway.Network
+	if cfg.networksFile != "" {
+		if nets, err = gateway.LoadNetworks(cfg.networksFile); err != nil {
+			return err
+		}
+	}
+	if gwSrv, ok := prev.fastlaneGW.(*gateway.Server); ok {
+		if err := gwSrv.Reload(fc, nets); err != nil {
+			return err
+		}
+	}
+	if err := prev.fastlane.UpdateConfig(fc); err != nil {
+		return err
+	}
+	// Hand ownership cleanly to a so prev.Close() does not close transferred journals.
+	a.fastlane = prev.fastlane
+	a.fastlaneGW = prev.fastlaneGW
+	a.gatewayClose = prev.gatewayClose
+	prev.fastlane = nil
+	prev.fastlaneGW = nil
+	prev.gatewayClose = nil
+	a.attachFastlaneCallbacks(cfg, a.room)
+	a.wireFastlaneClusterHooks()
+	return nil
+}
+
+func (a *app) wireFastlaneClusterHooks() {
+	if a.cluster == nil || a.fastlane == nil {
+		return
+	}
+	a.fastlane.SetRevocationHooks(a.cluster.isFastlaneRevoked, a.cluster.publishFastlaneRevoke)
+	if gwSrv, ok := a.fastlaneGW.(*gateway.Server); ok {
+		gwSrv.SetSettlementDedupe(a.cluster.claimFastlaneSettlement)
+	}
 }
 
 func (a *app) initEnterpriseServices(cfg config) {
@@ -219,6 +303,7 @@ func (a *app) initEnterpriseServices(cfg config) {
 			prefix:   cfg.redisPrefix,
 		}, a.abuse, a.stats, a.queueDrop)
 		a.onClose(a.cluster.close)
+		a.wireFastlaneClusterHooks()
 	}
 }
 
@@ -353,6 +438,10 @@ func (a *app) fastlaneEligible(r *http.Request) bool {
 	return a != nil && a.fastlane != nil && a.fastlane.Eligible(r)
 }
 
+func (a *app) fastlaneEligibleAndRefresh(w http.ResponseWriter, r *http.Request) bool {
+	return a != nil && a.fastlane != nil && a.fastlane.EligibleAndRefresh(w, r)
+}
+
 func (a *app) fastlaneSessionID(r *http.Request) (string, bool) {
 	if a == nil || a.fastlane == nil {
 		return "", false
@@ -459,6 +548,7 @@ func (a *app) writeTierMetrics(b *strings.Builder) {
 		writePromMetric(b, "concert_leaf_hop_accepted_total", "counter", "Verified hop claims.", l.accepted.Load())
 		writePromMetric(b, "concert_leaf_hop_rejected_total", "counter", "Refused hop claims.", l.rejected.Load())
 		writePromMetric(b, "concert_leaf_hop_replayed_total", "counter", "Hop claims refused as replayed nonces.", l.replayed.Load())
+		writePromMetric(b, "concert_leaf_hop_replay_evictions_total", "counter", "Hop replay cache unexpired nonce evictions or hardened-mode saturations.", l.replayEvictions.Load())
 		writePromMetric(b, "concert_leaf_hop_mtls_rejected_total", "counter", "Hop claims refused for missing verified mTLS client certificate.", l.mtlsRejected.Load())
 		writePromMetric(b, "concert_leaf_hop_backpressure_total", "counter", "Hop requests refused for capacity.", l.backpressed.Load())
 		writePromMetric(b, "concert_leaf_rebench_total", "counter", "Completed drained on-demand capacity re-benchmarks.", l.rebenchTotal.Load())
@@ -515,14 +605,11 @@ func (p *portal) registerEnterprisePortalRoutes(r *gin.Engine, api *gin.RouterGr
 	r.GET(mailer.UnsubscribePortalPath, p.a.handleEmailUnsubscribe)
 	r.POST(mailer.UnsubscribePortalPath, p.a.handleEmailUnsubscribe)
 	api.POST("/topology/rebench", p.requireRole(roleAdmin), p.apiTopologyRebench)
-	api.GET("/fastlane", p.requireRole(roleViewer), func(c *gin.Context) {
-		if p.a.fastlane == nil {
-			c.JSON(200, gin.H{"enabled": false})
-			return
-		}
-		c.JSON(200, p.a.fastlane.Summary())
-	})
+	api.GET("/fastlane", p.requireRole(roleViewer), p.apiFastlaneGet)
+	api.POST("/fastlane/config", p.requireRole(roleAdmin), p.apiFastlaneConfigSave)
 	api.POST("/fastlane/reconcile", p.requireRole(roleAdmin), p.apiFastlaneReconcile)
+	api.POST("/fastlane/archive", p.requireRole(roleAdmin), p.apiFastlaneArchive)
+	api.POST("/fastlane/revoke", p.requireRole(roleAdmin), p.apiFastlaneRevoke)
 	api.GET("/email", p.requireRole(roleViewer), p.apiEmail)
 	api.POST("/email/config", p.requireRole(roleAdmin), p.apiEmailConfigSave)
 	api.DELETE("/email/secrets", p.requireRole(roleAdmin), p.apiEmailSecretDelete)
@@ -547,6 +634,20 @@ func registerEnterpriseOpsRoutes(r *gin.Engine, g *generation) {
 			return
 		}
 		handleFastlaneReconcile(c, a, actor, "api")
+	})
+	r.POST("/_room/fastlane/archive", func(c *gin.Context) {
+		actor, ok := g.requireRole(c, roleAdmin)
+		if !ok {
+			return
+		}
+		handleFastlaneArchive(c, a, actor, "api")
+	})
+	r.POST("/_room/fastlane/revoke", func(c *gin.Context) {
+		actor, ok := g.requireRole(c, roleAdmin)
+		if !ok {
+			return
+		}
+		handleFastlaneRevoke(c, a, actor, "api")
 	})
 }
 
@@ -612,7 +713,12 @@ func handleRebench(c *gin.Context, a *app, actor principal, source string) {
 }
 
 func (p *portal) apiFastlaneReconcile(c *gin.Context) {
-	handleFastlaneReconcile(c, p.a, portalPrincipal(c), "portal")
+	a, ok := p.targetApp(c)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "unknown site"})
+		return
+	}
+	handleFastlaneReconcile(c, a, portalPrincipal(c), "portal")
 }
 
 func handleFastlaneReconcile(c *gin.Context, a *app, actor principal, source string) {
@@ -672,26 +778,314 @@ func handleFastlaneReconcile(c *gin.Context, a *app, actor principal, source str
 	})
 }
 
+func (p *portal) apiFastlaneGet(c *gin.Context) {
+	a, ok := p.targetApp(c)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "unknown site"})
+		return
+	}
+	cfg := a.current().cfg
+	if a.fastlane == nil {
+		c.JSON(http.StatusOK, gin.H{
+			"enabled":             false,
+			"destinations_locked": cfg.fastlaneLockDestinations,
+			"hardened":            cfg.hardened,
+			"can_edit":            cfg.fastlaneFile != "",
+		})
+		return
+	}
+	out := a.fastlane.Summary()
+	out["destinations_locked"] = cfg.fastlaneLockDestinations
+	out["hardened"] = cfg.hardened
+	out["can_edit"] = true
+	if a.fastlaneGW != nil {
+		if raw, err := a.fastlaneGW.Handle(c.Request.Context(), "/sponsor/status", nil); err == nil {
+			out["sponsor_status"] = raw
+		}
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+func destinationsDiff(oldCfg, newCfg fastlane.Config) (changed bool, oldDests, newDests []string) {
+	collect := func(c fastlane.Config) map[string]string {
+		m := map[string]string{}
+		for _, o := range c.Offers {
+			key := o.Requirements.Network + ":" + o.Requirements.Asset
+			m[key] = o.Requirements.PayTo
+		}
+		for k, v := range c.VerifyAddresses {
+			m["verify:"+k] = v
+		}
+		return m
+	}
+	om, nm := collect(oldCfg), collect(newCfg)
+	if len(om) != len(nm) {
+		changed = true
+	}
+	for k, ov := range om {
+		if nv, ok := nm[k]; !ok || nv != ov {
+			changed = true
+			oldDests = append(oldDests, k+"="+ov)
+		}
+	}
+	for k, nv := range nm {
+		if ov, ok := om[k]; !ok || ov != nv {
+			changed = true
+			newDests = append(newDests, k+"="+nv)
+		}
+	}
+	return changed, oldDests, newDests
+}
+
+func (p *portal) apiFastlaneConfigSave(c *gin.Context) {
+	a, ok := p.targetApp(c)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "unknown site"})
+		return
+	}
+	cfg := a.current().cfg
+	actor := portalPrincipal(c)
+	if a.fastlane == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "fast lane is not initialized (configure -fastlane-config and -networks-config first)"})
+		return
+	}
+	var payload struct {
+		Config  fastlane.Config `json:"config"`
+		MFACode string          `json:"mfa_code,omitempty"`
+	}
+	if err := json.NewDecoder(io.LimitReader(c.Request.Body, 512<<10)).Decode(&payload); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid JSON configuration payload"})
+		return
+	}
+	next := payload.Config
+	if err := next.Validate(); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if next.Enabled && cfg.hardened && !next.TestMode && next.EffectivePolicyMode() == fastlane.PolicyModeNone && !next.AllowUnscreenedMainnet {
+		c.JSON(http.StatusForbidden, gin.H{"error": "policy_mode \"none\" on mainnet is blocked in -enterprise-hardened mode unless allow_unscreened_mainnet is explicitly true"})
+		return
+	}
+	prevCfg := a.fastlane.Config()
+	destChanged, oldDests, newDests := destinationsDiff(prevCfg, next)
+	if destChanged {
+		if cfg.fastlaneLockDestinations {
+			a.recordAudit(auditEvent{
+				Actor: actor.Actor, Role: actor.Role.String(), Source: "portal",
+				Action: "fastlane.config.update", Outcome: "deny", ClientIP: actor.IP.String(),
+				Details: map[string]any{"reason": "destinations_locked"},
+			})
+			c.JSON(http.StatusForbidden, gin.H{"error": "receiving wallet destinations are locked by -fastlane-lock-destinations"})
+			return
+		}
+		if cfg.hardened && actor.Source != "sso" {
+			mfaOK := false
+			if cfg.portal.users != nil {
+				if u := cfg.portal.users.users[actor.Actor]; u != nil && len(u.totpSecret) > 0 {
+					if payload.MFACode != "" {
+						mfaOK = verifyTOTP(u.totpSecret, payload.MFACode, time.Now())
+					} else {
+						// User already passed TOTP MFA at login for this session.
+						mfaOK = actor.Source == "user"
+					}
+				}
+			}
+			if !mfaOK {
+				a.recordAudit(auditEvent{
+					Actor: actor.Actor, Role: actor.Role.String(), Source: "portal",
+					Action: "fastlane.config.update", Outcome: "deny", ClientIP: actor.IP.String(),
+					Details: map[string]any{"reason": "mfa_required_for_payto_change"},
+				})
+				c.JSON(http.StatusForbidden, gin.H{"error": "changing receiving wallet addresses in -enterprise-hardened mode requires an MFA-verified admin account or SSO"})
+				return
+			}
+		}
+	}
+
+	var nets map[string]gateway.Network
+	if cfg.networksFile != "" {
+		var err error
+		if nets, err = gateway.LoadNetworks(cfg.networksFile); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "networks_config load failed: " + err.Error()})
+			return
+		}
+	}
+	if gwSrv, ok := a.fastlaneGW.(*gateway.Server); ok {
+		if err := gwSrv.Reload(next, nets); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "gateway reload failed: " + err.Error()})
+			return
+		}
+	}
+	if err := a.fastlane.UpdateConfig(next); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if cfg.fastlaneFile != "" {
+		if err := fastlane.SaveAtomic(cfg.fastlaneFile, next); err != nil {
+			// Roll back in-memory state if disk persistence failed.
+			_ = a.fastlane.UpdateConfig(prevCfg)
+			if gwSrv, ok := a.fastlaneGW.(*gateway.Server); ok {
+				_ = gwSrv.Reload(prevCfg, nets)
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to persist fastlane config: " + err.Error()})
+			return
+		}
+	}
+	a.agentOffer.Store(newAgentOffer(a.fastlane))
+	a.recordAudit(auditEvent{
+		Actor: actor.Actor, Role: actor.Role.String(), Source: "portal",
+		Action: "fastlane.config.update", Outcome: "allow", ClientIP: actor.IP.String(),
+		Details: map[string]any{
+			"offers":               len(next.Offers),
+			"collections":          len(next.Collections),
+			"token_gates":          len(next.TokenGates),
+			"policy_mode":          next.EffectivePolicyMode(),
+			"destinations_changed": destChanged,
+			"old_destinations":     oldDests,
+			"new_destinations":     newDests,
+		},
+	})
+	if destChanged {
+		a.notifyEvent(mailer.Event{
+			Category:    mailer.CatFastlane,
+			Severity:    mailer.SevCritical,
+			Title:       "Fast-lane receiving wallet destination changed",
+			Summary:     fmt.Sprintf("Administrator %s modified fast-lane receiving wallet destination(s) live in the Admin Portal.", actor.label()),
+			Fingerprint: "fastlane:payto:" + strings.Join(newDests, ","),
+			Details: map[string]string{
+				"actor":            actor.label(),
+				"client_ip":        actor.IP.String(),
+				"old_destinations": strings.Join(oldDests, "; "),
+				"new_destinations": strings.Join(newDests, "; "),
+			},
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"saved": true, "destinations_changed": destChanged, "fastlane": a.fastlane.Summary()})
+}
+
+func (p *portal) apiFastlaneArchive(c *gin.Context) {
+	a, ok := p.targetApp(c)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "unknown site"})
+		return
+	}
+	handleFastlaneArchive(c, a, portalPrincipal(c), "portal")
+}
+
+func handleFastlaneArchive(c *gin.Context, a *app, actor principal, source string) {
+	if a.fastlane == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "fast lane is not enabled"})
+		return
+	}
+	var body struct {
+		OlderThan string `json:"older_than"`
+		DryRun    bool   `json:"dry_run"`
+	}
+	if c.Request.ContentLength != 0 {
+		if err := json.NewDecoder(io.LimitReader(c.Request.Body, 4096)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+			return
+		}
+	}
+	older := 720 * time.Hour
+	if strings.TrimSpace(body.OlderThan) != "" {
+		d, err := time.ParseDuration(strings.TrimSpace(body.OlderThan))
+		if err != nil || d < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid older_than duration"})
+			return
+		}
+		older = d
+	}
+	rep, err := a.fastlane.ArchiveOnline(older, body.DryRun)
+	if err != nil {
+		a.recordAudit(auditEvent{
+			Actor: actor.Actor, Role: actor.Role.String(), Source: source,
+			Action: "fastlane.archive", Outcome: "error", ClientIP: actor.IP.String(),
+			Details: map[string]any{"error": err.Error()},
+		})
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
+	if !rep.DryRun && rep.Archived > 0 {
+		a.recordAudit(auditEvent{
+			Actor: actor.Actor, Role: actor.Role.String(), Source: source,
+			Action: "fastlane.archive", Target: rep.ArchiveFile, Outcome: "allow", ClientIP: actor.IP.String(),
+			Details: map[string]any{"archived": rep.Archived, "kept": rep.Kept, "archive_sha256": rep.ArchiveSHA256},
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"report": rep, "fastlane": a.fastlane.Summary()})
+}
+
+func (p *portal) apiFastlaneRevoke(c *gin.Context) {
+	a, ok := p.targetApp(c)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "unknown site"})
+		return
+	}
+	handleFastlaneRevoke(c, a, portalPrincipal(c), "portal")
+}
+
+func handleFastlaneRevoke(c *gin.Context, a *app, actor principal, source string) {
+	if a.fastlane == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "fast lane is not enabled"})
+		return
+	}
+	var body struct {
+		Target  string `json:"target"`  // session ID or pass ID
+		Session string `json:"session"` // alias for target
+		PassID  string `json:"pass_id"` // alias for target
+	}
+	if err := json.NewDecoder(io.LimitReader(c.Request.Body, 4096)).Decode(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "target session or pass ID is required"})
+		return
+	}
+	target := strings.TrimSpace(body.Target)
+	if target == "" {
+		target = strings.TrimSpace(body.Session)
+	}
+	if target == "" {
+		target = strings.TrimSpace(body.PassID)
+	}
+	if target == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "target session or pass ID is required"})
+		return
+	}
+	a.fastlane.RevokeSession(target)
+	a.recordAudit(auditEvent{
+		Actor: actor.Actor, Role: actor.Role.String(), Source: source,
+		Action: "fastlane.revoke", Target: target, Outcome: "allow", ClientIP: actor.IP.String(),
+	})
+	c.JSON(http.StatusOK, gin.H{"revoked": true, "target": target})
+}
+
 func newAgentOffer(s *fastlane.Service) *agentOffer {
 	if s == nil {
 		return nil
 	}
-	pc := s.PublicConfig()
-	offers, _ := pc["offers"].([]fastlane.Offer)
-	if len(offers) == 0 {
+	cfg := s.Config()
+	if !cfg.Enabled || len(cfg.Offers) == 0 {
 		return nil
 	}
-	list := make([]gin.H, 0, len(offers))
-	for _, o := range offers {
-		list = append(list, gin.H{
-			"network": o.Requirements.Network,
-			"asset":   o.Requirements.Asset,
-			"amount":  o.Requirements.Amount,
-		})
+	list := make([]gin.H, 0, len(cfg.Offers))
+	for _, o := range cfg.Offers {
+		entry := gin.H{
+			"network":        o.Requirements.Network,
+			"scheme":         o.Requirements.Scheme,
+			"asset":          o.Requirements.Asset,
+			"asset_symbol":   o.EffectiveSymbol(),
+			"amount":         o.Requirements.Amount,
+			"display_amount": o.EffectiveDisplayAmount(),
+		}
+		if len(o.RequireCollections) > 0 {
+			entry["require_collections"] = o.RequireCollections
+		}
+		if len(o.RequireTokenGates) > 0 {
+			entry["require_token_gates"] = o.RequireTokenGates
+		}
+		list = append(list, entry)
 	}
-	pass, _ := pc["pass_seconds"].(int)
-	u := s.Config().Origin + fastlane.Prefix + "/payment"
-	return &agentOffer{paymentURL: u, body: gin.H{"payment_url": u, "pass_seconds": pass, "offers": list}}
+	u := cfg.Origin + fastlane.Prefix + "/payment"
+	return &agentOffer{paymentURL: u, body: gin.H{"payment_url": u, "pass_seconds": cfg.PassSeconds, "offers": list}}
 }
 
 func enterpriseSubcommand(name string) func([]string, io.Writer) error {
@@ -772,7 +1166,9 @@ func enterpriseSettingDefs() []settingDef {
 		{key: "fastlane_config", flag: "fastlane-config", env: "CONCERT_FASTLANE_CONFIG", group: groupSkip, label: "x402 / NFT configuration file", restart: true,
 			def: "", usage: "fast lane JSON (x402 offers and NFT rules; see docs/FASTLANE.md), empty turns wallet access off (flag or CONCERT_FASTLANE_CONFIG only; takes a restart)", ptr: func(c *config) any { return &c.fastlaneFile }},
 		{key: "networks_config", flag: "networks-config", env: "CONCERT_NETWORKS_CONFIG", group: groupSkip, label: "Chain endpoints file", restart: true,
-			def: "", usage: "chain endpoints JSON for the fast lane's payment networks (see docs/FASTLANE.md); sponsor keys come from CONCERT_STELLAR_FEE_SECRET and CONCERT_HEDERA_FEE_SECRET (flag or CONCERT_NETWORKS_CONFIG only; takes a restart)", ptr: func(c *config) any { return &c.networksFile }},
+			def: "", usage: "chain endpoints JSON for the fast lane's payment networks (see docs/FASTLANE.md); optional sponsor keys come from CONCERT_STELLAR_FEE_SECRET and CONCERT_HEDERA_FEE_SECRET (flag or CONCERT_NETWORKS_CONFIG only; takes a restart)", ptr: func(c *config) any { return &c.networksFile }},
+		{key: "fastlane_lock_destinations", flag: "fastlane-lock-destinations", env: "CONCERT_FASTLANE_LOCK_DESTINATIONS", group: groupSkip, label: "Lock fast-lane receiving wallets", restart: true,
+			def: false, usage: "prevent Admin Portal edits from changing payTo or verify_addresses wallet destinations (restart to change)", ptr: func(c *config) any { return &c.fastlaneLockDestinations }},
 
 		// ---- Enterprise TLS mTLS ----
 		{key: "tls_client_ca", flag: "tls-client-ca", env: "CONCERT_TLS_CLIENT_CA", group: groupTLS, label: "Client CA bundle (mTLS)", restart: true,
@@ -834,6 +1230,9 @@ func enterpriseSettingDefs() []settingDef {
 		{key: "hop_replay_guard", flag: "hop-replay-guard", env: "CONCERT_HOP_REPLAY_GUARD", group: groupTopology, label: "Hop nonce replay guard (leaf)",
 			def: true, usage: "leaf: reject replayed single-use Concert-Hop nonces within 2x -hop-max-skew",
 			ptr: func(c *config) any { return &c.hopReplayGuard }},
+		{key: "hop_replay_max", flag: "hop-replay-max", env: "CONCERT_HOP_REPLAY_MAX", group: groupTopology, label: "Hop replay cache capacity (leaf)", restart: true,
+			def: hop.DefaultReplayMax, usage: "leaf: maximum tracked single-use Concert-Hop nonces across 256 shards (1024-16777216; takes a restart)",
+			ptr: func(c *config) any { return &c.hopReplayMax }, check: intBetween(hop.MinReplayMax, hop.MaxReplayMax)},
 		{key: "hop_require_nonce", flag: "hop-require-nonce", env: "CONCERT_HOP_REQUIRE_NONCE", group: groupTopology, label: "Require hop nonces (leaf)",
 			def: false, usage: "leaf: reject legacy Concert-Hop claims without a single-use nonce (required in -enterprise-hardened mode)",
 			ptr: func(c *config) any { return &c.hopRequireNonce }},

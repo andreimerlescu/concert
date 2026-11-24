@@ -3,6 +3,7 @@ package fastlane
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -115,8 +116,12 @@ func TestNFTTokenRulesMatchWhatTheGatewayVerifies(t *testing.T) {
 		Collection{ID: "sol", Label: "Sol", Network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1", Collection: "11111111111111111111111111111111"},
 		Collection{ID: "xlm", Label: "Xlm", Network: "stellar:testnet", Collection: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"})
 	s := newSession(t, h.s)
-	if w := request(h.s, "/nft/challenge", s, `{"rule":"sol","address":"11111111111111111111111111111111","token_id":""}`, ""); w.Code != 400 || !strings.Contains(w.Body.String(), "nft_mint_required") {
-		t.Fatalf("Solana rule without a mint: %d %s", w.Code, w.Body.String())
+	// Solana auto-scans wallet NFTs when token_id is empty, while rejecting malformed mint IDs.
+	if w := request(h.s, "/nft/challenge", s, `{"rule":"sol","address":"11111111111111111111111111111111","token_id":""}`, ""); w.Code != 200 {
+		t.Fatalf("Solana auto-scan challenge without mint: %d %s", w.Code, w.Body.String())
+	}
+	if w := request(h.s, "/nft/challenge", s, `{"rule":"sol","address":"11111111111111111111111111111111","token_id":"bad!mint"}`, ""); w.Code != 400 || !strings.Contains(w.Body.String(), "invalid_nft_mint") {
+		t.Fatalf("Solana rule with malformed mint: %d %s", w.Code, w.Body.String())
 	}
 	if w := request(h.s, "/nft/challenge", s, `{"rule":"xlm","address":"GABC","token_id":"7"}`, ""); w.Code != 400 {
 		t.Fatalf("Stellar token-specific rule: %d %s", w.Code, w.Body.String())
@@ -188,5 +193,118 @@ func TestClosedJournalFailsClosed(t *testing.T) {
 	}
 	if h.settle.Load() != 0 {
 		t.Fatal("closed journal still settled a payment")
+	}
+}
+
+func TestRateLimiter_SaturatedTableAdmitsNewBuyersWhilePinningAbusers(t *testing.T) {
+	h := newHarness(t)
+	now := h.now
+
+	// 1. Exhaust one abusive IP's per-minute quota so it enters the throttled tier.
+	abuser := "198.51.100.1"
+	for i := 0; i < postsPerMinute; i++ {
+		if !h.s.allow(abuser, now) {
+			t.Fatalf("abuser hit %d unexpectedly rejected", i)
+		}
+	}
+	if h.s.allow(abuser, now) {
+		t.Fatal("abuser should be throttled after postsPerMinute hits")
+	}
+
+	// 2. Flood the remaining maxRateEntries-1 slots with one-shot bot IPs in the same window.
+	for i := 0; i < maxRateEntries-1; i++ {
+		ip := fmt.Sprintf("10.%d.%d.%d", (i>>16)&0xff, (i>>8)&0xff, i&0xff)
+		if !h.s.allow(ip, now) {
+			t.Fatalf("flood ip %d (%s) rejected before saturation", i, ip)
+		}
+	}
+
+	// 3. Genuine new buyers arriving during the distributed flood MUST still be
+	// admitted instead of globally locked out with 429!
+	for i := 0; i < 64; i++ {
+		buyer := fmt.Sprintf("203.0.113.%d", i+1)
+		if !h.s.allow(buyer, now) {
+			t.Fatalf("genuine new buyer %s locked out while rate table saturated!", buyer)
+		}
+	}
+
+	// 4. The throttled abuser MUST remain pinned and blocked (not evicted by new buyers).
+	if h.s.allow(abuser, now) {
+		t.Fatal("throttled abuser was evicted and allowed back in before window expiry!")
+	}
+	if got := h.s.limits.len(); got > maxRateEntries {
+		t.Fatalf("rate table grew past maxRateEntries: got %d, want <= %d", got, maxRateEntries)
+	}
+
+	// 5. After 1 minute, the abuser's window expires and resets cleanly.
+	if !h.s.allow(abuser, now.Add(time.Minute)) {
+		t.Fatal("abuser window did not reset after 1 minute")
+	}
+}
+
+func TestRateLimiter_TwoListLRUInvariants(t *testing.T) {
+	rl := newRateLimiter(4, 2, time.Minute)
+	checkInvariants := func(step string) {
+		t.Helper()
+		if rl.len() != rl.active.len+rl.throttled.len {
+			t.Fatalf("%s: map=%d != active(%d)+throttled(%d)", step, rl.len(), rl.active.len, rl.throttled.len)
+		}
+		if rl.len() > rl.maxEntries {
+			t.Fatalf("%s: len=%d > maxEntries=%d", step, rl.len(), rl.maxEntries)
+		}
+	}
+
+	t0 := time.Unix(1_800_000_000, 0)
+	// Fill 1 throttled abuser ("a1": 2 hits -> throttled) + 3 active IPs ("b1", "b2", "b3").
+	if !rl.allow("a1", t0) || !rl.allow("a1", t0) || rl.allow("a1", t0) {
+		t.Fatal("a1 should allow 2 hits then block")
+	}
+	for _, k := range []string{"b1", "b2", "b3"} {
+		if !rl.allow(k, t0) {
+			t.Fatalf("%s unexpectedly blocked", k)
+		}
+	}
+	checkInvariants("filled")
+
+	// New buyer "c1" evicts oldest active ("b1"), NOT throttled "a1".
+	if !rl.allow("c1", t0) {
+		t.Fatal("c1 should be admitted")
+	}
+	checkInvariants("after c1")
+	if _, ok := rl.entries["b1"]; ok {
+		t.Fatal("expected oldest active b1 to be evicted")
+	}
+	if rl.allow("a1", t0) {
+		t.Fatal("throttled a1 must remain pinned")
+	}
+
+	// Throttle remaining 3 entries so ALL 4 entries are throttled.
+	for _, k := range []string{"b2", "b3", "c1"} {
+		if !rl.allow(k, t0) || rl.allow(k, t0) {
+			t.Fatalf("%s should hit limit on 2nd request and block on 3rd", k)
+		}
+	}
+	checkInvariants("all throttled")
+	if rl.active.len != 0 || rl.throttled.len != 4 {
+		t.Fatalf("active=%d throttled=%d, want 0 and 4", rl.active.len, rl.throttled.len)
+	}
+
+	// Fallback when 100% throttled: new buyer "d1" still gets admitted by evicting oldest throttled ("a1").
+	if !rl.allow("d1", t0) {
+		t.Fatal("d1 should be admitted even when all entries are throttled")
+	}
+	checkInvariants("fallback throttled eviction")
+	if _, ok := rl.entries["a1"]; ok {
+		t.Fatal("expected oldest throttled a1 to be evicted on all-throttled fallback")
+	}
+
+	// Advance past window: expired heads are reclaimed first without evicting fresh entries.
+	t1 := t0.Add(time.Minute)
+	if !rl.allow("e1", t1) {
+		t.Fatal("e1 should be admitted after expiry")
+	}
+	checkInvariants("post-expiry")
+	if _, ok := rl.entries["d1"]; ok {
+		t.Fatal("expired d1 should have been reclaimed")
 	}
 }

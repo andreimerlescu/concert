@@ -1,0 +1,144 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 640" width="1200" height="640">
+  <defs>
+    <style>
+      .sans { font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+      .mono { font-family: 'SF Mono', 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    </style>
+    <marker id="arr-purple" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#8b5cf6"/>
+    </marker>
+    <marker id="arr-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#d97706"/>
+    </marker>
+    <marker id="arr-rose" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#d9468f"/>
+    </marker>
+    <marker id="arr-teal" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#0d9488"/>
+    </marker>
+    <marker id="arr-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#1a8cd8"/>
+    </marker>
+  </defs>
+
+  <!-- Header -->
+  <rect x="28" y="18" width="286" height="28" rx="14" fill="#be185d"/>
+  <text x="171" y="36" text-anchor="middle" class="sans" font-size="11.5" font-weight="700" letter-spacing="0.9" fill="#ffffff">07 · ENTERPRISE MESH &amp; FAST-LANE</text>
+  <text x="328" y="37" class="sans" font-size="14" font-weight="600" fill="#747c90">Active-active weighted edges, native leaf mTLS &amp; zero-downtime Fast-Lane ops</text>
+  <rect x="1044" y="18" width="128" height="28" rx="14" fill="#d9468f" fill-opacity="0.12" stroke="#d9468f" stroke-width="1.5"/>
+  <text x="1108" y="36" text-anchor="middle" class="mono" font-size="11.5" font-weight="700" fill="#d9468f">econcert</text>
+  <line x1="28" y1="60" x2="1172" y2="60" stroke="#747c90" stroke-opacity="0.25" stroke-width="1"/>
+
+  <!-- TIER 1: Active-Active Edges + Redis HA -->
+  <rect x="28" y="74" width="1144" height="134" rx="14" fill="#8b5cf6" fill-opacity="0.06" stroke="#8b5cf6" stroke-width="2"/>
+  <rect x="46" y="88" width="262" height="22" rx="11" fill="#7c3aed"/>
+  <text x="177" y="103" text-anchor="middle" class="sans" font-size="10" font-weight="700" letter-spacing="0.9" fill="#ffffff">TIER 1 · ACTIVE-ACTIVE EDGE NODES</text>
+
+  <!-- edge-1 -->
+  <rect x="48" y="120" width="318" height="74" rx="10" fill="#8b5cf6" fill-opacity="0.11" stroke="#8b5cf6" stroke-width="1.5"/>
+  <rect x="62" y="131" width="66" height="20" rx="10" fill="#7c3aed"/>
+  <text x="95" y="145" text-anchor="middle" class="mono" font-size="10.2" font-weight="700" fill="#ffffff">edge-1</text>
+  <text x="140" y="145" class="sans" font-size="11.5" font-weight="700" fill="#8b5cf6">Waiting Room + Fast-Lane</text>
+  <text x="64" y="168" class="sans" font-size="10.8" fill="#747c90">Owns browser passes, bans &amp; x402 payments</text>
+  <text x="64" y="185" class="mono" font-size="10.2" fill="#8b5cf6">Polls leaves with ?demand=&lt;in_flight+queue&gt;</text>
+
+  <!-- Bidirectional arrows edge-1 <-> Redis <-> edge-2 -->
+  <line x1="366" y1="157" x2="404" y2="157" stroke="#d97706" stroke-width="2" marker-start="url(#arr-amber)" marker-end="url(#arr-amber)"/>
+
+  <!-- Redis HA -->
+  <rect x="408" y="120" width="380" height="74" rx="10" fill="#d97706" fill-opacity="0.10" stroke="#d97706" stroke-width="1.6"/>
+  <rect x="424" y="131" width="144" height="20" rx="10" fill="#b45309"/>
+  <text x="496" y="145" text-anchor="middle" class="sans" font-size="10" font-weight="700" fill="#ffffff">REDIS / VALKEY HA</text>
+  <text x="580" y="145" class="mono" font-size="10.5" font-weight="700" fill="#d97706">Fail-open cluster sync</text>
+  <text x="424" y="168" class="sans" font-size="10.8" fill="#747c90">• Real-time Pub/Sub ban &amp; unban replication</text>
+  <text x="424" y="185" class="sans" font-size="10.8" fill="#747c90">• Shared alert deduplication via SET NX PX lease</text>
+
+  <line x1="788" y1="157" x2="826" y2="157" stroke="#d97706" stroke-width="2" marker-start="url(#arr-amber)" marker-end="url(#arr-amber)"/>
+
+  <!-- edge-2 -->
+  <rect x="830" y="120" width="322" height="74" rx="10" fill="#8b5cf6" fill-opacity="0.11" stroke="#8b5cf6" stroke-width="1.5"/>
+  <rect x="844" y="131" width="66" height="20" rx="10" fill="#7c3aed"/>
+  <text x="877" y="145" text-anchor="middle" class="mono" font-size="10.2" font-weight="700" fill="#ffffff">edge-2</text>
+  <text x="922" y="145" class="sans" font-size="11.5" font-weight="700" fill="#8b5cf6">Waiting Room + Fast-Lane</text>
+  <text x="846" y="168" class="sans" font-size="10.8" fill="#747c90">Active-active sibling sharing leaf pool</text>
+  <text x="846" y="185" class="mono" font-size="10.2" fill="#8b5cf6">Signs Concert-Hop + 16-hex nonce per req</text>
+
+  <!-- Connectors down from edge-1 & edge-2 into mTLS Trust Bridge -->
+  <line x1="206" y1="208" x2="206" y2="234" stroke="#d9468f" stroke-width="2.2" marker-end="url(#arr-rose)"/>
+  <path d="M 960 208 L 960 222 L 660 222 L 660 234" fill="none" stroke="#d9468f" stroke-width="2.2" marker-end="url(#arr-rose)"/>
+
+  <!-- MIDDLE TRUST BRIDGE: Native mTLS + Replay Guard (left) & Public Direct (right) -->
+  <rect x="28" y="238" width="746" height="86" rx="12" fill="#d9468f" fill-opacity="0.08" stroke="#d9468f" stroke-width="1.8"/>
+  <rect x="46" y="250" width="262" height="22" rx="11" fill="#be185d"/>
+  <text x="177" y="265" text-anchor="middle" class="sans" font-size="10" font-weight="700" letter-spacing="0.8" fill="#ffffff">NATIVE LEAF mTLS + REPLAY GUARD</text>
+  <rect x="318" y="250" width="144" height="22" rx="11" fill="#252136"/>
+  <text x="390" y="265" text-anchor="middle" class="mono" font-size="10" fill="#f9a8d4">-hop-require-mtls</text>
+  <rect x="472" y="250" width="188" height="22" rx="11" fill="#252136"/>
+  <text x="566" y="265" text-anchor="middle" class="mono" font-size="10" fill="#f9a8d4">256-shard O(1) FIFO ring</text>
+
+  <text x="48" y="294" class="sans" font-size="11.5" font-weight="600" fill="#747c90">• Verifies edge TLS client cert + HMAC-SHA256 Concert-Hop signature + single-use nonce</text>
+  <text x="48" y="313" class="sans" font-size="11.5" font-weight="600" fill="#747c90">• Default 1,048,576 nonces (-hop-replay-max); fails closed without evicting in -enterprise-hardened</text>
+
+  <!-- Right box in Middle Bridge: Direct Public Browsers -->
+  <rect x="794" y="238" width="378" height="86" rx="12" fill="#1a8cd8" fill-opacity="0.08" stroke="#1a8cd8" stroke-width="1.75"/>
+  <rect x="812" y="250" width="214" height="22" rx="11" fill="#0369a1"/>
+  <text x="919" y="265" text-anchor="middle" class="sans" font-size="10" font-weight="700" letter-spacing="0.8" fill="#ffffff">DIRECT PUBLIC BROWSERS</text>
+  <text x="812" y="294" class="sans" font-size="11.2" font-weight="600" fill="#747c90">Same :443 port (VerifyClientCertIfGiven)</text>
+  <text x="812" y="313" class="sans" font-size="11.2" font-weight="600" fill="#747c90">No client cert needed → leaf's own room</text>
+
+  <!-- Connectors down from Trust Bridge & Direct Browsers into Leaves -->
+  <line x1="206" y1="324" x2="206" y2="352" stroke="#0d9488" stroke-width="2.2" marker-end="url(#arr-teal)"/>
+  <line x1="514" y1="324" x2="514" y2="352" stroke="#0d9488" stroke-width="2.2" marker-end="url(#arr-teal)"/>
+  <path d="M 860 324 L 860 338 L 636 338 L 636 352" fill="none" stroke="#1a8cd8" stroke-width="2" stroke-dasharray="5 3" marker-end="url(#arr-blue)"/>
+
+  <!-- BOTTOM-LEFT: TIER 2 Leaf Hosts + Drained Re-Benchmarking -->
+  <rect x="28" y="356" width="664" height="256" rx="14" fill="#0d9488" fill-opacity="0.06" stroke="#0d9488" stroke-width="2"/>
+  <rect x="46" y="370" width="268" height="22" rx="11" fill="#0f766e"/>
+  <text x="180" y="385" text-anchor="middle" class="sans" font-size="10" font-weight="700" letter-spacing="0.9" fill="#ffffff">TIER 2 · TRAFFIC-WEIGHTED LEAVES</text>
+  <text x="326" y="385" class="mono" font-size="10.5" font-weight="700" fill="#0d9488">Proportional capacity shares per active edge</text>
+
+  <!-- Leaf i-01 -->
+  <rect x="48" y="404" width="302" height="110" rx="10" fill="#0d9488" fill-opacity="0.11" stroke="#0d9488" stroke-width="1.5"/>
+  <rect x="62" y="415" width="76" height="20" rx="10" fill="#0f766e"/>
+  <text x="100" y="429" text-anchor="middle" class="mono" font-size="10.2" font-weight="700" fill="#ffffff">Leaf i-01</text>
+  <text x="148" y="429" class="sans" font-size="11.2" font-weight="700" fill="#0d9488">Host Gate &amp; Origin</text>
+  <text x="64" y="454" class="sans" font-size="10.8" font-weight="600" fill="#747c90">• Priority: HopPriority &gt; Hop &gt; Direct</text>
+  <text x="64" y="473" class="sans" font-size="10.8" font-weight="600" fill="#747c90">• Allocates shares by edge EWMA demand</text>
+  <text x="64" y="492" class="sans" font-size="10.8" font-weight="600" fill="#747c90">• Mirrors edge bans &amp; tracks app silence</text>
+
+  <!-- Leaf i-02 -->
+  <rect x="370" y="404" width="302" height="110" rx="10" fill="#0d9488" fill-opacity="0.11" stroke="#0d9488" stroke-width="1.5"/>
+  <rect x="384" y="415" width="76" height="20" rx="10" fill="#0f766e"/>
+  <text x="422" y="429" text-anchor="middle" class="mono" font-size="10.2" font-weight="700" fill="#ffffff">Leaf i-02</text>
+  <text x="470" y="429" class="sans" font-size="11.2" font-weight="700" fill="#0d9488">Host Gate &amp; Origin</text>
+  <text x="386" y="454" class="sans" font-size="10.8" font-weight="600" fill="#747c90">• Full leaves answer 503 Backpressure</text>
+  <text x="386" y="473" class="sans" font-size="10.8" font-weight="600" fill="#747c90">• Edges retry bodyless reqs on sibling</text>
+  <text x="386" y="492" class="sans" font-size="10.8" font-weight="600" fill="#747c90">• Serves direct visitors via local room</text>
+
+  <!-- Live Drained Re-Benchmarking bar -->
+  <rect x="48" y="526" width="624" height="72" rx="10" fill="#252136"/>
+  <rect x="62" y="538" width="236" height="20" rx="10" fill="#7c3aed"/>
+  <text x="180" y="552" text-anchor="middle" class="sans" font-size="9.8" font-weight="700" letter-spacing="0.7" fill="#ffffff">LIVE DRAINED RE-BENCHMARKING</text>
+  <text x="310" y="552" class="mono" font-size="10.2" font-weight="600" fill="#ddd6fe">POST /api/topology/rebench  ·  /_room/rebench</text>
+  <text x="64" y="578" class="sans" font-size="11" fill="#e2e8f0">Drains traffic off target leaf → runs lemmings → updates capacity.json live  ·  409 guard protects last healthy leaf</text>
+
+  <!-- BOTTOM-RIGHT: Zero-Downtime Fast-Lane Ops -->
+  <rect x="712" y="356" width="460" height="256" rx="14" fill="#d97706" fill-opacity="0.06" stroke="#d97706" stroke-width="2"/>
+  <rect x="730" y="370" width="298" height="22" rx="11" fill="#b45309"/>
+  <text x="879" y="385" text-anchor="middle" class="sans" font-size="10" font-weight="700" letter-spacing="0.8" fill="#ffffff">ZERO-DOWNTIME FAST-LANE OPS (x402)</text>
+
+  <!-- Op 1: Online Reconciliation -->
+  <rect x="730" y="404" width="424" height="58" rx="9" fill="#d97706" fill-opacity="0.11" stroke="#d97706" stroke-width="1.4"/>
+  <text x="746" y="426" class="sans" font-size="11.8" font-weight="700" fill="#d97706">1 · Live Online Settlement Reconciliation</text>
+  <text x="746" y="446" class="sans" font-size="10.8" fill="#747c90">Reconcile pending/unknown receipts via Portal or API — zero restart</text>
+
+  <!-- Op 2: 80/95% Alerts + O(1) LRU -->
+  <rect x="730" y="472" width="424" height="58" rx="9" fill="#d9468f" fill-opacity="0.10" stroke="#d9468f" stroke-width="1.4"/>
+  <text x="746" y="494" class="sans" font-size="11.8" font-weight="700" fill="#d9468f">2 · 80% / 95% Journal Alerts &amp; O(1) LRU Rate Table</text>
+  <text x="746" y="514" class="sans" font-size="10.8" fill="#747c90">Warn/critical headroom alerts + new buyers admitted during bot floods</text>
+
+  <!-- Op 3: Audited Receipt Archival -->
+  <rect x="730" y="540" width="424" height="58" rx="9" fill="#0d9488" fill-opacity="0.10" stroke="#0d9488" stroke-width="1.4"/>
+  <text x="746" y="562" class="sans" font-size="11.8" font-weight="700" fill="#0d9488">3 · Audited Archival (econcert archive-receipts)</text>
+  <text x="746" y="582" class="sans" font-size="10.8" fill="#747c90">Exclusive lock · SHA-256 archive · atomic compaction · audit.jsonl trail</text>
+</svg>

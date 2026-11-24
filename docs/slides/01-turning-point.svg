@@ -1,0 +1,136 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 640" width="1200" height="640">
+  <defs>
+    <style>
+      .sans { font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+      .mono { font-family: 'SF Mono', 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    </style>
+    <marker id="arr-slate" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#747c90"/>
+    </marker>
+    <marker id="arr-purple" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#8b5cf6"/>
+    </marker>
+    <marker id="arr-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#1a8cd8"/>
+    </marker>
+  </defs>
+
+  <!-- Header -->
+  <rect x="28" y="18" width="184" height="28" rx="14" fill="#7c3aed"/>
+  <text x="120" y="36" text-anchor="middle" class="sans" font-size="11.5" font-weight="700" letter-spacing="1.1" fill="#ffffff">01 · A TURNING POINT</text>
+  <text x="226" y="37" class="sans" font-size="14" font-weight="600" fill="#747c90">From a single-host waiting room to a 4-binary front-door suite</text>
+  <rect x="1044" y="18" width="128" height="28" rx="14" fill="#8b5cf6" fill-opacity="0.12" stroke="#8b5cf6" stroke-width="1.5"/>
+  <text x="1108" y="36" text-anchor="middle" class="mono" font-size="11.5" font-weight="700" fill="#8b5cf6">concert v0.3.0</text>
+  <line x1="28" y1="60" x2="1172" y2="60" stroke="#747c90" stroke-opacity="0.25" stroke-width="1"/>
+
+  <!-- Left Panel: Before -->
+  <rect x="28" y="78" width="336" height="534" rx="14" fill="#747c90" fill-opacity="0.06" stroke="#747c90" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <rect x="48" y="96" width="222" height="24" rx="12" fill="#52586b"/>
+  <text x="159" y="112" text-anchor="middle" class="sans" font-size="10.5" font-weight="700" letter-spacing="0.9" fill="#ffffff">BEFORE · MULTI-PROXY STACK</text>
+
+  <!-- Step 1: Internet -->
+  <rect x="58" y="140" width="276" height="56" rx="10" fill="#1a8cd8" fill-opacity="0.10" stroke="#1a8cd8" stroke-width="1.75"/>
+  <text x="196" y="164" text-anchor="middle" class="sans" font-size="13.5" font-weight="700" fill="#1a8cd8">Internet Visitors &amp; Spikes</text>
+  <text x="196" y="183" text-anchor="middle" class="sans" font-size="11.5" font-weight="500" fill="#747c90">Public HTTP / HTTPS traffic</text>
+
+  <line x1="196" y1="196" x2="196" y2="232" stroke="#747c90" stroke-width="2" marker-end="url(#arr-slate)"/>
+
+  <!-- Step 2: nginx/caddy -->
+  <rect x="58" y="236" width="276" height="74" rx="10" fill="#d97706" fill-opacity="0.10" stroke="#d97706" stroke-width="1.75"/>
+  <rect x="108" y="246" width="176" height="20" rx="10" fill="#b45309"/>
+  <text x="196" y="260" text-anchor="middle" class="sans" font-size="10" font-weight="700" letter-spacing="0.8" fill="#ffffff">SEPARATE FRONT PROXY</text>
+  <text x="196" y="284" text-anchor="middle" class="mono" font-size="12" font-weight="700" fill="#d97706">nginx / Apache / Caddy / HAProxy</text>
+  <text x="196" y="301" text-anchor="middle" class="sans" font-size="11" fill="#747c90">TLS, static files &amp; virtual hosts</text>
+
+  <line x1="196" y1="310" x2="196" y2="346" stroke="#747c90" stroke-width="2" marker-end="url(#arr-slate)"/>
+
+  <!-- Step 3: early concert -->
+  <rect x="58" y="350" width="276" height="74" rx="10" fill="#8b5cf6" fill-opacity="0.10" stroke="#8b5cf6" stroke-width="1.75"/>
+  <rect x="114" y="360" width="164" height="20" rx="10" fill="#7c3aed"/>
+  <text x="196" y="374" text-anchor="middle" class="sans" font-size="10" font-weight="700" letter-spacing="0.8" fill="#ffffff">EARLY SINGLE BINARY</text>
+  <text x="196" y="398" text-anchor="middle" class="mono" font-size="12.5" font-weight="700" fill="#8b5cf6">concert (waiting room only)</text>
+  <text x="196" y="415" text-anchor="middle" class="sans" font-size="11" fill="#747c90">FIFO queue behind another proxy</text>
+
+  <line x1="196" y1="424" x2="196" y2="460" stroke="#747c90" stroke-width="2" marker-end="url(#arr-slate)"/>
+
+  <!-- Step 4: origin -->
+  <rect x="58" y="464" width="276" height="58" rx="10" fill="#0d9488" fill-opacity="0.10" stroke="#0d9488" stroke-width="1.75"/>
+  <text x="196" y="489" text-anchor="middle" class="sans" font-size="13.5" font-weight="700" fill="#0d9488">Small Origin Host</text>
+  <text x="196" y="508" text-anchor="middle" class="sans" font-size="11.5" fill="#747c90">App / PHP-FPM / Database</text>
+
+  <!-- Left panel footer callout -->
+  <rect x="58" y="544" width="276" height="46" rx="8" fill="#252136"/>
+  <text x="196" y="564" text-anchor="middle" class="sans" font-size="11" font-weight="600" fill="#f1f5f9">Extra network hop &amp; two config stacks</text>
+  <text x="196" y="581" text-anchor="middle" class="sans" font-size="10.5" fill="#cbd5e1">Separate TLS, static serving &amp; proxy rules</text>
+
+  <!-- Center Transition Arrow -->
+  <line x1="376" y1="345" x2="454" y2="345" stroke="#8b5cf6" stroke-width="3" marker-end="url(#arr-purple)"/>
+  <rect x="382" y="308" width="68" height="24" rx="12" fill="#7c3aed"/>
+  <text x="416" y="324" text-anchor="middle" class="mono" font-size="11" font-weight="700" fill="#ffffff">v0.3.0</text>
+  <text x="416" y="370" text-anchor="middle" class="sans" font-size="10.5" font-weight="700" letter-spacing="0.6" fill="#8b5cf6">DIRECT</text>
+  <text x="416" y="384" text-anchor="middle" class="sans" font-size="10.5" font-weight="700" letter-spacing="0.6" fill="#8b5cf6">FRONT DOOR</text>
+
+  <!-- Right Panel: Concert v0.3.0 Suite -->
+  <rect x="468" y="78" width="704" height="534" rx="14" fill="#8b5cf6" fill-opacity="0.05" stroke="#8b5cf6" stroke-width="1.75"/>
+  <rect x="488" y="96" width="352" height="24" rx="12" fill="#7c3aed"/>
+  <text x="664" y="112" text-anchor="middle" class="sans" font-size="10.5" font-weight="700" letter-spacing="0.9" fill="#ffffff">NOW · DROP-IN FRONT-DOOR SUITE (4 BINARIES)</text>
+
+  <!-- Top entry bar -->
+  <rect x="494" y="138" width="652" height="46" rx="10" fill="#1a8cd8" fill-opacity="0.11" stroke="#1a8cd8" stroke-width="1.75"/>
+  <text x="820" y="160" text-anchor="middle" class="sans" font-size="13.5" font-weight="700" fill="#1a8cd8">Internet (:80 / :443)  →  Native ACME TLS · HTTP/2 &amp; HTTP/3 · Multi-Vhost</text>
+  <text x="820" y="176" text-anchor="middle" class="sans" font-size="11" fill="#747c90">No nginx, Apache, Caddy, or HAProxy required in front</text>
+
+  <!-- Branch trunk -->
+  <line x1="820" y1="184" x2="820" y2="206" stroke="#1a8cd8" stroke-width="2"/>
+  <line x1="651" y1="206" x2="989" y2="206" stroke="#1a8cd8" stroke-width="2"/>
+  <line x1="651" y1="206" x2="651" y2="224" stroke="#1a8cd8" stroke-width="2" marker-end="url(#arr-blue)"/>
+  <line x1="989" y1="206" x2="989" y2="224" stroke="#1a8cd8" stroke-width="2" marker-end="url(#arr-blue)"/>
+
+  <!-- Card 1: concert -->
+  <rect x="494" y="228" width="314" height="148" rx="12" fill="#8b5cf6" fill-opacity="0.10" stroke="#8b5cf6" stroke-width="1.75"/>
+  <rect x="510" y="242" width="96" height="24" rx="12" fill="#7c3aed"/>
+  <text x="558" y="258" text-anchor="middle" class="mono" font-size="11.5" font-weight="700" fill="#ffffff">1 · concert</text>
+  <text x="616" y="258" class="sans" font-size="12.5" font-weight="700" fill="#8b5cf6">Core Front Door</text>
+  <text x="512" y="290" class="sans" font-size="12" font-weight="600" fill="#747c90">• FIFO waiting room &amp; 7-rank priority lane</text>
+  <text x="512" y="313" class="sans" font-size="12" font-weight="600" fill="#747c90">• os.Root static offload behind admit pass</text>
+  <text x="512" y="336" class="sans" font-size="12" font-weight="600" fill="#747c90">• Multi-vhost Concertfile &amp; Admin Portal</text>
+  <rect x="512" y="346" width="190" height="20" rx="10" fill="#252136"/>
+  <text x="607" y="359.5" text-anchor="middle" class="mono" font-size="9.8" fill="#e2e8f0">Small hosts &amp; HTTP origins</text>
+
+  <!-- Card 2: wpconcert -->
+  <rect x="832" y="228" width="314" height="148" rx="12" fill="#1a8cd8" fill-opacity="0.10" stroke="#1a8cd8" stroke-width="1.75"/>
+  <rect x="848" y="242" width="112" height="24" rx="12" fill="#0369a1"/>
+  <text x="904" y="258" text-anchor="middle" class="mono" font-size="11.5" font-weight="700" fill="#ffffff">2 · wpconcert</text>
+  <text x="970" y="258" class="sans" font-size="12.5" font-weight="700" fill="#1a8cd8">Multi-Host PHP</text>
+  <text x="850" y="290" class="sans" font-size="12" font-weight="600" fill="#747c90">• Pure-stdlib FastCGI to php-fpm sockets</text>
+  <text x="850" y="313" class="sans" font-size="12" font-weight="600" fill="#747c90">• Singleflight GET micro-cache (cart-safe)</text>
+  <text x="850" y="336" class="sans" font-size="12" font-weight="600" fill="#747c90">• wpconcert init, doctor &amp; upload guards</text>
+  <rect x="850" y="346" width="214" height="20" rx="10" fill="#252136"/>
+  <text x="957" y="359.5" text-anchor="middle" class="mono" font-size="9.8" fill="#e2e8f0">WordPress, WooCommerce &amp; *cgi</text>
+
+  <!-- Card 3: econcert -->
+  <rect x="494" y="394" width="314" height="148" rx="12" fill="#d9468f" fill-opacity="0.10" stroke="#d9468f" stroke-width="1.75"/>
+  <rect x="510" y="408" width="104" height="24" rx="12" fill="#be185d"/>
+  <text x="562" y="424" text-anchor="middle" class="mono" font-size="11.5" font-weight="700" fill="#ffffff">3 · econcert</text>
+  <text x="624" y="424" class="sans" font-size="12.5" font-weight="700" fill="#d9468f">Enterprise Edition</text>
+  <text x="512" y="456" class="sans" font-size="12" font-weight="600" fill="#747c90">• Active-active edge/leaf mesh &amp; mTLS</text>
+  <text x="512" y="479" class="sans" font-size="12" font-weight="600" fill="#747c90">• RBAC/MFA/SSO, audit log &amp; Redis HA</text>
+  <text x="512" y="502" class="sans" font-size="12" font-weight="600" fill="#747c90">• Zero-downtime x402 Fast-Lane ops</text>
+  <rect x="512" y="512" width="222" height="20" rx="10" fill="#252136"/>
+  <text x="623" y="525.5" text-anchor="middle" class="mono" font-size="9.8" fill="#e2e8f0">Compliance, HA clusters &amp; drops</text>
+
+  <!-- Card 4: concert-bench -->
+  <rect x="832" y="394" width="314" height="148" rx="12" fill="#0d9488" fill-opacity="0.10" stroke="#0d9488" stroke-width="1.75"/>
+  <rect x="848" y="408" width="136" height="24" rx="12" fill="#0f766e"/>
+  <text x="916" y="424" text-anchor="middle" class="mono" font-size="11.5" font-weight="700" fill="#ffffff">4 · concert-bench</text>
+  <text x="994" y="424" class="sans" font-size="12.5" font-weight="700" fill="#0d9488">Health Utility</text>
+  <text x="850" y="456" class="sans" font-size="12" font-weight="600" fill="#747c90">• Lemmings crawler ramps &amp; bisects load</text>
+  <text x="850" y="479" class="sans" font-size="12" font-weight="600" fill="#747c90">• Measures real host cap within p95 SLA</text>
+  <text x="850" y="502" class="sans" font-size="12" font-weight="600" fill="#747c90">• Feeds capacity.json to keep rooms right</text>
+  <rect x="850" y="512" width="218" height="20" rx="10" fill="#252136"/>
+  <text x="959" y="525.5" text-anchor="middle" class="mono" font-size="9.8" fill="#e2e8f0">Continuous capacity calibration</text>
+
+  <!-- Bottom summary pill inside right panel -->
+  <rect x="494" y="560" width="652" height="34" rx="17" fill="#252136"/>
+  <text x="820" y="581" text-anchor="middle" class="sans" font-size="12" font-weight="600" fill="#f8fafc">One waiting-room architecture — from a single VPS to multi-tier enterprise clusters</text>
+</svg>

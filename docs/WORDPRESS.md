@@ -126,7 +126,10 @@ CONCERT_PORTAL_PASS=<openssl rand -hex 24>
 ```
 
 > [!IMPORTANT]
-> **Security invariant:** `-static-root`, `-static-mounts`, `-fcgi-deny-paths`, `-tls-http-listen`, and `fcgi+unix://` socket paths are locked to flags and `CONCERT_*` environment variables—they cannot be changed from the Admin Portal HTTP UI.
+> **Security invariants:**
+> - `-static-root`, `-static-mounts`, `-fcgi-deny-paths`, `-tls-http-listen`, and `fcgi+unix://` socket paths are locked to flags and `CONCERT_*` environment variables—they cannot be changed from the Admin Portal HTTP UI.
+> - **Authentic `REMOTE_ADDR` & underscore header defense:** `internal/fcgi` populates `REMOTE_ADDR` from Concert's right-to-left `-trusted-proxies` client IP resolution (never the spoofable leftmost `X-Forwarded-For` entry) and drops request header names containing `_` (matching nginx `underscores_in_headers off`) so client headers like `X_Forwarded_Proto` or `X_Forwarded_For` cannot spoof `HTTP_X_FORWARDED_*` in PHP.
+> - **Large uploads & slowloris protection:** FastCGI's `-upstream-timeout` (default `30s`) starts waiting for PHP response headers only **after** the request body finishes streaming (so legitimate large media/WooCommerce uploads succeed), while `-body-read-idle-timeout` (default `30s`, `body_read_idle_timeout`) and `-max-upload-time` (default `10m`, `max_upload_time`) bound stalled or trickling uploads and release waiting-room slots immediately on timeout or early PHP abort.
 
 ---
 

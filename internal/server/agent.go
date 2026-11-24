@@ -330,6 +330,8 @@ type agentWaitWriter struct {
 	roomBody   bytes.Buffer // room's held wait body, kept as a fallback
 }
 
+func (w *agentWaitWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 type agentWriteMode uint8
 
 const (
@@ -433,7 +435,7 @@ func (g *generation) writeAgentWait(c *gin.Context, key string, roomBody []byte)
 		"hint":                agentWaitHint,
 	}
 	h := c.Writer.Header()
-	if offer := g.a.agentOffer; offer != nil {
+	if offer := g.a.agentOffer.Load(); offer != nil {
 		body["fast_lane"] = offer.body
 		h.Set("Link", "<"+offer.paymentURL+`>; rel="payment"`)
 	}

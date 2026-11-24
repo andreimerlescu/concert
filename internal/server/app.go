@@ -25,8 +25,8 @@ type app struct {
 	enterpriseAppState
 
 	// agentOffer is the fast-lane offer a queued agent is shown, or nil
-	// without payment offers; see agent.go. Set once in newApp.
-	agentOffer *agentOffer
+	// without payment offers; see agent.go. Atomically refreshed on live fast-lane config edits.
+	agentOffer atomic.Pointer[agentOffer]
 
 	cfg       config // as concert started; the running configuration is current().cfg
 	room      *room.WaitingRoom

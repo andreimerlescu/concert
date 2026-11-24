@@ -470,8 +470,12 @@ func TestAgent_WaitResponseContract(t *testing.T) {
 	}
 	if w.FastLane == nil || w.FastLane.PaymentURL != "http://127.0.0.1:8080/_concert/payment" || w.FastLane.PassSeconds != 300 ||
 		len(w.FastLane.Offers) != 1 || w.FastLane.Offers[0]["network"] != "xrpl:1" || w.FastLane.Offers[0]["asset"] != "XRP" ||
-		w.FastLane.Offers[0]["amount"] != "100" || len(w.FastLane.Offers[0]) != 3 {
+		w.FastLane.Offers[0]["amount"] != "100" || w.FastLane.Offers[0]["asset_symbol"] != "XRP" ||
+		w.FastLane.Offers[0]["display_amount"] != "0.0001" || w.FastLane.Offers[0]["scheme"] != "exact" {
 		t.Errorf("fast_lane: %+v", w.FastLane)
+	}
+	if _, hasPayTo := w.FastLane.Offers[0]["payTo"]; hasPayTo {
+		t.Error("offer summary must not expose payTo")
 	}
 	if strings.Contains(string(body), agentTestOffer.PayTo) || strings.Contains(string(body), ti.Token) {
 		t.Error("the wait response must carry neither the recipient nor the ticket's token")

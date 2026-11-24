@@ -170,6 +170,143 @@ func TestVerify_ReplayRaceExactlyOneWins(t *testing.T) {
 	}
 }
 
+func TestReplayCache_O1RingEvictionAndEvictionCallback(t *testing.T) {
+	now := time.Unix(1795000000, 0)
+	s, err := NewSigner(secretA, "edge-ring")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.now = func() time.Time { return now }
+
+	v, err := NewVerifier(30*time.Second, secretA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v.now = func() time.Time { return now }
+	v.SetReplayGuard(true, true)
+
+	var evictions atomic.Int64
+	// Small capacity: 512 total across 256 shards (2 per shard).
+	v.SetReplayOptions(512, false, func() {
+		evictions.Add(1)
+	})
+
+	// Insert 1500 unexpired claims; well past 512 so evictions must occur, yet
+	// every claim succeeds in fail-open (non-hardened) mode.
+	for i := 0; i < 1500; i++ {
+		h := s.Sign(sampleClaim(), "GET", "/items", "")
+		if _, err := v.Verify(h, "GET", "/items", ""); err != nil {
+			t.Fatalf("claim %d failed unexpectedly in non-hardened mode: %v", i, err)
+		}
+	}
+	if evictions.Load() == 0 {
+		t.Fatalf("evictions = 0 after 1500 unexpired claims into 512-cap cache; expected evictions > 0")
+	}
+
+	// Verify memory stayed strictly bounded per shard (<= 2 entries per shard).
+	rc := v.replay.Load()
+	totalStored := 0
+	for i := range rc.shards {
+		sh := &rc.shards[i]
+		sh.mu.Lock()
+		if len(sh.entries) > 2 || sh.count > 2 {
+			t.Fatalf("shard %d exceeded cap 2: map=%d ring=%d", i, len(sh.entries), sh.count)
+		}
+		totalStored += len(sh.entries)
+		sh.mu.Unlock()
+	}
+	if totalStored > 512 {
+		t.Fatalf("totalStored = %d, want <= 512", totalStored)
+	}
+
+	// Advance clock past 2*MaxSkew: expired heads must pop cleanly in O(1)
+	// WITHOUT triggering any further evictions! Send at most 1 fresh claim per
+	// shard so random birthday collisions on 2-slot shards cannot cause genuine
+	// fresh-vs-fresh evictions.
+	now = now.Add(2*30*time.Second + time.Second)
+	evBefore := evictions.Load()
+	seenShard := map[byte]bool{}
+	for len(seenShard) < 64 {
+		h := s.Sign(sampleClaim(), "GET", "/fresh", "")
+		c, _, _, perr := parse(h)
+		if perr != nil {
+			t.Fatal(perr)
+		}
+		shard := makeReplayKey(c.Edge, c.Nonce)[0]
+		if seenShard[shard] {
+			continue
+		}
+		seenShard[shard] = true
+		if _, err := v.Verify(h, "GET", "/fresh", ""); err != nil {
+			t.Fatalf("post-expiry claim failed: %v", err)
+		}
+	}
+	if got := evictions.Load() - evBefore; got != 0 {
+		t.Fatalf("post-expiry insertions triggered %d spurious evictions", got)
+	}
+}
+
+func TestReplayCache_HardenedFailClosedSaturation(t *testing.T) {
+	now := time.Unix(1795000000, 0)
+	s, err := NewSigner(secretA, "edge-hardened")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.now = func() time.Time { return now }
+
+	v, err := NewVerifier(30*time.Second, secretA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v.now = func() time.Time { return now }
+	v.SetReplayGuard(true, true)
+
+	var saturations atomic.Int64
+	v.SetReplayOptions(512, true, func() {
+		saturations.Add(1)
+	})
+
+	var accepted []string
+	var saturated int
+	for i := 0; i < 1500; i++ {
+		h := s.Sign(sampleClaim(), "GET", "/checkout", "")
+		_, err := v.Verify(h, "GET", "/checkout", "")
+		switch {
+		case err == nil:
+			accepted = append(accepted, h)
+		case errors.Is(err, ErrReplaySaturated):
+			saturated++
+		default:
+			t.Fatalf("claim %d unexpected err: %v", i, err)
+		}
+	}
+	if len(accepted) == 0 {
+		t.Fatal("expected initial claims to be accepted before saturation")
+	}
+	if saturated == 0 {
+		t.Fatalf("expected ErrReplaySaturated once 512-cap cache filled, got 0")
+	}
+	if saturations.Load() != int64(saturated) {
+		t.Fatalf("onEvict count = %d, want %d", saturations.Load(), saturated)
+	}
+
+	// CRITICAL SECURITY INVARIANT: in hardened mode, ZERO unexpired accepted
+	// nonces may be evicted — replaying every previously accepted claim MUST
+	// still return ErrReplay!
+	for i, h := range accepted {
+		if _, err := v.Verify(h, "GET", "/checkout", ""); !errors.Is(err, ErrReplay) {
+			t.Fatalf("accepted claim %d lost replay protection under saturation: err=%v, want ErrReplay", i, err)
+		}
+	}
+
+	// Once the skew window elapses, expired entries pop and fresh claims succeed again.
+	now = now.Add(2*30*time.Second + time.Second)
+	fresh := s.Sign(sampleClaim(), "GET", "/checkout", "")
+	if _, err := v.Verify(fresh, "GET", "/checkout", ""); err != nil {
+		t.Fatalf("claim after expiry window failed: %v", err)
+	}
+}
+
 func BenchmarkVerify_WithReplayGuard(b *testing.B) {
 	s, _ := NewSigner(secretA, "edge-bench")
 	v, _ := NewVerifier(30*time.Second, secretA)

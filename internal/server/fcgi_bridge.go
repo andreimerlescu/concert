@@ -67,6 +67,20 @@ func roundTripFCGI(tr *fcgiTransport, req *http.Request, target *url.URL) (*http
 	return tr.RoundTripTo(req, target)
 }
 
+func withFastCGIClientIP(req *http.Request, ip string) *http.Request {
+	if ip == "" {
+		return req
+	}
+	return req.WithContext(fcgi.WithClientIP(req.Context(), ip))
+}
+
+func withFastCGIBodyAbort(req *http.Request, fn func() bool) *http.Request {
+	if fn == nil {
+		return req
+	}
+	return req.WithContext(fcgi.WithBodyAbort(req.Context(), fn))
+}
+
 func buildMicroCache(cfg config, stats *counters) *pageMicroCache {
 	if cfg.microCacheTTL <= 0 {
 		return nil
@@ -145,6 +159,8 @@ func (w *admitOn200Writer) Flush() {
 	}
 }
 
+func (w *admitOn200Writer) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 // microCacheMiddleware serves eligible anonymous GET/HEAD page requests from
 // the bounded in-memory micro-cache (with singleflight stampede coalescing)
 // ahead of the waiting room. Logged-in, cart, checkout, POST, and private
@@ -163,6 +179,11 @@ func (g *generation) microCacheMiddleware(c *gin.Context) {
 		// non-cacheable origin response carrying Concert-Priority.
 		req := selectBackendForRequest(r, g.upstreams)
 		req = g.edgeClaim(c, req)
+		if hopIP, ok := hopInClientIP(req.Context()); ok {
+			req = withFastCGIClientIP(req, hopIP.String())
+		} else if ip := clientIPFrom(c); ip.IsValid() {
+			req = withFastCGIClientIP(req, ip.String())
+		}
 		g.proxy.ServeHTTP(w, req)
 	})
 	if aw.forged {
@@ -232,6 +253,10 @@ func applyWordPressPreset(cfg *config) error {
 	}
 	if strings.TrimSpace(cfg.banPaths) == "" && cfg.abuseEnabled {
 		cfg.banPaths = "/xmlrpc.php"
+	}
+	// WordPress/WooCommerce checkouts routinely run 45s+ PHP scripts.
+	if cfg.headerTimeout == 0 || cfg.headerTimeout == 60*time.Second || cfg.headerTimeout == 30*time.Second {
+		cfg.headerTimeout = 90 * time.Second
 	}
 	return nil
 }

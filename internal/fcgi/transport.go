@@ -361,32 +361,75 @@ func (t *Transport) RoundTripTo(req *http.Request, target *url.URL) (*http.Respo
 		return nil, err
 	}
 
-	if t.headerTimeout > 0 {
-		_ = conn.SetDeadline(time.Now().Add(t.headerTimeout))
+	setWriteDeadline := func() {
+		if t.headerTimeout > 0 {
+			_ = conn.SetWriteDeadline(time.Now().Add(t.headerTimeout))
+		}
 	}
 
 	const reqID uint16 = 1
 	params := t.buildParams(req, res)
-	var reqBuf []byte
 	// Write BEGIN_REQUEST and PARAMS synchronously before streaming STDIN.
+	setWriteDeadline()
 	if err := writeBeginRequest(conn, reqID); err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
 	if encoded := encodeParams(params); len(encoded) > 0 {
+		setWriteDeadline()
 		if err := writeRecord(conn, typeParams, reqID, encoded); err != nil {
 			_ = conn.Close()
 			return nil, err
 		}
 	}
+	setWriteDeadline()
 	if err := writeRecord(conn, typeParams, reqID, nil); err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
-	_ = reqBuf
+
+	abortBody := bodyAbortFromContext(ctx)
+	cancelDone := make(chan struct{})
+	var cancelOnce sync.Once
+	stopCancel := func() {
+		cancelOnce.Do(func() {
+			close(cancelDone)
+		})
+	}
+	var closeOnce sync.Once
+	closeConn := func() {
+		closeOnce.Do(func() {
+			_ = conn.Close()
+		})
+	}
+
+	// headerMu serializes arming per-chunk write deadlines and the post-STDIN
+	// response-header read deadline against transitioning to headersDone once
+	// CGI response headers arrive, so an early php-fpm response cannot have a
+	// read/write deadline re-armed behind it or have its conn closed by the
+	// aborted STDIN goroutine.
+	var (
+		headerMu     sync.Mutex
+		headersDone  bool
+		earlyAbort   bool
+		stdinReadErr error
+	)
+	armWriteDeadline := func() bool {
+		headerMu.Lock()
+		defer headerMu.Unlock()
+		if headersDone {
+			return false
+		}
+		if t.headerTimeout > 0 {
+			_ = conn.SetWriteDeadline(time.Now().Add(t.headerTimeout))
+		}
+		return true
+	}
 
 	// Stream request body in a goroutine so large POST uploads cannot deadlock
-	// if php-fpm responds early.
+	// if php-fpm responds early. The response-header read deadline starts ONLY
+	// after STDIN finishes writing (matching http.Transport.ResponseHeaderTimeout)
+	// so legitimate uploads longer than headerTimeout succeed.
 	stdinDone := make(chan struct{})
 	go func() {
 		defer close(stdinDone)
@@ -395,33 +438,81 @@ func (t *Transport) RoundTripTo(req *http.Request, target *url.URL) (*http.Respo
 			for {
 				n, rerr := req.Body.Read(buf)
 				if n > 0 {
+					if !armWriteDeadline() {
+						return
+					}
 					if werr := writeRecord(conn, typeStdin, reqID, buf[:n]); werr != nil {
 						return
 					}
 				}
 				if rerr != nil {
+					if rerr != io.EOF {
+						headerMu.Lock()
+						stdinReadErr = rerr
+						done := headersDone
+						headerMu.Unlock()
+						if !done {
+							closeConn()
+						}
+						return
+					}
 					break
 				}
 			}
 		}
-		_ = writeRecord(conn, typeStdin, reqID, nil)
+		if !armWriteDeadline() {
+			return
+		}
+		if err := writeRecord(conn, typeStdin, reqID, nil); err != nil {
+			return
+		}
+		headerMu.Lock()
+		if !headersDone && t.headerTimeout > 0 {
+			_ = conn.SetReadDeadline(time.Now().Add(t.headerTimeout))
+		}
+		headerMu.Unlock()
 	}()
 
-	// Abort the connection immediately if the request context is cancelled.
-	cancelDone := make(chan struct{})
-	var closeOnce sync.Once
-	closeConn := func() {
-		closeOnce.Do(func() {
-			_ = conn.Close()
-		})
-	}
+	// Abort both the backend connection and any blocked inbound body read
+	// immediately if the request context is cancelled — unless we intentionally
+	// aborted STDIN after response headers arrived (expiring the client's read
+	// deadline causes net/http's connReader.Read to cancel req.Context(), and
+	// we still want to deliver the complete early response body to the client).
 	go func() {
 		select {
 		case <-ctx.Done():
+			headerMu.Lock()
+			skip := earlyAbort
+			headerMu.Unlock()
+			if skip {
+				return
+			}
+			if abortBody != nil {
+				abortBody()
+			}
 			closeConn()
 		case <-cancelDone:
 		}
 	}()
+
+	waitStdin := func() {
+		select {
+		case <-stdinDone:
+			return
+		default:
+		}
+		if abortBody != nil && abortBody() {
+			<-stdinDone
+			return
+		}
+		// Fallback when Transport is called directly without a ResponseWriter
+		// supporting SetReadDeadline: avoid deadlocking forever on a reader
+		// that ignores Close.
+		select {
+		case <-stdinDone:
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
 
 	sr := &stdoutReader{
 		r:        conn,
@@ -431,17 +522,44 @@ func (t *Transport) RoundTripTo(req *http.Request, target *url.URL) (*http.Respo
 	br := bufio.NewReaderSize(sr, 16<<10)
 	statusCode, statusText, hdr, err := parseCGIHeaders(br)
 	if err != nil {
-		close(cancelDone)
+		stopCancel()
 		closeConn()
-		<-stdinDone
+		waitStdin()
 		sr.flushStderr()
+		headerMu.Lock()
+		rerr := stdinReadErr
+		headerMu.Unlock()
+		if rerr != nil {
+			return nil, fmt.Errorf("fcgi: read request body: %w", rerr)
+		}
 		return nil, err
 	}
 
-	// Clear the header deadline once response headers arrive so streaming
-	// downloads/SSE are not cut off prematurely.
+	// Clear the response read deadline once headers arrive so streaming
+	// downloads/SSE are not cut off prematurely. If php-fpm responded early
+	// while STDIN is still open (e.g. 413/401/302), stop the STDIN goroutine
+	// before returning *http.Response: Go's HTTP/1.1 ResponseWriter.WriteHeader
+	// locks req.Body's mutex (and may drain unread bytes), which would
+	// otherwise deadlock with the STDIN goroutine still inside req.Body.Read.
+	headerMu.Lock()
+	headersDone = true
 	if t.headerTimeout > 0 {
-		_ = conn.SetDeadline(time.Time{})
+		_ = conn.SetReadDeadline(time.Time{})
+	}
+	select {
+	case <-stdinDone:
+		if t.headerTimeout > 0 {
+			_ = conn.SetWriteDeadline(time.Time{})
+		}
+		headerMu.Unlock()
+	default:
+		earlyAbort = true
+		// Expire ONLY the FCGI write deadline so a full Unix/TCP send buffer
+		// cannot stall the STDIN goroutine while we still read the response body.
+		_ = conn.SetWriteDeadline(time.Now())
+		headerMu.Unlock()
+		stopCancel()
+		waitStdin()
 	}
 
 	contentLen := int64(-1)
@@ -455,8 +573,8 @@ func (t *Transport) RoundTripTo(req *http.Request, target *url.URL) (*http.Respo
 		br:         br,
 		sr:         sr,
 		closeConn:  closeConn,
-		cancelDone: cancelDone,
-		stdinDone:  stdinDone,
+		stopCancel: stopCancel,
+		waitStdin:  waitStdin,
 	}
 
 	return &http.Response{
@@ -476,8 +594,8 @@ type responseBody struct {
 	br         *bufio.Reader
 	sr         *stdoutReader
 	closeConn  func()
-	cancelDone chan struct{}
-	stdinDone  chan struct{}
+	stopCancel func()
+	waitStdin  func()
 	closeOnce  sync.Once
 }
 
@@ -487,12 +605,52 @@ func (b *responseBody) Read(p []byte) (int, error) {
 
 func (b *responseBody) Close() error {
 	b.closeOnce.Do(func() {
-		close(b.cancelDone)
+		b.stopCancel()
 		b.closeConn()
-		<-b.stdinDone
+		b.waitStdin()
 		b.sr.flushStderr()
 	})
 	return nil
+}
+
+type clientIPKey struct{}
+type bodyAbortKey struct{}
+
+// WithBodyAbort attaches an abort callback (typically calling
+// http.ResponseController.SetReadDeadline(time.Now())) so FastCGI can
+// unblock a stalled req.Body.Read immediately on early backend exit or cancel.
+// The callback returns true if the underlying ResponseWriter supported aborting.
+func WithBodyAbort(ctx context.Context, fn func() bool) context.Context {
+	if fn == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, bodyAbortKey{}, fn)
+}
+
+func bodyAbortFromContext(ctx context.Context) func() bool {
+	if ctx == nil {
+		return nil
+	}
+	fn, _ := ctx.Value(bodyAbortKey{}).(func() bool)
+	return fn
+}
+
+// WithClientIP attaches the proxy's resolved client IP address (after
+// right-to-left trusted-proxy evaluation) to ctx so FastCGI populates
+// REMOTE_ADDR and REMOTE_HOST from it rather than untrusted X-Forwarded-For.
+func WithClientIP(ctx context.Context, ip string) context.Context {
+	if ip == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, clientIPKey{}, ip)
+}
+
+func clientIPFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	s, _ := ctx.Value(clientIPKey{}).(string)
+	return s
 }
 
 func (t *Transport) buildParams(req *http.Request, res resolvedScript) map[string]string {
@@ -517,12 +675,11 @@ func (t *Transport) buildParams(req *http.Request, res resolvedScript) map[strin
 		remoteAddr = h
 		remotePort = p
 	}
-	// Prefer the resolved client IP from X-Forwarded-For when Concert set it.
-	if xff := req.Header.Get("X-Forwarded-For"); xff != "" {
-		first := strings.TrimSpace(strings.Split(xff, ",")[0])
-		if first != "" {
-			remoteAddr = first
-		}
+	// Use the proxy's already-resolved client IP when attached in context;
+	// never trust the leftmost X-Forwarded-For entry, which clients can spoof
+	// behind a trusted reverse proxy.
+	if resolved := clientIPFromContext(req.Context()); resolved != "" {
+		remoteAddr = resolved
 	}
 
 	params := map[string]string{
@@ -562,6 +719,13 @@ func (t *Transport) buildParams(req *http.Request, res resolvedScript) map[strin
 	}
 
 	for k, vals := range req.Header {
+		// Drop header names containing underscores (matching nginx's default
+		// underscores_in_headers off) so X_Forwarded_Proto / X_Forwarded_For /
+		// X_Room_Pass cannot smuggle past dash-based scrubbing or collide in
+		// PHP's $_SERVER map.
+		if strings.ContainsRune(k, '_') {
+			continue
+		}
 		// Defend against httpoxy (CVE-2016-5385).
 		if strings.EqualFold(k, "Proxy") {
 			continue

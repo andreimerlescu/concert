@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math/big"
+	"strings"
 	"time"
 
 	"github.com/andreimerlescu/concert/internal/x402"
@@ -64,14 +65,24 @@ func New(network, rpcURL, horizonURL, sponsorSecret string, maxFee int64) (*Sche
 	if err != nil {
 		return nil, err
 	}
-	kp, err := keypair.ParseFull(sponsorSecret)
-	if err != nil {
-		return nil, errors.New("invalid Stellar sponsor secret")
-	}
 	if maxFee == 0 {
 		maxFee = DefaultMaxFeeStroops
 	}
-	return &Scheme{Network: network, passphrase: pass, RPC: RPC{URL: rpcURL}, Horizon: Horizon{URL: horizonURL}, Sponsor: kp, MaxFee: maxFee, Poll: time.Second}, nil
+	s := &Scheme{Network: network, passphrase: pass, RPC: RPC{URL: rpcURL}, Horizon: Horizon{URL: horizonURL}, MaxFee: maxFee, Poll: time.Second}
+	if strings.TrimSpace(sponsorSecret) != "" {
+		kp, err := keypair.ParseFull(sponsorSecret)
+		if err != nil {
+			return nil, errors.New("invalid Stellar sponsor secret")
+		}
+		s.Sponsor = kp
+	}
+	return s, nil
+}
+
+// NewUnsponsored creates a zero-hot-key Stellar scheme for payer-pays-fees
+// payments, direct memo proofs, trustline balance checks, and NFT verification.
+func NewUnsponsored(network, rpcURL, horizonURL string, maxFee int64) (*Scheme, error) {
+	return New(network, rpcURL, horizonURL, "", maxFee)
 }
 
 func invalid(reason, payer string) x402.VerifyResponse { return x402.Invalid(reason, payer) }
@@ -367,7 +378,124 @@ func validateEvents(events []string, from, to string, amount *big.Int, asset str
 	return ""
 }
 
+func isPayerPaid(r x402.Requirements) bool {
+	if r.Extra == nil {
+		return false
+	}
+	v, ok := r.Extra["areFeesSponsored"]
+	if !ok {
+		return false
+	}
+	b, ok := v.(bool)
+	return ok && !b
+}
+
+func (s *Scheme) verifyClassic(ctx context.Context, p x402.Payload, r x402.Requirements) (xdr.TransactionEnvelope, string, x402.VerifyResponse) {
+	fail := func(reason, payer string) (xdr.TransactionEnvelope, string, x402.VerifyResponse) {
+		return xdr.TransactionEnvelope{}, "", invalid(reason, payer)
+	}
+	switch {
+	case p.Version != 2:
+		return fail("invalid_x402_version", "")
+	case p.Accepted.Scheme != "exact" || r.Scheme != "exact":
+		return fail("unsupported_scheme", "")
+	case r.Network != p.Accepted.Network || r.Network != s.Network:
+		return fail("network_mismatch", "")
+	}
+	enc, err := payloadTransaction(p)
+	if err != nil {
+		return fail("invalid_exact_stellar_payload_malformed", "")
+	}
+	env, err := decodeEnvelope(enc)
+	if err != nil || env.Type != xdr.EnvelopeTypeEnvelopeTypeTx || env.V1 == nil {
+		return fail("invalid_exact_stellar_payload_malformed", "")
+	}
+	tx := env.V1.Tx
+	if len(tx.Operations) != 1 || tx.Operations[0].Body.Type != xdr.OperationTypePayment {
+		return fail("invalid_exact_stellar_payload_wrong_operation", "")
+	}
+	from := muxedAddress(&tx.SourceAccount)
+	if !isValidGAccount(from) {
+		return fail("invalid_exact_stellar_payload_malformed", "")
+	}
+	op := tx.Operations[0]
+	if op.SourceAccount != nil && muxedAddress(op.SourceAccount) != from {
+		return fail("invalid_exact_stellar_payload_unsafe_tx_or_op_source", from)
+	}
+	payOp := op.Body.MustPaymentOp()
+	to := muxedAddress(&payOp.Destination)
+	if to != r.PayTo {
+		return fail("invalid_exact_stellar_payload_wrong_recipient", from)
+	}
+	pa, err := ParseAsset(r.Asset, s.passphrase)
+	if err != nil {
+		return fail("invalid_exact_stellar_payload_wrong_asset", from)
+	}
+	switch pa.Kind {
+	case AssetNative:
+		if payOp.Asset.Type != xdr.AssetTypeAssetTypeNative {
+			return fail("invalid_exact_stellar_payload_wrong_asset", from)
+		}
+	case AssetClassic:
+		var gotCode, gotIssuer string
+		if payOp.Asset.Type == xdr.AssetTypeAssetTypeCreditAlphanum4 && payOp.Asset.AlphaNum4 != nil {
+			gotCode = strings.TrimRight(string(payOp.Asset.AlphaNum4.AssetCode[:]), "\x00")
+			gotIssuer = payOp.Asset.AlphaNum4.Issuer.Address()
+		} else if payOp.Asset.Type == xdr.AssetTypeAssetTypeCreditAlphanum12 && payOp.Asset.AlphaNum12 != nil {
+			gotCode = strings.TrimRight(string(payOp.Asset.AlphaNum12.AssetCode[:]), "\x00")
+			gotIssuer = payOp.Asset.AlphaNum12.Issuer.Address()
+		}
+		if gotCode != pa.Code || gotIssuer != pa.Issuer {
+			return fail("invalid_exact_stellar_payload_wrong_asset", from)
+		}
+	default:
+		return fail("invalid_exact_stellar_payload_wrong_asset", from)
+	}
+	want, ok := new(big.Int).SetString(r.Amount, 10)
+	if !ok || !want.IsInt64() || int64(payOp.Amount) != want.Int64() {
+		return fail("invalid_exact_stellar_payload_wrong_amount", from)
+	}
+	if wantMemo, ok := r.Extra["memo"].(string); ok && wantMemo != "" {
+		if tx.Memo.Type != xdr.MemoTypeMemoText || tx.Memo.Text == nil || *tx.Memo.Text != wantMemo {
+			return fail("invalid_exact_stellar_payload_memo_mismatch", from)
+		}
+	}
+	if s.MaxFee > 0 && int64(tx.Fee) > s.MaxFee {
+		return fail("invalid_exact_stellar_payload_fee_exceeds_maximum", from)
+	}
+	// Verify transaction signature directly against payer's Ed25519 public key.
+	hash, err := network.HashTransactionInEnvelope(env, s.passphrase)
+	if err != nil {
+		return fail("invalid_exact_stellar_payload_bad_payer_signature", from)
+	}
+	kp, err := keypair.ParseAddress(from)
+	if err != nil {
+		return fail("invalid_exact_stellar_payload_bad_payer_signature", from)
+	}
+	sigOK := false
+	for _, ds := range env.V1.Signatures {
+		if kp.Verify(hash[:], ds.Signature) == nil {
+			sigOK = true
+			break
+		}
+	}
+	if !sigOK {
+		return fail("invalid_exact_stellar_payload_bad_payer_signature", from)
+	}
+	if s.Horizon.URL != "" {
+		hp, err := s.Horizon.Passphrase(ctx)
+		if err != nil || hp != s.passphrase {
+			return fail("invalid_network", from)
+		}
+	}
+	return env, from, x402.Valid(from)
+}
+
 func (s *Scheme) Verify(ctx context.Context, p x402.Payload, r x402.Requirements) x402.VerifyResponse {
+	if isPayerPaid(r) {
+		_, _, v := s.verifyClassic(ctx, p, r)
+		return v
+	}
 	_, _, v := s.verify(ctx, p, r)
 	return v
 }
@@ -421,6 +549,9 @@ func (s *Scheme) Rebuild(pt *parsed, sim *Simulation, sequence int64, timeout in
 // polls for up to maxTimeoutSeconds. Anything short of SUCCESS is reported
 // as not successful, with the hash when one exists, for reconciliation.
 func (s *Scheme) Settle(ctx context.Context, p x402.Payload, r x402.Requirements) (x402.SettleResponse, error) {
+	if isPayerPaid(r) {
+		return s.settleClassic(ctx, p, r)
+	}
 	if s.Sponsor == nil {
 		return x402.SettleResponse{}, errors.New("no Stellar sponsor configured")
 	}
@@ -505,6 +636,14 @@ func (s *Scheme) Reconcile(ctx context.Context, p x402.Payload, r x402.Requireme
 	if env.V1 == nil || len(env.V1.Tx.Operations) != 1 {
 		return "", errors.New("unexpected settlement transaction")
 	}
+	if env.V1.Tx.Operations[0].Body.Type == xdr.OperationTypePayment && original.V1.Tx.Operations[0].Body.Type == xdr.OperationTypePayment {
+		ab, err1 := env.V1.Tx.Operations[0].Body.MarshalBinary()
+		bb, err2 := original.V1.Tx.Operations[0].Body.MarshalBinary()
+		if err1 != nil || err2 != nil || !bytes.Equal(ab, bb) {
+			return "", errors.New("ledger transaction does not match payer payment")
+		}
+		return hash, nil
+	}
 	a, _ := env.V1.Tx.Operations[0].Body.GetInvokeHostFunctionOp()
 	b, _ := original.V1.Tx.Operations[0].Body.GetInvokeHostFunctionOp()
 	ab, err1 := a.MarshalBinary()
@@ -513,4 +652,54 @@ func (s *Scheme) Reconcile(ctx context.Context, p x402.Payload, r x402.Requireme
 		return "", errors.New("ledger transaction does not contain this signed authorization")
 	}
 	return hash, nil
+}
+
+func (s *Scheme) settleClassic(ctx context.Context, p x402.Payload, r x402.Requirements) (x402.SettleResponse, error) {
+	env, payer, v := s.verifyClassic(ctx, p, r)
+	if !v.Valid {
+		return x402.SettleResponse{Network: r.Network, Payer: v.Payer, ErrorReason: v.Reason}, nil
+	}
+	enc, _ := payloadTransaction(p)
+	txHashBytes, err := network.HashTransactionInEnvelope(env, s.passphrase)
+	if err != nil {
+		return x402.SettleResponse{Network: r.Network, Payer: payer, ErrorReason: "settle_exact_stellar_hash_failed"}, nil
+	}
+	txHash := hex.EncodeToString(txHashBytes[:])
+	if s.Horizon.URL != "" {
+		gotHash, err := s.Horizon.Submit(ctx, enc)
+		if err != nil {
+			// Check if already landed on Horizon (idempotent retry).
+			if tx, terr := s.Horizon.Transaction(ctx, txHash); terr == nil && tx.Successful {
+				return x402.SettleResponse{Success: true, Transaction: txHash, Network: r.Network, Payer: payer}, nil
+			}
+			return x402.SettleResponse{Network: r.Network, Payer: payer, Transaction: gotHash, ErrorReason: "settle_exact_stellar_transaction_submission_failed"}, nil
+		}
+		return x402.SettleResponse{Success: true, Transaction: gotHash, Network: r.Network, Payer: payer}, nil
+	}
+	if s.RPC.URL == "" {
+		return x402.SettleResponse{}, errors.New("Stellar Horizon or RPC URL is required")
+	}
+	sent, err := s.RPC.Send(ctx, enc)
+	if err != nil || sent.Status != "PENDING" {
+		return x402.SettleResponse{Network: r.Network, Payer: payer, Transaction: txHash, ErrorReason: "settle_exact_stellar_transaction_submission_failed"}, nil
+	}
+	attempts := r.MaxTimeoutSeconds
+	if attempts == 0 {
+		attempts = defaultTimeoutSeconds
+	}
+	for i := 0; i < attempts; i++ {
+		st, err := s.RPC.Transaction(ctx, sent.Hash)
+		if err == nil && st.Status == "SUCCESS" {
+			return x402.SettleResponse{Success: true, Transaction: sent.Hash, Network: r.Network, Payer: payer}, nil
+		}
+		if err == nil && st.Status == "FAILED" {
+			return x402.SettleResponse{Network: r.Network, Payer: payer, Transaction: sent.Hash, ErrorReason: "settle_exact_stellar_transaction_failed"}, nil
+		}
+		select {
+		case <-ctx.Done():
+			return x402.SettleResponse{}, ctx.Err()
+		case <-time.After(s.Poll):
+		}
+	}
+	return x402.SettleResponse{Network: r.Network, Payer: payer, Transaction: sent.Hash, ErrorReason: "settle_exact_stellar_transaction_failed"}, nil
 }

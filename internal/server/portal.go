@@ -337,8 +337,14 @@ func newPortal(a *app) (*portal, error) {
 		}
 	}
 
+	multiUser := pc.users != nil && pc.users.count() > 0
+	hasPass := pc.pass != "" && !multiUser
+	if multiUser && pc.pass != "" {
+		log.Printf("portal: WARNING: CONCERT_PORTAL_PASS is ignored because CONCERT_PORTAL_USERS is configured; unset CONCERT_PORTAL_PASS to eliminate dual credentials")
+	}
+
 	seed := []byte(pc.pass)
-	if len(seed) == 0 {
+	if multiUser || len(seed) == 0 {
 		seed = cfg.admitSecret
 	}
 	keyMAC := hmac.New(sha256.New, seed)
@@ -349,7 +355,7 @@ func newPortal(a *app) (*portal, error) {
 		tlsCfg:        portalTLS,
 		static:        static,
 		sessionKey:    keyMAC.Sum(nil),
-		hasPass:       pc.pass != "",
+		hasPass:       hasPass,
 		users:         pc.users,
 		notes:         newNoteStore(portalMaxNotes),
 		kicked:        &kickList{m: map[string]time.Time{}},
@@ -695,18 +701,31 @@ func (p *portal) login(c *gin.Context) {
 		return
 	}
 
-	username := strings.TrimSpace(c.PostForm("user"))
+	_ = c.Request.ParseForm()
+	_, hasUserField := c.Request.PostForm["user"]
+	rawUser := c.PostForm("user")
+	username := strings.TrimSpace(rawUser)
 	pass := c.PostForm("pass")
 	totp := c.PostForm("totp")
 
 	var authed principal
 	ok := false
-	if p.users != nil && p.users.count() > 0 && username != "" {
+	denyReason := "invalid_credentials"
+	multiUser := p.users != nil && p.users.count() > 0
+
+	// Reject blank/whitespace usernames (in multi-user mode) or unexpected
+	// user fields (in single-password mode) before any auth branch runs.
+	switch {
+	case multiUser && username == "":
+		denyReason = "missing_username"
+	case !multiUser && hasUserField:
+		denyReason = "unexpected_username"
+	case multiUser:
 		if u, matched := p.users.authenticate(username, pass, totp, now); matched {
 			authed = principal{Actor: u.username, Role: u.role, Source: "user", IP: ip}
 			ok = true
 		}
-	} else if p.hasPass {
+	case p.hasPass:
 		got := sha256.Sum256([]byte(pass))
 		if subtle.ConstantTimeCompare(got[:], p.passDigest[:]) == 1 {
 			authed = principal{Actor: "admin", Role: roleAdmin, Source: "password", IP: ip}
@@ -723,7 +742,7 @@ func (p *portal) login(c *gin.Context) {
 			Action:   "auth.login",
 			Outcome:  "deny",
 			ClientIP: ip.String(),
-			Details:  map[string]any{"reason": "invalid_credentials"},
+			Details:  map[string]any{"reason": denyReason},
 		})
 		if _, lockedNow := p.fails.locked(ip, now); lockedNow {
 			ipLabel := p.a.emailIPLabel(ip)

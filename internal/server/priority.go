@@ -603,7 +603,7 @@ func (g *generation) priorityGate(c *gin.Context) {
 	now := time.Now()
 	rank := ps.grants.rankOf(r, now)
 
-	fast := g.a.fastlaneEligible(r)
+	fast := g.a.fastlaneEligibleAndRefresh(c.Writer, r)
 	if fast && rank < rankCustomer {
 		rank = rankCustomer
 	}

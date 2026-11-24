@@ -65,7 +65,7 @@ func newVhostManager(baseCfg config) (*vhostManager, error) {
 		configPath: baseCfg.configFile,
 		baseCfg:    baseCfg,
 	}
-	snap, err := vm.loadSnapshot()
+	snap, err := vm.loadSnapshot(nil)
 	if err != nil {
 		return nil, err
 	}
@@ -110,16 +110,19 @@ func (vm *vhostManager) siteByName(name string) (*siteRuntime, bool) {
 
 // Reload re-parses -config and validates every virtual host before swapping
 // live traffic. If the new file has any error, the previous snapshot keeps
-// serving with zero downtime.
+// serving with zero downtime. Active fast-lane/gateway journals for unchanged
+// site data directories are hot-reloaded and handed off atomically so SIGHUP
+// never collides on fastlane.lock or settlements.lock.
 func (vm *vhostManager) Reload() error {
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
 
-	next, err := vm.loadSnapshot()
+	prev := vm.snap.Load()
+	next, err := vm.loadSnapshot(prev)
 	if err != nil {
 		return err
 	}
-	prev := vm.snap.Swap(next)
+	vm.snap.Swap(next)
 	if prev != nil {
 		prev.closeApps()
 	}
@@ -146,7 +149,7 @@ func (s *vhostSnapshot) closeApps() {
 	}
 }
 
-func (vm *vhostManager) loadSnapshot() (*vhostSnapshot, error) {
+func (vm *vhostManager) loadSnapshot(prev *vhostSnapshot) (*vhostSnapshot, error) {
 	f, err := configfile.Load(vm.configPath)
 	if err != nil {
 		return nil, err
@@ -161,6 +164,15 @@ func (vm *vhostManager) loadSnapshot() (*vhostSnapshot, error) {
 		return nil, err
 	}
 
+	prevByDataDir := map[string]*app{}
+	if prev != nil {
+		for _, psr := range prev.sites {
+			if psr.app != nil && psr.app.cfg.dataDir != "" && psr.app.fastlaneEnabled() {
+				prevByDataDir[psr.app.cfg.dataDir] = psr.app
+			}
+		}
+	}
+
 	if f.Global.TLSCert != "" {
 		cr, err := newCertReloader(f.Global.TLSCert, f.Global.TLSKey)
 		if err != nil {
@@ -169,6 +181,13 @@ func (vm *vhostManager) loadSnapshot() (*vhostSnapshot, error) {
 		snap.globalCert = cr
 		snap.hasTLS = true
 	}
+
+	type pendingTransfer struct {
+		dst *app
+		src *app
+		cfg config
+	}
+	var transfers []pendingTransfer
 
 	for _, sc := range f.Sites {
 		siteCfg, err := buildSiteConfig(vm.baseCfg, f.Global, sc)
@@ -184,9 +203,22 @@ func (vm *vhostManager) loadSnapshot() (*vhostSnapshot, error) {
 			siteCert = cr
 			snap.hasTLS = true
 		}
+		var prevHolder *app
+		if siteCfg.dataDir != "" && siteCfg.fastlaneFile != "" {
+			if pa, ok := prevByDataDir[siteCfg.dataDir]; ok {
+				if err := validateFastlaneReloadConfig(siteCfg); err != nil {
+					return fail(fmt.Errorf("site %s fastlane: %w", sc.Hosts[0], err))
+				}
+				siteCfg.skipFastlaneInit = true
+				prevHolder = pa
+			}
+		}
 		a, err := newApp(siteCfg)
 		if err != nil {
 			return fail(fmt.Errorf("site %s: %w", sc.Hosts[0], err))
+		}
+		if prevHolder != nil {
+			transfers = append(transfers, pendingTransfer{dst: a, src: prevHolder, cfg: siteCfg})
 		}
 		sr := &siteRuntime{
 			primaryHost: sc.Hosts[0],
@@ -205,6 +237,11 @@ func (vm *vhostManager) loadSnapshot() (*vhostSnapshot, error) {
 					snap.acmeHosts[h] = true
 				}
 			}
+		}
+	}
+	for _, tr := range transfers {
+		if err := tr.dst.transferFastlaneFrom(tr.src, tr.cfg); err != nil {
+			return fail(fmt.Errorf("site %s fastlane handoff: %w", tr.cfg.siteHost, err))
 		}
 	}
 	if len(snap.acmeHosts) > 0 && strings.TrimSpace(f.Global.TLSCache) != "" {
@@ -308,6 +345,38 @@ func buildSiteConfig(base config, gf configfile.GlobalConfig, sc configfile.Site
 	}
 	if gf.RoomLeaseFraction != nil {
 		cfg.roomLeaseFraction = *gf.RoomLeaseFraction
+	}
+	if gf.BodyReadIdleTimeout != "" {
+		d, err := time.ParseDuration(gf.BodyReadIdleTimeout)
+		if err != nil {
+			return config{}, fmt.Errorf("invalid global body_read_idle_timeout %q: %w", gf.BodyReadIdleTimeout, err)
+		}
+		cfg.bodyReadIdleTimeout = d
+	}
+	if gf.MaxUploadTime != "" {
+		d, err := time.ParseDuration(gf.MaxUploadTime)
+		if err != nil {
+			return config{}, fmt.Errorf("invalid global max_upload_time %q: %w", gf.MaxUploadTime, err)
+		}
+		cfg.maxUploadTime = d
+	}
+	if gf.UpstreamTimeout != "" {
+		d, err := time.ParseDuration(gf.UpstreamTimeout)
+		if err != nil {
+			return config{}, fmt.Errorf("invalid global upstream_timeout %q: %w", gf.UpstreamTimeout, err)
+		}
+		cfg.headerTimeout = d
+	}
+	// Global networks_config can be shared across sites, whereas fastlane_config is
+	// per-site (or global fallback when a single site is declared) so origins stay distinct.
+	if gf.NetworksConfig != "" {
+		cfg.networksFile = gf.NetworksConfig
+	}
+	if gf.FastlaneConfig != "" {
+		cfg.fastlaneFile = gf.FastlaneConfig
+	}
+	if gf.FastlaneLockDestinations != nil {
+		cfg.fastlaneLockDestinations = *gf.FastlaneLockDestinations
 	}
 	if gf.DataDir != "" {
 		cfg.dataDir = filepath.Join(gf.DataDir, "sites", sanitizeHostDir(sc.Hosts[0]))
@@ -420,6 +489,36 @@ func buildSiteConfig(base config, gf configfile.GlobalConfig, sc configfile.Site
 	}
 	if sc.RoomLeaseFraction != nil {
 		cfg.roomLeaseFraction = *sc.RoomLeaseFraction
+	}
+	if sc.BodyReadIdleTimeout != "" {
+		d, err := time.ParseDuration(sc.BodyReadIdleTimeout)
+		if err != nil {
+			return config{}, fmt.Errorf("invalid body_read_idle_timeout %q: %w", sc.BodyReadIdleTimeout, err)
+		}
+		cfg.bodyReadIdleTimeout = d
+	}
+	if sc.MaxUploadTime != "" {
+		d, err := time.ParseDuration(sc.MaxUploadTime)
+		if err != nil {
+			return config{}, fmt.Errorf("invalid max_upload_time %q: %w", sc.MaxUploadTime, err)
+		}
+		cfg.maxUploadTime = d
+	}
+	if sc.UpstreamTimeout != "" {
+		d, err := time.ParseDuration(sc.UpstreamTimeout)
+		if err != nil {
+			return config{}, fmt.Errorf("invalid upstream_timeout %q: %w", sc.UpstreamTimeout, err)
+		}
+		cfg.headerTimeout = d
+	}
+	if sc.FastlaneConfig != "" {
+		cfg.fastlaneFile = sc.FastlaneConfig
+	}
+	if sc.NetworksConfig != "" {
+		cfg.networksFile = sc.NetworksConfig
+	}
+	if sc.FastlaneLockDestinations != nil {
+		cfg.fastlaneLockDestinations = *sc.FastlaneLockDestinations
 	}
 
 	// Apply edition preset (e.g., wordpress) after explicit fields so explicit

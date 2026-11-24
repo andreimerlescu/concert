@@ -70,11 +70,43 @@ The gateway accepts only authenticated, bounded requests from Concert and uses c
 
 ## Still requires deployment validation
 
-- Funded test-network payments, finality and recovery for every enabled chain, followed by a controlled production rollout. XRP, XLM and HBAR settlement has been exercised only against mocks and the reference facilitators' verdicts.
-- Real injected wallet approvals and any added XRPL/XLM/HBAR browser adapters. Some wallets add instructions to transactions they sign; the native SOL scheme rejects those by design.
+- Funded test-network payments, finality and recovery for every enabled chain not yet exercised with funded keys in your deployment (specifically funded Solana Devnet with `CONCERT_TESTNET_SOL_KEY` and funded Hedera Testnet with `CONCERT_TESTNET_HBAR_ACCOUNT` / `CONCERT_TESTNET_HBAR_KEY`), followed by a controlled production rollout.
+- Real injected wallet approvals in your target browser extensions (Phantom, Solflare, Backpack, GemWallet, Crossmark, Freighter, HashPack) and mobile QR scans (Xaman, Lobstr, Phantom Mobile, HashPack Mobile).
 - Live NFT ownership, key rotation and transfer tests for each enabled collection format, including indexer lag.
-- `govulncheck` and an independent security review.
-- The operator's policy service, up-to-date sanctions inputs, relevant identity checks, business-model/legal review, accounting, and support/refund procedures.
-- Operational load limits, RPC availability, sponsor balances, fee ceilings, backups and journal recovery on the deployment filesystem.
+- An independent security review of your production deployment topology.
+- The operator's policy service or blocklist curation, up-to-date sanctions inputs, relevant identity checks, business-model/legal review, accounting, and support/refund procedures.
+- Operational load limits, RPC availability, optional sponsor balances, fee ceilings, backups and journal recovery on the deployment filesystem.
 
-Native SOL uses a Concert extension. Solana compressed/Core/Token-2022 NFTs and general multisignature/contract-wallet NFT proof are outside this implementation. See [FASTLANE.md](FASTLANE.md) for the full compatibility matrix and single-writer restrictions. These limitations are explicit so deployment decisions do not rely on claims of universal wallet support or legal certification.
+## v0.3.0 Mainnet Crypto Readiness & Live Testnet Verification
+
+Verified before the `v0.3.0` release across all three editions (`concert`, `wpconcert`, `econcert`), `bench-concert`, and `concert-client`:
+
+| Check | Result |
+| --- | --- |
+| `gofmt -l .` | Clean (0 unformatted files). |
+| `make lint` (`go vet` across all 3 editions) | Passed. |
+| `make test` & `make test-race` (all 3 editions) | Passed (0 failures, 0 data races). |
+| 10× `-race` stress (`chain`, `fastlane`, `gateway`, `configfile`, `concert-client`) | Passed 10/10 runs across all 8 packages. |
+| `make vulncheck` (`govulncheck` across all 3 editions) | **No vulnerabilities found.** |
+| Standing invariant `internal/chain/solana/tx.go` | Untouched (`git diff --stat` empty). |
+
+### Live Public Testnet Runs (`make test-testnet` / `internal/server/testnet_live_test.go`)
+
+Executed against a real live `econcert` instance with its real in-process `gateway.Server` (zero mocks):
+
+1. **XRPL Testnet (`xrpl:1`, `https://s.altnet.rippletest.net:51234/`):**
+   - Funded live payer (`rKRsGGsjLj8bqU19oL792pDRthhBkH7812`) and merchant (`rPpktv6nyBYnqKh1LhsNKZZFvpU69gX9Dh`) via the XRPL Testnet faucet.
+   - **Live x402 XRP Payment:** Settled on-ledger and granted fast-lane pass — tx `B578E64DA442D5B3AC487F19AE74235DBEE56F9E218220AFCCCEA5FE40D47870`.
+   - **Live 1-Drop Destination Tag + Memo Token-Gate Proof:** Pre-checked live balance, issued unique Destination Tag `3668548999` + Memo `concert:95491cb0b69542e2`, verified on-ledger, and granted sliding fast-lane pass — tx `CBCF209D89705DCF551ECB874BAA95ECC3EDD26CAE61A0BFDFFB3A438EFED63E`.
+2. **Stellar Testnet (`stellar:testnet`, `https://horizon-testnet.stellar.org` — Zero Hot Keys):**
+   - Funded live payer (`GBDVLH6E6MMHAGLKUED5I6UCRAH4A4T32PIR65HDIIYFYDFOLTGXAMYM`) and merchant (`GBMBNVQOLRMCNQTXJX773STJPUQJXASOCAFV663PZMFUNNYEBOE46ZQ5`) via Friendbot.
+   - **Live Payer-Pays-Fees Classic XLM x402 Payment (zero hot keys on Concert):** Settled on Horizon and granted fast-lane pass — tx `c4b1cbc08de99b8cef1dfd3842bb09841cd56eece7b298bc62177bc5abc19c51`.
+   - **Live 1-Stroop Memo Token-Gate Proof:** Pre-checked live Horizon balance, issued Memo `concert:6d63f4621d0ee109`, verified on-ledger, and granted sliding fast-lane pass — tx `7a0c3ee7f4d52b0a1075d24bd981774024384a25e0b579fefa8fdb15bf72c170`.
+3. **Solana Devnet (`solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1`, `https://api.devnet.solana.com`):**
+   - Live RPC genesis-hash network check and `LatestBlockhash` succeeded (`HSk5G3eu74VEahVkv1Ux1LuWYPxY9VyibMg5GFo2pY7D`).
+   - Public RPC `requestAirdrop` returned HTTP 410 (`The RPC faucet is closed on this cluster. Request test SOL at https://faucet.solana.com`); funded Solana Devnet settlement is exercised automatically when `CONCERT_TESTNET_SOL_KEY` is provided.
+4. **Hedera Testnet (`hedera:testnet`, `https://testnet.mirrornode.hedera.com`):**
+   - Live Mirror Node TLS `:50212` node discovery succeeded (discovered 7 live TLS `:50212` consensus nodes `0.0.3`–`0.0.9`) and live Mirror Node balance verification succeeded (`0.0.2`).
+   - Funded Hedera Testnet consensus payment over TLS `:50212` is exercised automatically when `CONCERT_TESTNET_HBAR_ACCOUNT` and `CONCERT_TESTNET_HBAR_KEY` are provided.
+
+See [FASTLANE.md](FASTLANE.md) for the full multi-token, direct QR/Destination-Tag/Memo, NFT/token-gate, and live Admin Portal specification.

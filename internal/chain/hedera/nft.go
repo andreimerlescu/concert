@@ -21,29 +21,26 @@ func VerifyMessage(k *MirrorKey, message string, signature []byte) bool {
 	return err == nil && n.pub != nil && n.pub.VerifySignedMessage([]byte(message), signature)
 }
 
-// OwnsNFT checks the account's current key signed the challenge and that it
-// holds a serial of the HTS nonfungible collection (a specific serial when
-// token is given). Mirror-node lag is a trust assumption. Returns the serial.
-func (s *Scheme) OwnsNFT(ctx context.Context, address, collection, token, message string, signature []byte) (string, error) {
+// CheckNFTOwnership verifies that address holds a serial of the HTS NFT
+// collection (optionally matching requiredIssuer treasury_account_id and/or
+// specific serial token) without requiring an off-chain signature.
+func (s *Scheme) CheckNFTOwnership(ctx context.Context, address, collection, token, requiredIssuer string) (string, error) {
 	if !ValidEntityID(address) || !ValidEntityID(collection) {
 		return "", errors.New("invalid entity ID")
 	}
-	a, err := s.Mirror.Account(ctx, address)
-	if err != nil {
-		return "", err
-	}
-	if a.Deleted || !VerifyMessage(a.Key, message, signature) {
-		return "", errors.New("invalid signature")
-	}
 	var meta struct {
-		Deleted bool   `json:"deleted"`
-		Type    string `json:"type"`
+		Deleted  bool   `json:"deleted"`
+		Type     string `json:"type"`
+		Treasury string `json:"treasury_account_id"`
 	}
 	if err := s.Mirror.get(ctx, "/api/v1/tokens/"+url.PathEscape(collection), &meta); err != nil {
 		return "", err
 	}
 	if meta.Deleted || meta.Type != "NON_FUNGIBLE_UNIQUE" {
 		return "", errors.New("not an NFT collection")
+	}
+	if requiredIssuer != "" && meta.Treasury != requiredIssuer {
+		return "", errors.New("NFT collection issuer mismatch")
 	}
 	if token != "" {
 		if !serial.MatchString(token) {
@@ -78,4 +75,21 @@ func (s *Scheme) OwnsNFT(ctx context.Context, address, collection, token, messag
 		}
 	}
 	return "", errors.New("no matching NFT")
+}
+
+// OwnsNFT checks the account's current key signed the challenge and that it
+// holds a serial of the HTS nonfungible collection (a specific serial when
+// token is given). Mirror-node lag is a trust assumption. Returns the serial.
+func (s *Scheme) OwnsNFT(ctx context.Context, address, collection, token, message string, signature []byte) (string, error) {
+	if !ValidEntityID(address) || !ValidEntityID(collection) {
+		return "", errors.New("invalid entity ID")
+	}
+	a, err := s.Mirror.Account(ctx, address)
+	if err != nil {
+		return "", err
+	}
+	if a.Deleted || !VerifyMessage(a.Key, message, signature) {
+		return "", errors.New("invalid signature")
+	}
+	return s.CheckNFTOwnership(ctx, address, collection, token, "")
 }

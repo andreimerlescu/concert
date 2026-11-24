@@ -44,6 +44,9 @@ func roundTripFCGI(*fcgiTransport, *http.Request, *url.URL) (*http.Response, err
 	return nil, fmt.Errorf("FastCGI not enabled in this build")
 }
 
+func withFastCGIClientIP(req *http.Request, _ string) *http.Request       { return req }
+func withFastCGIBodyAbort(req *http.Request, _ func() bool) *http.Request { return req }
+
 func maybeGzipFastCGI(*http.Request, *http.Response) {}
 
 func buildMicroCache(config, *counters) *pageMicroCache { return nil }

@@ -185,7 +185,8 @@ It logs the report, appends it to `silence.jsonl` in `-data-dir` (outside the mo
 | `-node-id` | `CONCERT_NODE_ID` | from the hostname | ID in claims and reports, 1-32 of `[A-Za-z0-9._-]` |
 | `-hop-peers` | `CONCERT_HOP_PEERS` | *(empty)* | Leaf: CIDRs that may present claims. **Required** for a leaf |
 | `-hop-max-skew` | `CONCERT_HOP_MAX_SKEW` | `30s` | Leaf: clock skew a claim may carry, 1s-5m |
-| `-hop-replay-guard` | `CONCERT_HOP_REPLAY_GUARD` | `true` | Leaf: reject replayed `Concert-Hop` nonces via a bounded 64-shard replay cache |
+| `-hop-replay-guard` | `CONCERT_HOP_REPLAY_GUARD` | `true` | Leaf: reject replayed `Concert-Hop` nonces via a bounded 256-shard `O(1)` FIFO ring cache |
+| `-hop-replay-max` | `CONCERT_HOP_REPLAY_MAX` | `1048576` | Leaf: maximum tracked single-use nonces across 256 lazily allocated shards (`1024`–`16777216`, restart to change); saturation increments `concert_leaf_hop_replay_evictions_total` and fails closed under `-enterprise-hardened` |
 | `-hop-require-nonce` | `CONCERT_HOP_REQUIRE_NONCE` | `false` | Leaf: reject claims without a nonce (`true` required on leaves under `-enterprise-hardened`) |
 | `-hop-require-mtls` | `CONCERT_HOP_REQUIRE_MTLS` | `false` | Leaf: require a verified client cert (`-tls-client-ca`) for `Concert-Hop` claims and `/_room/hop/*` while still allowing public browsers without certs |
 | `-tls-client-ca` | `CONCERT_TLS_CLIENT_CA` | *(empty)* | PEM CA bundle to verify client certificates on the main TLS listener |

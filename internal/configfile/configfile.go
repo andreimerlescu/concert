@@ -25,68 +25,80 @@ type File struct {
 // GlobalConfig holds process-level listener, TLS, HTTP/3, Portal, and logging
 // directives shared across all virtual hosts.
 type GlobalConfig struct {
-	Listen             string            `json:"listen,omitempty"`
-	HTTPListen         string            `json:"http_listen,omitempty"`
-	TLSEmail           string            `json:"tls_email,omitempty"`
-	TLSCache           string            `json:"tls_cache,omitempty"`
-	TLSStaging         bool              `json:"tls_staging,omitempty"`
-	TLSCert            string            `json:"tls_cert,omitempty"`
-	TLSKey             string            `json:"tls_key,omitempty"`
-	TLSMinVersion      string            `json:"tls_min_version,omitempty"`
-	HSTSMaxAge         int               `json:"hsts_max_age,omitempty"`
-	HTTP3              bool              `json:"http3,omitempty"`
-	PortalListen       string            `json:"portal_listen,omitempty"`
-	PortalAllow        string            `json:"portal_allow,omitempty"`
-	PortalTLSCert      string            `json:"portal_tls_cert,omitempty"`
-	PortalTLSKey       string            `json:"portal_tls_key,omitempty"`
-	PortalSecureCookie *bool             `json:"portal_secure_cookie,omitempty"`
-	DataDir            string            `json:"data_dir,omitempty"`
-	TrustedProxies     string            `json:"trusted_proxies,omitempty"`
-	LogFormat          string            `json:"log_format,omitempty"`
-	LogLevel           string            `json:"log_level,omitempty"`
-	StatsAuth          *bool             `json:"stats_auth,omitempty"`
-	RoomVerifyKeys     string            `json:"room_verify_keys,omitempty"`
-	RoomSignedMaxTTL   string            `json:"room_signed_max_ttl,omitempty"`
-	RoomLeaseFraction  *float64          `json:"room_lease_fraction,omitempty"`
-	Extra              map[string]string `json:"extra,omitempty"`
+	Listen                   string            `json:"listen,omitempty"`
+	HTTPListen               string            `json:"http_listen,omitempty"`
+	TLSEmail                 string            `json:"tls_email,omitempty"`
+	TLSCache                 string            `json:"tls_cache,omitempty"`
+	TLSStaging               bool              `json:"tls_staging,omitempty"`
+	TLSCert                  string            `json:"tls_cert,omitempty"`
+	TLSKey                   string            `json:"tls_key,omitempty"`
+	TLSMinVersion            string            `json:"tls_min_version,omitempty"`
+	HSTSMaxAge               int               `json:"hsts_max_age,omitempty"`
+	HTTP3                    bool              `json:"http3,omitempty"`
+	PortalListen             string            `json:"portal_listen,omitempty"`
+	PortalAllow              string            `json:"portal_allow,omitempty"`
+	PortalTLSCert            string            `json:"portal_tls_cert,omitempty"`
+	PortalTLSKey             string            `json:"portal_tls_key,omitempty"`
+	PortalSecureCookie       *bool             `json:"portal_secure_cookie,omitempty"`
+	DataDir                  string            `json:"data_dir,omitempty"`
+	TrustedProxies           string            `json:"trusted_proxies,omitempty"`
+	LogFormat                string            `json:"log_format,omitempty"`
+	LogLevel                 string            `json:"log_level,omitempty"`
+	StatsAuth                *bool             `json:"stats_auth,omitempty"`
+	RoomVerifyKeys           string            `json:"room_verify_keys,omitempty"`
+	RoomSignedMaxTTL         string            `json:"room_signed_max_ttl,omitempty"`
+	RoomLeaseFraction        *float64          `json:"room_lease_fraction,omitempty"`
+	BodyReadIdleTimeout      string            `json:"body_read_idle_timeout,omitempty"`
+	MaxUploadTime            string            `json:"max_upload_time,omitempty"`
+	UpstreamTimeout          string            `json:"upstream_timeout,omitempty"`
+	FastlaneConfig           string            `json:"fastlane_config,omitempty"`
+	NetworksConfig           string            `json:"networks_config,omitempty"`
+	FastlaneLockDestinations *bool             `json:"fastlane_lock_destinations,omitempty"`
+	Extra                    map[string]string `json:"extra,omitempty"`
 }
 
 // SiteConfig holds one virtual host block (one or more hostnames sharing a
 // waiting room, upstream pool, static root, and optional micro-cache).
 type SiteConfig struct {
-	Hosts              []string          `json:"hosts"`
-	Preset             string            `json:"preset,omitempty"`
-	Upstream           string            `json:"upstream,omitempty"`
-	Root               string            `json:"root,omitempty"`
-	Mounts             []string          `json:"mounts,omitempty"`
-	StaticAllowExt     string            `json:"static_allow_ext,omitempty"`
-	StaticCacheControl string            `json:"static_cache_control,omitempty"`
-	StaticFallback     *bool             `json:"static_fallback,omitempty"`
-	Compress           *bool             `json:"compress,omitempty"`
-	Assets             string            `json:"assets,omitempty"`
-	AssetPublic        string            `json:"asset_public,omitempty"`
-	Bypass             string            `json:"bypass,omitempty"`
-	StreamPaths        string            `json:"stream_paths,omitempty"`
-	Cap                int               `json:"cap,omitempty"`
-	MaxQueue           *int64            `json:"max_queue,omitempty"`
-	PriorityCap        int               `json:"priority_cap,omitempty"`
-	PriorityLaneRank   int               `json:"priority_lane_rank,omitempty"`
-	SecureCookie       *bool             `json:"secure_cookie,omitempty"`
-	PreserveHost       *bool             `json:"preserve_host,omitempty"`
-	FCGIIndex          string            `json:"fcgi_index,omitempty"`
-	FCGIDenyPaths      string            `json:"fcgi_deny_paths,omitempty"`
-	MicroCache         string            `json:"micro_cache,omitempty"`
-	MicroCacheMaxMB    int               `json:"micro_cache_max_mb,omitempty"`
-	Abuse              *bool             `json:"abuse,omitempty"`
-	AbuseStrikes       int               `json:"abuse_strikes,omitempty"`
-	BanPaths           string            `json:"ban_paths,omitempty"`
-	RoomVerifyKeys     string            `json:"room_verify_keys,omitempty"`
-	RoomScope          string            `json:"room_scope,omitempty"`
-	RoomSignedMaxTTL   string            `json:"room_signed_max_ttl,omitempty"`
-	RoomLeaseFraction  *float64          `json:"room_lease_fraction,omitempty"`
-	TLSCert            string            `json:"tls_cert,omitempty"`
-	TLSKey             string            `json:"tls_key,omitempty"`
-	Extra              map[string]string `json:"extra,omitempty"`
+	Hosts                    []string          `json:"hosts"`
+	Preset                   string            `json:"preset,omitempty"`
+	Upstream                 string            `json:"upstream,omitempty"`
+	Root                     string            `json:"root,omitempty"`
+	Mounts                   []string          `json:"mounts,omitempty"`
+	StaticAllowExt           string            `json:"static_allow_ext,omitempty"`
+	StaticCacheControl       string            `json:"static_cache_control,omitempty"`
+	StaticFallback           *bool             `json:"static_fallback,omitempty"`
+	Compress                 *bool             `json:"compress,omitempty"`
+	Assets                   string            `json:"assets,omitempty"`
+	AssetPublic              string            `json:"asset_public,omitempty"`
+	Bypass                   string            `json:"bypass,omitempty"`
+	StreamPaths              string            `json:"stream_paths,omitempty"`
+	Cap                      int               `json:"cap,omitempty"`
+	MaxQueue                 *int64            `json:"max_queue,omitempty"`
+	PriorityCap              int               `json:"priority_cap,omitempty"`
+	PriorityLaneRank         int               `json:"priority_lane_rank,omitempty"`
+	SecureCookie             *bool             `json:"secure_cookie,omitempty"`
+	PreserveHost             *bool             `json:"preserve_host,omitempty"`
+	FCGIIndex                string            `json:"fcgi_index,omitempty"`
+	FCGIDenyPaths            string            `json:"fcgi_deny_paths,omitempty"`
+	MicroCache               string            `json:"micro_cache,omitempty"`
+	MicroCacheMaxMB          int               `json:"micro_cache_max_mb,omitempty"`
+	Abuse                    *bool             `json:"abuse,omitempty"`
+	AbuseStrikes             int               `json:"abuse_strikes,omitempty"`
+	BanPaths                 string            `json:"ban_paths,omitempty"`
+	RoomVerifyKeys           string            `json:"room_verify_keys,omitempty"`
+	RoomScope                string            `json:"room_scope,omitempty"`
+	RoomSignedMaxTTL         string            `json:"room_signed_max_ttl,omitempty"`
+	RoomLeaseFraction        *float64          `json:"room_lease_fraction,omitempty"`
+	BodyReadIdleTimeout      string            `json:"body_read_idle_timeout,omitempty"`
+	MaxUploadTime            string            `json:"max_upload_time,omitempty"`
+	UpstreamTimeout          string            `json:"upstream_timeout,omitempty"`
+	FastlaneConfig           string            `json:"fastlane_config,omitempty"`
+	NetworksConfig           string            `json:"networks_config,omitempty"`
+	FastlaneLockDestinations *bool             `json:"fastlane_lock_destinations,omitempty"`
+	TLSCert                  string            `json:"tls_cert,omitempty"`
+	TLSKey                   string            `json:"tls_key,omitempty"`
+	Extra                    map[string]string `json:"extra,omitempty"`
 }
 
 // Load reads and parses a Concertfile (or JSON file when path ends in .json).
@@ -177,6 +189,18 @@ func (f *File) NormalizeAndValidate() error {
 		if s.RoomLeaseFraction != nil && (*s.RoomLeaseFraction < 0 || *s.RoomLeaseFraction > 1) {
 			return fmt.Errorf("site %s: invalid room_lease_fraction %g (must be 0-1)", s.Hosts[0], *s.RoomLeaseFraction)
 		}
+		if s.BodyReadIdleTimeout != "" && !strings.EqualFold(s.BodyReadIdleTimeout, "off") && s.BodyReadIdleTimeout != "0" {
+			d, err := time.ParseDuration(s.BodyReadIdleTimeout)
+			if err != nil || d < 0 {
+				return fmt.Errorf("site %s: invalid body_read_idle_timeout %q", s.Hosts[0], s.BodyReadIdleTimeout)
+			}
+		}
+		if s.MaxUploadTime != "" && !strings.EqualFold(s.MaxUploadTime, "off") && s.MaxUploadTime != "0" {
+			d, err := time.ParseDuration(s.MaxUploadTime)
+			if err != nil || d < 0 {
+				return fmt.Errorf("site %s: invalid max_upload_time %q", s.Hosts[0], s.MaxUploadTime)
+			}
+		}
 		if (s.TLSCert == "") != (s.TLSKey == "") {
 			return fmt.Errorf("site %s: tls_cert and tls_key must both be set", s.Hosts[0])
 		}
@@ -189,6 +213,18 @@ func (f *File) NormalizeAndValidate() error {
 	}
 	if f.Global.RoomLeaseFraction != nil && (*f.Global.RoomLeaseFraction < 0 || *f.Global.RoomLeaseFraction > 1) {
 		return fmt.Errorf("global: invalid room_lease_fraction %g (must be 0-1)", *f.Global.RoomLeaseFraction)
+	}
+	if f.Global.BodyReadIdleTimeout != "" && !strings.EqualFold(f.Global.BodyReadIdleTimeout, "off") && f.Global.BodyReadIdleTimeout != "0" {
+		d, err := time.ParseDuration(f.Global.BodyReadIdleTimeout)
+		if err != nil || d < 0 {
+			return fmt.Errorf("global: invalid body_read_idle_timeout %q", f.Global.BodyReadIdleTimeout)
+		}
+	}
+	if f.Global.MaxUploadTime != "" && !strings.EqualFold(f.Global.MaxUploadTime, "off") && f.Global.MaxUploadTime != "0" {
+		d, err := time.ParseDuration(f.Global.MaxUploadTime)
+		if err != nil || d < 0 {
+			return fmt.Errorf("global: invalid max_upload_time %q", f.Global.MaxUploadTime)
+		}
 	}
 	if (f.Global.TLSCert == "") != (f.Global.TLSKey == "") {
 		return errors.New("global: tls_cert and tls_key must both be set")
@@ -612,6 +648,32 @@ func (p *parser) parseGlobalBlock(g *GlobalConfig) error {
 				return fmt.Errorf("Concertfile:%d:%d: directive %q invalid number %q", dir.line, dir.col, dir.val, s)
 			}
 			g.RoomLeaseFraction = &v
+		case "body_read_idle_timeout":
+			if g.BodyReadIdleTimeout, err = requireOneArg(dir, args); err != nil {
+				return err
+			}
+		case "max_upload_time":
+			if g.MaxUploadTime, err = requireOneArg(dir, args); err != nil {
+				return err
+			}
+		case "upstream_timeout":
+			if g.UpstreamTimeout, err = requireOneArg(dir, args); err != nil {
+				return err
+			}
+		case "fastlane_config":
+			if g.FastlaneConfig, err = requireOneArg(dir, args); err != nil {
+				return err
+			}
+		case "networks_config":
+			if g.NetworksConfig, err = requireOneArg(dir, args); err != nil {
+				return err
+			}
+		case "fastlane_lock_destinations":
+			b, err := parseBoolArg(dir, args)
+			if err != nil {
+				return err
+			}
+			g.FastlaneLockDestinations = &b
 		default:
 			return fmt.Errorf("Concertfile:%d:%d: unknown global directive %q", dir.line, dir.col, dir.val)
 		}
@@ -784,6 +846,32 @@ body:
 				return s, fmt.Errorf("Concertfile:%d:%d: directive %q invalid number %q", dir.line, dir.col, dir.val, arg)
 			}
 			s.RoomLeaseFraction = &v
+		case "body_read_idle_timeout":
+			if s.BodyReadIdleTimeout, err = requireOneArg(dir, args); err != nil {
+				return s, err
+			}
+		case "max_upload_time":
+			if s.MaxUploadTime, err = requireOneArg(dir, args); err != nil {
+				return s, err
+			}
+		case "upstream_timeout":
+			if s.UpstreamTimeout, err = requireOneArg(dir, args); err != nil {
+				return s, err
+			}
+		case "fastlane_config":
+			if s.FastlaneConfig, err = requireOneArg(dir, args); err != nil {
+				return s, err
+			}
+		case "networks_config":
+			if s.NetworksConfig, err = requireOneArg(dir, args); err != nil {
+				return s, err
+			}
+		case "fastlane_lock_destinations":
+			b, err := parseBoolArg(dir, args)
+			if err != nil {
+				return s, err
+			}
+			s.FastlaneLockDestinations = &b
 		case "tls_cert":
 			if s.TLSCert, err = requireOneArg(dir, args); err != nil {
 				return s, err
@@ -812,7 +900,8 @@ func FormatConcertfile(f *File) string {
 	hasGlobal := g.Listen != "" || g.HTTPListen != "" || g.TLSEmail != "" || g.TLSCache != "" ||
 		g.TLSStaging || g.TLSCert != "" || g.HTTP3 || g.PortalListen != "" || g.DataDir != "" ||
 		g.TrustedProxies != "" || g.LogFormat != "" || g.LogLevel != "" || g.HSTSMaxAge > 0 ||
-		g.RoomVerifyKeys != "" || g.RoomSignedMaxTTL != "" || g.RoomLeaseFraction != nil
+		g.RoomVerifyKeys != "" || g.RoomSignedMaxTTL != "" || g.RoomLeaseFraction != nil ||
+		g.BodyReadIdleTimeout != "" || g.MaxUploadTime != ""
 	if hasGlobal {
 		b.WriteString("{\n")
 		if g.Listen != "" {
@@ -854,6 +943,12 @@ func FormatConcertfile(f *File) string {
 		}
 		if g.RoomLeaseFraction != nil {
 			fmt.Fprintf(&b, "    room_lease_fraction %g\n", *g.RoomLeaseFraction)
+		}
+		if g.BodyReadIdleTimeout != "" {
+			fmt.Fprintf(&b, "    body_read_idle_timeout %s\n", quote(g.BodyReadIdleTimeout))
+		}
+		if g.MaxUploadTime != "" {
+			fmt.Fprintf(&b, "    max_upload_time %s\n", quote(g.MaxUploadTime))
 		}
 		b.WriteString("}\n\n")
 	}
@@ -911,6 +1006,12 @@ func FormatConcertfile(f *File) string {
 		}
 		if s.RoomLeaseFraction != nil {
 			fmt.Fprintf(&b, "    room_lease_fraction %g\n", *s.RoomLeaseFraction)
+		}
+		if s.BodyReadIdleTimeout != "" {
+			fmt.Fprintf(&b, "    body_read_idle_timeout %s\n", quote(s.BodyReadIdleTimeout))
+		}
+		if s.MaxUploadTime != "" {
+			fmt.Fprintf(&b, "    max_upload_time %s\n", quote(s.MaxUploadTime))
 		}
 		if s.TLSCert != "" {
 			fmt.Fprintf(&b, "    tls_cert %s\n", quote(s.TLSCert))

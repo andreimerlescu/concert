@@ -29,12 +29,14 @@ import (
 //	room_probe       — non-HttpOnly cookie-support probe
 //	concert_admit    — HttpOnly signed admission pass for the asset and stream tiers
 //	concert_priority — HttpOnly signed rank granted by the origin; see priority.go
-var proxyCookies = []string{"room_ticket", "room_pass", "room_probe", admitCookie, priorityCookie, "concert_fastlane"}
+var proxyCookies = []string{"room_ticket", "room_pass", "room_probe", admitCookie, priorityCookie, "concert_fastlane", "concert_fastlane_pass"}
 
 type config struct {
-	fastlaneFile string // immutable startup configuration; see docs/FASTLANE.md
-	networksFile string // chain endpoints for the fast lane's gateway
-	configFile   string // declarative Concertfile or .json path; see vhost.go
+	fastlaneFile             string // fast-lane configuration JSON path; see docs/FASTLANE.md
+	networksFile             string // chain endpoints for the fast lane's gateway
+	fastlaneLockDestinations bool   // lock payTo wallet destinations read-only in Admin Portal
+	skipFastlaneInit         bool   // internal: vhost reload transfers existing fastlane/gateway handles
+	configFile               string // declarative Concertfile or .json path; see vhost.go
 
 	// Multi-vhost / declarative config metadata populated by vhost.go.
 	configManaged   bool
@@ -45,27 +47,29 @@ type config struct {
 	microCacheMaxMB int
 	http3           bool
 
-	listen         string
-	upstream       string
-	capacity       int
-	maxQueue       int64
-	reaper         time.Duration
-	tokenTTL       time.Duration
-	firstPollGrace time.Duration
-	secureCookie   bool
-	cookiePath     string
-	cookieDomain   string
-	preserveHost   bool
-	bypass         string
-	htmlFile       string
-	skipURL        string
-	rate           float64
-	surge          float64
-	passDuration   time.Duration
-	headerTimeout  time.Duration
-	apiJSON        bool
-	retryAfter     int
-	adminToken     string
+	listen              string
+	upstream            string
+	capacity            int
+	maxQueue            int64
+	reaper              time.Duration
+	tokenTTL            time.Duration
+	firstPollGrace      time.Duration
+	secureCookie        bool
+	cookiePath          string
+	cookieDomain        string
+	preserveHost        bool
+	bypass              string
+	htmlFile            string
+	skipURL             string
+	rate                float64
+	surge               float64
+	passDuration        time.Duration
+	headerTimeout       time.Duration
+	bodyReadIdleTimeout time.Duration
+	maxUploadTime       time.Duration
+	apiJSON             bool
+	retryAfter          int
+	adminToken          string
 
 	// room v1.8.0 verify-only Ed25519 split mode for multi-replica VIP passes & signed leases.
 	roomVerifyKeys       string
@@ -169,6 +173,7 @@ type config struct {
 	hopReplayGuard   bool          // leaf: reject replayed Concert-Hop nonces within 2*maxSkew
 	hopRequireNonce  bool          // leaf: reject legacy v0.2.0 Concert-Hop claims without a nonce
 	hopRequireMTLS   bool          // leaf: require verified TLS client cert on hop claims and control plane
+	hopReplayMax     int           // leaf: max tracked single-use Concert-Hop nonces across 256 shards
 	hopLeaves        string        // edge: leaf control URLs; empty means the upstreams
 	hopPoll          time.Duration // edge: how often leaves are polled
 	hopAutoCap       bool          // edge: size the room from what the leaves report
@@ -360,6 +365,12 @@ func (c *config) normalize() error {
 	}
 	if c.upstreamCBCooldown == 0 {
 		c.upstreamCBCooldown = 15 * time.Second
+	}
+	if c.bodyReadIdleTimeout < 0 {
+		return fmt.Errorf("invalid -body-read-idle-timeout %s: must not be negative", c.bodyReadIdleTimeout)
+	}
+	if c.maxUploadTime < 0 {
+		return fmt.Errorf("invalid -max-upload-time %s: must not be negative", c.maxUploadTime)
 	}
 	if c.upstreamHealthPath != "" && !strings.HasPrefix(c.upstreamHealthPath, "/") {
 		return fmt.Errorf("invalid -upstream-health-path %q: must start with /", c.upstreamHealthPath)

@@ -1,283 +1,131 @@
-# Concert wallet access
+# Concert Enterprise Fast-Lane (`econcert`)
 
-Concert can sell a time-limited fast-lane pass or admit a verified NFT holder. The standard FIFO queue remains available. An eligible request shares Concert's bounded priority lane; eligibility does not reserve capacity, authenticate an upstream account, or guarantee delivery of the upstream service.
+`econcert` can sell a time-limited fast-lane pass in any native coin or issued token/stablecoin across **XRPL**, **Stellar**, **Hedera**, and **Solana**, or admit verified **NFT collection** and **token/trustline balance** holders — while keeping the standard FIFO waiting room always open.
 
-Concert handles sessions, x402 challenges, policy decisions, durable receipts and admission, and its built-in chain gateway (`internal/gateway`) verifies and settles payments and checks NFT ownership. It is one Go binary; nothing else runs beside it, and no Node.js or JavaScript toolchain is involved. Payer keys stay in the payer's wallet. The only keys Concert holds are the Stellar and Hedera fee sponsors', from its environment.
+An eligible request shares Concert's bounded priority lane. Eligibility bypasses the waiting room queue; it does not reserve an exclusive upstream slot, authenticate an upstream account, or pay for products inside the origin application unless the operator chooses to price access accordingly.
 
-## Implemented payment schemes
+Concert handles sessions, x402 v2 challenges, universal on-ledger Destination-Tag/Memo flows, policy screening, durable receipts, and cross-edge sliding pass cookies inside one Go binary (`econcert`). Payer private keys stay in the payer's wallet. **By default (`areFeesSponsored: false`), Concert holds zero hot keys on all four chains** — payers pay their own network fees.
 
-| Currency | Scheme | Asset identifier | Atomic units per coin | Payer / sponsor fees |
+## Implemented payment schemes & multi-token assets
+
+| Chain | Native coin | Issued tokens / stablecoins | Scheme(s) | Payer / sponsor fees |
 | --- | --- | --- | --- | --- |
-| XRP | x402 `exact` (XRPL) | `XRP` | 1,000,000 drops | Payer |
-| XLM | x402 `exact` (Stellar) | Canonical native Stellar Asset Contract | 10,000,000 stroops | Dedicated sponsor |
-| HBAR | x402 `exact` (Hedera) | `0.0.0` | 100,000,000 tinybars | Dedicated sponsor |
-| SOL | `concert-native-sol` extension | `SOL` | 1,000,000,000 lamports | Payer |
+| **XRPL** | `XRP` (6 decimals, drops) | Any IOU trustline (`CURRENCY:ISSUER`, e.g. `RLUSD:rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De`, 3-char or 40-hex currency codes) | x402 `exact` + Direct QR / Destination Tag + Memo | Payer (zero hot keys) |
+| **Stellar** | `XLM` (7 decimals, stroops) | Classic issued assets (`CODE:ISSUER`, e.g. `USDC:GA5Z...`) and Soroban SACs (`C...`) | x402 `exact` (classic payer-paid or optional sponsored Soroban) + Direct QR / Memo | Payer by default; optional dedicated sponsor with balance alerts & per-minute caps |
+| **Hedera** | `0.0.0` (`HBAR`, 8 decimals, tinybars) | Any HTS fungible token (`0.0.N`, e.g. `0.0.456858` USDC) | x402 `exact` (TLS `:50212` consensus nodes) + Direct QR / Memo | Payer by default; optional dedicated sponsor (`extra.feePayer`) with spend caps |
+| **Solana** | `SOL` (9 decimals, lamports) | Any SPL or Token-2022 mint (e.g. `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` USDC) | `concert-native-sol` (SOL), x402 `exact` (SPL/Token-2022 with `ComputeBudget` priority fee tolerance) + Direct QR / Memo | Payer (zero hot keys) |
 
-The XRPL, Stellar and Hedera `exact` rules are ported from the official x402 TypeScript facilitators (`@x402/xrpl`, `@x402/stellar`, `@x402/hedera` 2.27.0) into Go, check for check and with the same `invalidReason` strings. Test vectors generated with those facilitators and their chain SDKs are committed under `internal/chain/*/testdata`, and the Go verifiers must reach the same verdicts. Concert is deliberately stricter in a few places: it refuses XRPL fields its codec cannot interpret and non-XRP assets, verifies the Stellar payer's authorization signature against the payer's own account key (so multisignature Stellar payers and `AddressV2` credentials are refused), refuses Stellar simulations that need a state restore, and accepts one debited Hedera payer with a capped sponsor fee.
-
-Native SOL is **not** the standard x402 SPL-token `exact` scheme. Its wire format and restrictions are in [NATIVE_SOL_SCHEME.md](NATIVE_SOL_SCHEME.md). A generic x402 wallet must explicitly implement the advertised chain scheme. An x402 connection alone does not supply an NFT ownership proof or guarantee message-signing support.
-
-| Chain | Main network | Test network |
+| Chain | Mainnet CAIP-2 ID | Testnet / Devnet CAIP-2 ID |
 | --- | --- | --- |
 | XRPL | `xrpl:0` | `xrpl:1` (Testnet), `xrpl:2` (Devnet) |
 | Stellar | `stellar:pubnet` | `stellar:testnet` |
 | Hedera | `hedera:mainnet` | `hedera:testnet` |
 | Solana | `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp` | `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1` (Devnet) |
 
-Concert validates recipients per chain at startup: an XRPL classic `r…` address, a Stellar `G…`/`C…` address, a numeric Hedera account, or a base58 Solana account. An HBAR offer must name a numeric `extra.feePayer` sponsor that differs from `payTo`. The gateway additionally refuses a Hedera payload whose `maxTransactionFee` exceeds the network's `max_fee_tinybars` (default 100,000,000 tinybars, the 1 HBAR the official x402 Hedera client authorizes), because the sponsor pays it.
+XRPL Mainnet, Testnet, and Devnet transactions carry no `NetworkID`, so the gateway checks the rippled endpoint's `server_info` network ID before every verification, NFT/token check, and reconciliation (and verifies `delivered_amount` on IOU payments so partial-payment exploits are impossible). Hedera prefers TLS gRPC consensus endpoints (`:50212`) with transport security enabled.
 
-XRPL Mainnet, Testnet and Devnet transactions carry no `NetworkID`, so the endpoint alone decides where a payment lands. The gateway therefore checks the XRPL endpoint's `server_info` network ID before every verification, NFT proof and reconciliation, and the reference client does so before signing. A mismatch is refused. XRPL endpoints are rippled JSON-RPC URLs over HTTPS (`rpc`, for example `https://s.altnet.rippletest.net:51234/`); WebSocket `ws` entries are no longer used and are rejected.
+## Two ways visitors & AI agents enter the fast lane
 
-XLM payments use the native asset through Soroban. This is not a classic Stellar payment operation. Canonical native contracts are `CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA` on public network and `CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC` on testnet. The gateway derives and checks the contract against the network passphrase.
+### 1. Universal Direct QR + Destination Tag / Memo Flow (Any Mobile, Hardware, or Desktop Wallet)
 
-## Run a test deployment
+Works with **any** wallet on earth (Xaman/Xumm, Ledger, Lobstr, Freighter, Phantom Mobile, Solflare, HashPack) without browser extensions or hot keys:
 
-Requires Go 1.27.3 or later, nothing else. Wallet access is part of the `concert` binary.
+- **Direct Paid Pass (`POST /_concert/direct/challenge` with `kind: "payment"`):** Visitor picks an offer (e.g., `0.99 RLUSD` or `0.99 USDC`), Concert pre-checks any attached NFT/token purchase prerequisites, and displays a strict-CSP inline SVG QR code, wallet deep link (`xrpl:`, `web+stellar:`, `solana:`, `hedera:`), exact amount, receiving address, unique XRPL Destination Tag, and unique `concert:<16-hex>` Memo. The page auto-polls `POST /_concert/direct/verify` until confirmed on-ledger, records the transaction hash durably to prevent replay, and issues the fast-lane pass cookie immediately.
+- **1-Drop / Memo Ownership Proof (`POST /_concert/direct/challenge` with `kind: "proof"`):** Visitor enters their public wallet address for an NFT collection or Token/Trustline balance rule. Concert **checks their on-chain holdings first** (so non-holders never waste a single drop), then issues a unique Destination Tag + Memo for the chain's minimum dust (`1 drop` / `1 stroop` / `1 tinybar` / `1 lamport`). Once the transaction appears on-ledger, Concert grants the fast-lane pass and records the proof tx hash against replay.
 
-1. Start from the samples: `concert example fastlane > fastlane.json` and `concert example networks > networks.json` (the files are also in `internal/server/examples/`, and `installer.sh` writes them to `/etc/concert/*.example.json`). Every value in them is a well-formed placeholder: replace each one using the [configuration reference](#configuration-reference) below, and remove the offers, collections and networks you do not use. Keep `test_mode: true` for testing; it rejects mainnet identifiers. Set `enabled` to `true` only after configuration is complete. Keep both files private, mode 0640, readable by the account Concert runs as. Under SELinux, install them with `installer.sh`, which applies the `concert_etc_t` label Concert needs to read them.
-2. Configure a native receiving address for each offer. XRP receiving addresses must accept a direct payment without a required destination tag. Use a numeric Hedera receiving account and a separate funded Hedera sponsor. Fund the dedicated Stellar sponsor on the selected network. Concert does not custody payer funds or need a recipient's private key.
-3. Set a stable random `CONCERT_ADMIT_SECRET` of at least 32 characters and a portal password. A production policy service also needs `CONCERT_POLICY_TOKEN` of at least 32 characters. Sponsor keys go in `CONCERT_STELLAR_FEE_SECRET` (an `S…` seed) and `CONCERT_HEDERA_FEE_SECRET` (a DER private key), or in the variables a network's `secret_env` names. Use a secrets manager or mode-0600 environment file. Never put sponsor or payer secrets in JSON, source control, URLs or browser code.
-4. Build and start Concert from the source directory:
+### 2. Browser Wallet Extensions & x402 v2 Automated Agents (`PAYMENT-SIGNATURE`)
 
-   ```sh
-   go test ./...
-   go build -trimpath -buildvcs=false -o bin/concert ./cmd/concert
-   ./bin/concert -listen 127.0.0.1:8080 \
-     -portal-listen 127.0.0.1:8081 \
-     -upstream http://127.0.0.1:3000 \
-     -data-dir /var/lib/concert/data \
-     -fastlane-config /etc/concert/fastlane.json \
-     -networks-config /etc/concert/networks.json \
-     -cap 100 -priority-cap 10
-   ```
+- **Browser Extensions:** Built-in Wallet Standard support for Solana (Phantom, Solflare, Backpack — tolerating wallet-injected `ComputeBudget` priority-fee instructions and SPL/Token-2022 `TransferChecked`), plus native adapters in `internal/server/web/wallet-adapters.js` for XRPL (GemWallet, Crossmark), Stellar (Freighter), and Hedera (HashPack).
+- **AI Agents & Automated Software (`concert-client`):** Queued agents sending `Concert-Session` receive a structured `429` JSON response with `fast_lane.offers` including `display_amount` and `asset_symbol` (e.g., `"0.99"` `"RLUSD"`), pay via `POST /_concert/payment` with `PAYMENT-SIGNATURE`, and immediately take the priority lane on their next request.
 
-   `CONCERT_FASTLANE_CONFIG`, `CONCERT_NETWORKS_CONFIG` and `CONCERT_DATA_DIR` can provide the same paths. The data directory must be persistent local storage: it holds the receipt journal `fastlane.jsonl` and, under `gateway/`, the settlement journal. On SIGTERM Concert lets settlements in flight journal their results before exiting, which can take up to an offer's `maxTimeoutSeconds` plus three minutes; give the service manager that long to stop. `installer.sh` installs the configuration files with the SELinux label Concert needs (see its header).
-5. Open `http://127.0.0.1:8080/_concert/access`. The portal's **Fast lane** tab shows enabled offers, NFT rules and receipt counts. Configuration changes require a restart. The portal does not accept private keys or edit payment destinations.
+## NFT Collection & Token/Trustline Gating
 
-For production, use HTTPS, set `origin` to the public origin, configure mainnet endpoints and explicitly set `test_mode: false`. Configure a real policy service using [US_COMPLIANCE.md](US_COMPLIANCE.md). Put the portal behind private network/authentication controls. Configure `-trusted-proxies` narrowly so policy receives the real client IP. Serve terms/privacy/refunds from an always-available external origin or deliberately add those exact routes to Concert's `-bypass` list. Concert reserves `/_concert` and everything under it for the wallet pages and API; path lists that name it are rejected.
+Both **NFT collections** (`collections[]`) and **Token/Trustline minimum balances** (`token_gates[]`) support three explicit `usage` modes:
 
-The primary page request ceiling is the ordinary page capacity plus the priority lane capacity. Existing asset and streaming pools have separate limits. Paid and NFT access uses customer rank and the same priority semaphore as existing privileged requests. When the priority lane stays full, a paid page request (GET or HEAD) joins the ordinary FIFO line like any other ranked visitor, and its pass stays valid. A paid form or API submission is refused with `503` and `Retry-After` instead of being queued, which would lose its body: browsers get Concert's existing "form not sent" page, other clients JSON with `fast_lane_busy`, `submitted: false` and `charged_again: false`. A refused request is never sent upstream, and a full lane never buys another pass.
+- `"entry"` (**Hold to Enter**): Holders receive a free fast-lane pass upon proving wallet ownership.
+- `"purchase_gate"` (**Hold to Buy**): Attached to one or more paid `offers[]` via `require_collections` / `require_token_gates` (`gate_mode: "all"` or `"any"`). The paying wallet must satisfy the prerequisite before Concert accepts or settles the pass payment.
+- `"both"`: Works as either a free entry rule or a purchase prerequisite.
 
-## Configuration reference
-
-Wallet access reads two JSON files and a few environment variables. The samples (`internal/server/examples/fastlane.json`, `internal/server/examples/networks.json`, or `concert example fastlane|networks`) contain every key below. Their values are invented but correctly formatted, so a sample with `"enabled": true` passes Concert's checks; the addresses in it belong to nobody you know, so **a payment sent to a sample address is lost**. Replace them all.
-
-Amounts are always integer strings in the chain's smallest unit: 1 XRP = 1,000,000 drops, 1 XLM = 10,000,000 stroops, 1 HBAR = 100,000,000 tinybars, 1 SOL = 1,000,000,000 lamports.
-
-### fastlane.json: top level
-
-| Key | Sample value | Your real value |
-| --- | --- | --- |
-| `enabled` | `false` | `true` once every other value is real. `false` keeps wallet access off; only the file's JSON syntax and key names are checked (an unknown key stops startup). |
-| `origin` | `"https://queue.example.com"` | The public address visitors type to reach Concert: scheme, host and optional port, no path or trailing slash. It must equal the browser's `Origin` header exactly (`https://www.example.com` and `https://example.com` differ). HTTPS; `http://127.0.0.1:8080` is allowed only in test mode. |
-| `policy_url` | `""` | Your screening service's decision endpoint (see [US_COMPLIANCE.md](US_COMPLIANCE.md)), HTTPS or loopback HTTP. Optional in test mode, **required** when `test_mode` is `false`. Its bearer token goes in `CONCERT_POLICY_TOKEN`. |
-| `test_mode` | `true` | `true` accepts only test networks (the `:1`, `:2`, `testnet` and Devnet identifiers below) and skips screening when `policy_url` is empty. `false` for real money; mainnet identifiers then work and `policy_url` is required. |
-| `pass_seconds` | `300` | How long a paid pass grants priority, 30–3600 seconds (default 300). |
-| `nft_pass_seconds` | `30` | How long one NFT ownership proof grants priority, 5–60 seconds (default 30). |
-| `max_records` | `100000` | Receipt records kept before wallet access fails closed, 100–1,000,000 (default 100,000). |
-| `merchant` | `"Example Tickets LLC"` | Your legal business name as payers should see it, 1–120 characters. |
-| `terms_url`, `privacy_url`, `refund_url` | `"https://www.example.com/terms"`, `…/privacy`, `…/refunds` | Your published terms, privacy policy and refund policy. HTTPS, and reachable while the queue is full: host them elsewhere or list them in `-bypass`. |
-| `offers` | four offers, one per chain | 0–8 payment offers, at most one per currency and network (below). |
-| `collections` | four rules, one per chain | 0–32 NFT rules (below). `offers` and `collections` together need at least one entry. |
-| `gateway_url` | not present | Leave it out. Earlier versions ran the gateway separately; Concert now ignores this key. |
-
-### fastlane.json: an offer
-
-```json
-{"label": "XRP · Testnet", "requirements": {"scheme": "exact", "network": "xrpl:1", "amount": "100000", "asset": "XRP",
-  "payTo": "rQLTGGRoGbQZLK2ErVKio1pxViAR8fvMBT", "maxTimeoutSeconds": 60, "extra": {"areFeesSponsored": false}}}
-```
-
-`label` is the text in the payment-network menu. `maxTimeoutSeconds` (30–300; the sample uses 60) is how long a signed payment stays valid and how long settlement may wait for finality. The other fields depend on the chain:
-
-| Field | XRP | XLM | HBAR | SOL |
-| --- | --- | --- | --- | --- |
-| `scheme` | `"exact"` | `"exact"` | `"exact"` | `"concert-native-sol"` |
-| `network` (sample → mainnet) | `"xrpl:1"` Testnet (`"xrpl:2"` Devnet) → `"xrpl:0"` | `"stellar:testnet"` → `"stellar:pubnet"` | `"hedera:testnet"` → `"hedera:mainnet"` | `"solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"` Devnet → `"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"` |
-| `amount` (sample) | `"100000"` = 0.1 XRP | `"1000000"` = 0.1 XLM | `"10000000"` = 0.1 HBAR | `"1500000"` = 0.0015 SOL |
-| `asset` | `"XRP"` | Native XLM contract: testnet `"CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"` (the sample's, already real), pubnet `"CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA"` | `"0.0.0"` | `"SOL"` |
-| `payTo` sample | `"rQLTGGRoGbQZLK2ErVKio1pxViAR8fvMBT"` | `"GAJCHOYDKVA34FOL4NTDILX6T7XIEQXWJZ7ZT4PV2RSUVVXCHW4CC5LA"` | `"0.0.4815162"` | `"HnsoZ8ePhw43Zf3vSpTt71LGbdRG3NzFepQWxXBosRWo"` |
-| `payTo`: yours | Your receiving account's classic address (`r…`), from your wallet's Receive screen (Xaman, Ledger Live) or, for Testnet, the [XRPL faucet](https://xrpl.org/resources/dev-tools/xrp-faucets). It must accept a payment with no destination tag: not an exchange deposit address. | Your receiving account (`G…`, from Freighter, Lobstr or [Stellar Lab](https://lab.stellar.org/)) or a contract (`C…`). The account must already exist on the network. | Your receiving account ID (`0.0.N`, shown in HashPack or [HashScan](https://hashscan.io/); testnet accounts come from the [Hedera portal](https://portal.hedera.com/)). | Your wallet address (base58, 32–44 characters, from Phantom's or Solflare's Receive screen). |
-| `extra` | `{"areFeesSponsored": false}`, required. Optional: `"assetTransferMethod": "sequence"`, `"invoiceId"`, `"destinationTag"` (an integer the payment must carry). | `{"areFeesSponsored": true}`, required: your Stellar sponsor pays network fees. | `{"feePayer": "0.0.4815342"}`, required: your Hedera sponsor account (`0.0.N`), different from `payTo` and equal to `fee_payer` in networks.json. Its key goes in `CONCERT_HEDERA_FEE_SECRET`. | `{"areFeesSponsored": false}`, required. |
-
-### fastlane.json: an NFT rule
-
-```json
-{"id": "xrpl-founders", "label": "Founders Club (XRPL)", "network": "xrpl:1", "collection": "rN1ZgJLAwHdVCZL3vY5nqudgEsCc5sEyZX:42"}
-```
-
-`id` is your own unique slug (up to 64 characters), which automated clients pass as `CONCERT_NFT_RULE`. `label` is the text in the collection menu. `network` uses the same identifiers as offers. `collection` depends on the chain:
-
-| Chain | Sample `collection` | Your real value and where to find it |
-| --- | --- | --- |
-| XRPL | `"rN1ZgJLAwHdVCZL3vY5nqudgEsCc5sEyZX:42"` | `issuer:taxon`: the account that minted the NFTs and their NFTokenTaxon. Both are on any NFT of the collection in an explorer ([XRPL explorer](https://livenet.xrpl.org/), [testnet](https://testnet.xrpl.org/)), under Issuer and Taxon. |
-| Stellar | `"CAR6LMNBSEDJ7EJPZ5GM2STC5ZGN7AVTPA6UALCUCPQQ2L4PHDVJJAXM"` | The SEP-50 NFT contract address (`C…`), from the collection's publisher or [stellar.expert](https://stellar.expert/). |
-| Hedera | `"0.0.2233445"` | The HTS non-fungible token ID (`0.0.N`), shown on [HashScan](https://hashscan.io/) for any NFT in the collection. |
-| Solana | `"EBiEQxgHYcCBPN8zoUSZxbEsKd46TBPtphdcQQd28Ey"` | The verified Metaplex collection mint: the mint address of the collection's parent NFT, shown as Collection on an NFT's page in [Solscan](https://solscan.io/) or Magic Eden. Visitors also enter the mint of the NFT they hold. |
-
-### networks.json
-
-One entry per network that an offer or collection uses, keyed by the same network identifier. Endpoints must be HTTPS. Public endpoints are rate limited; for production, use a provider's endpoint.
-
-| Network | Key | Sample value | Your real value |
+| Chain | NFT `collection` format | Token/Trustline `asset` format | Notes |
 | --- | --- | --- | --- |
-| XRPL | `rpc` | `"https://s.altnet.rippletest.net:51234/"` (Testnet, real) | rippled JSON-RPC over HTTPS. Devnet `https://s.devnet.rippletest.net:51234/`; mainnet `https://xrplcluster.com/`, `https://s1.ripple.com:51234/` or a provider. WebSocket URLs are refused. |
-| | `max_fee` | `"1000"` | The highest network fee in drops a payer's transaction may carry (default 1000). |
-| Stellar | `rpc` | `"https://soroban-testnet.stellar.org"` (real) | A Stellar RPC server. SDF runs only the testnet one; for pubnet pick one from the [RPC providers list](https://developers.stellar.org/docs/data/apis/rpc/providers). |
-| | `horizon` | `"https://horizon-testnet.stellar.org"` (real) | Horizon for the same network; pubnet `https://horizon.stellar.org`. |
-| | `secret_env` | `"CONCERT_STELLAR_FEE_SECRET"` | The environment variable that holds the sponsor's secret seed (default `CONCERT_STELLAR_FEE_SECRET`). |
-| | `max_fee` | `"50000"` | The most the sponsor pays per payment, in stroops (default 50,000 = 0.005 XLM). |
-| Hedera | `mirror` | `"https://testnet.mirrornode.hedera.com"` (real) | A mirror node; mainnet `https://mainnet-public.mirrornode.hedera.com` or a provider. Concert also learns the consensus nodes (port 50211) from it. |
-| | `fee_payer` | `"0.0.4815342"` | Your sponsor account ID; it must equal the offer's `extra.feePayer`. |
-| | `secret_env` | `"CONCERT_HEDERA_FEE_SECRET"` | The environment variable that holds the sponsor's private key (default `CONCERT_HEDERA_FEE_SECRET`). |
-| | `max_fee_tinybars` | `"100000000"` | The highest transaction fee the sponsor signs for, in tinybars (default 100,000,000 = 1 HBAR). |
-| Solana | `rpc` | `"https://api.devnet.solana.com"` (real) | Solana JSON-RPC; mainnet `https://api.mainnet-beta.solana.com` (heavily rate limited) or a provider. |
+| **XRPL** | `issuer:taxon` or `issuer:*` (any taxon from issuer) | `XRP` or `CURRENCY:ISSUER` (e.g. `RLUSD:rMx...`) | Paginated `account_nfts` & `account_lines`; optional `issuer` double-check |
+| **Stellar** | Soroban SEP-50 `C...` or classic `CODE:ISSUER` | `XLM`, `CODE:ISSUER`, or Soroban SAC `C...` | Verified via Horizon balances & Soroban simulation |
+| **Hedera** | HTS NFT token ID `0.0.N` | `0.0.0` (HBAR) or HTS fungible `0.0.N` | Optional `issuer` checks token `treasury_account_id` on Mirror Node |
+| **Solana** | Verified Metaplex collection mint | `SOL`, SPL mint, or Token-2022 mint | **Auto-scans wallet NFTs** across SPL Token, Token-2022, and optional DAS (`das_rpc`) — visitors never need to look up a mint ID! |
 
-### Environment
+## Sliding Passes, Slow PHP Checkouts & Active-Active Multi-Edge Cookies
 
-| Variable | Sample | Your real value |
-| --- | --- | --- |
-| `CONCERT_FASTLANE_CONFIG`, `CONCERT_NETWORKS_CONFIG` | empty | Paths of the two files; `installer.sh` sets them to `/etc/concert/fastlane.json` and `/etc/concert/networks.json`. |
-| `CONCERT_ADMIT_SECRET` | generated by the installer | A stable random string of at least 32 characters. Changing it invalidates every session and pass. |
-| `CONCERT_STELLAR_FEE_SECRET` | empty | The Stellar sponsor account's secret seed (`S…`, 56 characters). Create a dedicated account in [Stellar Lab](https://lab.stellar.org/) (fund it with Friendbot on testnet) and keep a small balance. Needed only with an XLM offer. |
-| `CONCERT_HEDERA_FEE_SECRET` | empty | The Hedera sponsor account's DER-encoded private key (hex starting `302e…` for Ed25519 or `3030…` for ECDSA), from the [Hedera portal](https://portal.hedera.com/) for testnet or your wallet's key export. Needed only with an HBAR offer. |
-| `CONCERT_POLICY_TOKEN` | empty | The bearer token for `policy_url`, at least 32 characters. |
+- **Sliding idle pass (`pass_sliding: true`):** Every active click or refresh refreshes the visitor's pass by `pass_idle_seconds` (default `180s`) up to a hard ceiling `pass_max_seconds` (default `1800s`), for both paid passes and NFT/token holders (`nft_pass_seconds` configurable up to `3600s`).
+- **In-flight safety:** Once a request is admitted to the upstream, Concert never interrupts it mid-flight. Default `upstream_timeout` is **60s** (**90s** in the WordPress preset, configurable in `Concertfile`) so 45-second checkout scripts finish cleanly.
+- **Cross-edge stateless pass cookie (`concert_fastlane_pass`):** Authenticated with HMAC-SHA256 derived from `CONCERT_ADMIT_SECRET` (supporting seamless rotation via `CONCERT_ADMIT_SECRET_PREV`). Any active-active edge sharing the secret honors the pass immediately, strips both `concert_fastlane` and `concert_fastlane_pass` before proxying upstream, and syncs live revocations & settlement deduplication over Redis when configured.
 
-## Collection identifiers and wallet proof
+## Live Admin Portal Editor & Security Guards
 
-Use the `collections` array in the fast-lane JSON. Each entry needs a unique local `id`, a display `label`, the exact `network`, and its chain-specific `collection`. No collection display name, URL or ticker is treated as proof.
+Administrators can configure every aspect of the fast lane live in the Admin Portal **Fast lane** tab (multi-vhost `?site=` aware via `Concertfile`):
 
-| Chain | Administrator's collection ID | Ownership proof and supported scope |
-| --- | --- | --- |
-| XRPL | `issuerClassicAddress:NFTokenTaxon` | Validated `account_nfts`; authorized master key or active RegularKey signs the message. Optional NFTokenID narrows the match. Multisignature account proofs are not implemented. |
-| Stellar | SEP-50 Soroban NFT contract `C…` | Signed SEP-53 message from a `G…` account with sufficient current master-key weight; read-only simulation of `balance(address) > 0`. Administrator must verify that the allowlisted contract actually implements a nonfungible collection. Contract wallets and general multisignature proofs are not implemented. |
-| Hedera | HTS nonfungible token ID `0.0.…` | Mirror-node account key and NFT ownership; optional serial number. Single Ed25519 or secp256k1 account keys only. Threshold and contract-key message proofs fail closed. |
-| Solana | Verified Metaplex collection mint | Wallet's Ed25519 message signature, finalized SPL token ownership, one-supply zero-decimal mint and verified collection metadata. The NFT mint is required. Supports conventional Token Metadata NFTs; compressed NFTs, Metaplex Core and Token-2022 are not implemented. |
+- Enable/disable chains and add presets (`XRPL RLUSD`, `XRP`, `Stellar USDC`, `XLM`, `Solana USDC`, `SOL`, `Hedera USDC`, `HBAR`).
+- Edit human prices (`0.99 RLUSD`), receiving wallets (`payTo`), NFT collections, token/trustline rules, pass timing, and mainnet screening policy (`blocklist`, `webhook`, or explicit `none`).
+- **Zero-downtime persistence:** Changes validate fail-closed, hot-reload both `gateway.Server` and `fastlane.Service` in memory, persist atomically (`0600`) to `fastlane.json`, update `agentOffer` immediately, and append a hash-chained `fastlane.config.update` audit record.
+- **Destination protection:**
+  - Any `payTo` or `verify_addresses` change immediately fires a **Critical email alert** (`mailer.CatFastlane`).
+  - `-fastlane-lock-destinations` (or `fastlane_lock_destinations on` in `Concertfile`) locks receiving wallets read-only in the Portal while still allowing live price, NFT, and token rule edits.
+  - In `-enterprise-hardened` mode, modifying receiving wallets requires an MFA-verified admin account (TOTP) or SSO, and `policy_mode: "none"` on mainnet is refused unless `allow_unscreened_mainnet: true` is explicitly set.
 
-Stellar rules cannot name a token: `balance()` proves collection membership only, so a token-specific Stellar request is refused rather than reported as verified. When a request names a token, the gateway's proof must name that same token.
+## Multi-Vhost `Concertfile` Support
 
-The challenge binds origin, session, nonce, address, network, collection and optional token. It expires after two minutes and is consumed once. Ownership is checked again for each new grant. A grant defaults to 30 seconds, configurable from 5 to 60 seconds; transfer or key changes within that window do not revoke an already-issued grant. RPC correctness and mirror-node lag are trust assumptions. Indexer/RPC failures deny admission. XRPL enumeration is bounded to 100 pages of 400 NFTs.
+Configure fast-lane per virtual host in `Concertfile` with zero-downtime `SIGHUP` lock handoff (no `fastlane.lock` collision during reload):
 
-NFT admission does not request an NFT transfer, approval, listing, trustline or payment. The browser visibly distinguishes a payment from an ownership signature.
+```text
+{
+    listen :443
+    upstream_timeout 60s
+    fastlane_lock_destinations on
+}
 
-## Automated client
+shop.example.com {
+    preset wordpress
+    upstream fcgi+unix:///run/php/php8.3-fpm.sock
+    cap 12
+    priority_cap 4
+    fastlane_config /etc/concert/shop-fastlane.json
+    networks_config /etc/concert/networks.json
+}
+```
 
-`concert-client` (`go build -o bin/concert-client ./cmd/concert-client`) is a runnable reference client that signs locally for all four chains. It requires `CONCERT_CLIENT_NETWORK`, `CONCERT_ORIGIN`, `CONCERT_NETWORKS_CONFIG` and one set of wallet credentials:
+## Durability, Live Archival, Reconciliation & Revocation
 
-| Chain | Client-only environment |
-| --- | --- |
-| XRP | `CONCERT_CLIENT_XRP_SEED` |
-| XLM | `CONCERT_CLIENT_XLM_SECRET` |
-| HBAR | `CONCERT_CLIENT_HBAR_ACCOUNT`, `CONCERT_CLIENT_HBAR_KEY` (DER private key string) |
-| SOL | `CONCERT_CLIENT_SOL_KEY` (base64 of the 64-byte keypair secret) |
+- **Zero-downtime online reconciliation:** Reconcile `pending`/`unknown` receipts live from the Portal **Fast lane** tab (`POST /api/fastlane/reconcile`) or Admin API (`POST /_room/fastlane/reconcile`), or offline with `econcert reconcile`.
+- **Zero-downtime online receipt archival:** Compact expired `settled` receipts live from the Portal **Fast lane** tab (`POST /api/fastlane/archive`) or Admin API (`POST /_room/fastlane/archive`) while preserving all active, pending, unknown, and recent records, writing an atomic `0600` archive + `.sha256` checksum and audit log entry. Offline archival remains available via `econcert archive-receipts`.
+- **Live administrative revocation:** Revoke any active session or pass ID immediately in the Portal (`POST /api/fastlane/revoke`) or Admin API (`POST /_room/fastlane/revoke`), propagating across all Redis-connected edges.
+- **Headroom & sponsor monitoring:** Journal headroom alerts fire at 80% (`warn`) and 95% (`critical`). Optional Stellar/Hedera fee-sponsor accounts expose balance health and per-minute spend limits via `/api/fastlane` (`sponsor_status`).
 
-Use isolated test keys first. These variables belong on the **payer's machine**, not the merchant's proxy. The client checks an explicit maximum atomic amount and exact recipient before signing:
+## Automated Client (`concert-client`)
 
 ```sh
-export CONCERT_CLIENT_NETWORK='xrpl:1'
-export CONCERT_ORIGIN='http://127.0.0.1:8080'
-export CONCERT_CLIENT_STATE='/private/client-state.json'
-export CONCERT_MAX_ATOMIC_AMOUNT='100000'
-export CONCERT_EXPECT_PAY_TO='YOUR_TESTNET_MERCHANT_CLASSIC_ADDRESS'
+# Pay 0.99 RLUSD on XRPL mainnet
+export CONCERT_ORIGIN='https://shop.example.com'
+export CONCERT_CLIENT_NETWORK='xrpl:0'
+export CONCERT_NETWORKS_CONFIG='/etc/concert/networks.json'
+export CONCERT_CLIENT_XRP_SEED='s...'
+export CONCERT_EXPECT_ASSET='RLUSD:rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De'
+export CONCERT_MAX_AMOUNT='1.00'
+export CONCERT_EXPECT_PAY_TO='rMerchantAddress...'
 export CONCERT_ACCEPT_TERMS='yes'
 concert-client
+
+# Prove NFT ownership (token ID optional on all 4 chains including Solana)
+CONCERT_NFT_RULE='xrpl-founders' concert-client --nft
+
+# Request a direct Destination-Tag / Memo challenge & poll until confirmed
+CONCERT_TOKEN_RULE='xrpl-rlusd-holders' CONCERT_WALLET_ADDRESS='rUser...' concert-client --direct
+
+# Wait in line as an agent without paying
+concert-client --wait /drop
 ```
-
-Load the client secret from your secret store before running this example. To prove NFT ownership instead, set `CONCERT_NFT_RULE` to the configured local rule ID, set `CONCERT_NFT_TOKEN` when needed, and run `concert-client --nft`. Keep the state file private and send its session as the `Concert-Session` header on subsequent protected requests.
-
-To wait in Concert's line instead of paying, run `concert-client --wait /path`. It needs no wallet credentials (only `CONCERT_CLIENT_NETWORK`, which names the state file's session) and never pays: it holds one place with the saved session, prints the position and `status_url`, sleeps for `Retry-After` (1s–1m, `CONCERT_CLIENT_MAX_WAIT` overall, default 1h) and prints the admitted response. When Concert offers its fast lane, `--wait` says so once. The state file is locked only while the session is renewed, so `concert-client` can pay with the same session in another shell; the waiting place is then admitted through the priority lane on its next retry. This needs `-agent-queue` on the server; see [The fast-lane offer in a queued response](#the-fast-lane-offer-in-a-queued-response).
-
-For XRP the client builds the Payment as `@x402/xrpl`'s client does (current `Sequence`, network fee, the widest accepted `LastLedgerSequence`, and `InvoiceID`, `DestinationTag` or `NetworkID` when required); it supports the `sequence` transfer method and never creates tickets. It also checks that each RPC endpoint is on the requested network before signing.
-
-The client renews its saved session on every run; renewal keeps the session ID, so a saved payment stays attached to it. If the saved session expired before its payment was resolved, the client stops instead of presenting the payment under a new session. The client saves and flushes the signed authorization before submission and locks its state file against concurrent runs. Rerunning uses the **same** authorization. A crash can leave a `.lock`; confirm that the old process has stopped before removing that lock, and retain the JSON state. An intentional later purchase needs a new state file after the old payment is resolved. Never delete state to get around an uncertain payment.
-
-## HTTP flow and browser adapters
-
-1. `POST /_concert/session` returns a session, its CSRF token and expiry; browsers also get an HttpOnly, SameSite=Strict cookie. Calling it again with a valid session renews the 24-hour expiry under the same session ID, so receipts and unresolved payments carry over. Authenticated wallet requests answer `409 session_renewal_required` when less than two hours remain (more than the longest pass plus settlement time, so a pass never outlives its session); renew and repeat the request, which never changes a payment. Wallet POSTs are limited to 60 per minute per client address (IPv6 per /64); excess requests get `429` with `Retry-After`.
-2. `POST /_concert/payment` without a payment header returns HTTP 402 with x402 v2 JSON and base64 `PAYMENT-REQUIRED`. It describes the **pass resource**, not the upstream URL. Generic x402 clients should purchase this resource and retain the session before requesting a queued upstream resource.
-3. Sign a selected `accepts` entry and send base64 JSON `{x402Version:2, resource, accepted, payload}` as `PAYMENT-SIGNATURE` on the same POST with the same session. Browser POSTs include `X-Concert-CSRF`; automated clients use `Concert-Session`.
-4. Concert verifies the actual payer, requests a policy decision, reserves the authorization durably and asks the gateway to settle. Settlement is detached from the visitor's connection: Concert waits up to `maxTimeoutSeconds` plus 90 seconds for the gateway and records the result even if the tab closes. Only confirmed settlement plus a durable receipt creates eligibility. HTTP 200 includes `PAYMENT-RESPONSE` and the pass expiration.
-5. `GET /_concert/status` recovers status without charging. Subsequent protected requests carry the cookie or session header. Session and payment headers/cookies are stripped before proxying to the origin.
-
-The shipped browser supports Solana wallets through the [Wallet Standard](https://github.com/wallet-standard/wallet-standard) (`standard:connect`, `solana:signTransaction`, `solana:signMessage`), which Phantom, Solflare, Backpack and other current wallets implement. No Solana SDK is loaded: `access.js` decodes the unsigned native SOL transfer from Concert, checks payer, recipient and amount against the displayed price, asks the wallet to sign it, and refuses a signed transaction whose message the wallet changed. The automated browser test uses a Wallet Standard test wallet; approval in a real wallet extension has not been exercised in this environment.
-
-For other wallets, bundle a compatible adapter in `internal/server/web/wallet-adapters.js` and rebuild the binary. The registration contract is:
-
-```js
-window.concertWallets['xrpl:1'] = {
-  connect: async () => /* public wallet address */,
-  signMessage: async (message, network) => /* {signature: BASE64, public_key?: HEX} */,
-  createPaymentPayload: async ({paymentRequired, requirements, session}) =>
-    /* {x402Version: 2, resource: paymentRequired.resource,
-         accepted: requirements, payload: chainSpecificSignedPayload} */
-};
-```
-
-The snippet describes an interface; wire it to the chosen wallet SDK. NFT signatures are raw challenge bytes for XRPL's `ripple-keypairs` algorithm, SEP-53 for Stellar, account-key signatures for Hedera and Ed25519 for Solana. A wallet that cannot sign the specified message format cannot use that proof route. No WalletConnect project ID or universal XRPL/XLM/HBAR browser connector is bundled. The signed-payment and signed-message forms also accept externally generated proofs.
-
-The browser retains a pending signed payment in `sessionStorage` and exposes an explicit identical-payload retry. Keep that tab open until the payment is resolved. A new tab can recover server status with its session cookie; an expired/deleted session or lost authorization may require merchant assistance. Automated clients have stronger disk-backed recovery and are preferable for unattended purchases.
-
-## The fast-lane offer in a queued response
-
-With `-agent-queue` on, software waiting in line with a `Concert-Session` header keeps one place per session (see [AI agents in the line](../README.md#ai-agents-in-the-line)). When it is queued, Concert offers it the fast lane in the response itself, the way a browser in the line sees the wallet-access card:
-
-```
-HTTP/1.1 429 Too Many Requests
-Retry-After: 5
-Link: <https://shop.example/_concert/payment>; rel="payment"
-Cache-Control: no-store
-
-{"fast_lane":{"offers":[{"amount":"1000000","asset":"XRP","network":"xrpl:1"}],"pass_seconds":300,
-  "payment_url":"https://shop.example/_concert/payment"},
- "hint":"send the same Concert-Session header and retry to hold your position",
- "position":37,"queue_depth":412,"queued":true,"retry_after_seconds":5,
- "status_url":"https://shop.example/queue/status/9f2c…"}
-```
-
-- `fast_lane` and the `Link` header appear only when at least one payment offer is configured. An NFT-only configuration has nothing to buy and shows neither.
-- The offer is built from the public configuration (`GET /_concert/config`): each offer's network, asset and amount in atomic units, and the pass length. It names no recipient. The client gets the full x402 requirements, including `payTo`, from the 402 at `payment_url` and must check them there, as `concert-client` checks the amount and recipient.
-- `payment_url` is the pass resource described above. Paying there with the same session makes that session eligible: its next retry takes the priority lane, and if the lane stays full past `-priority-wait`, the session keeps its place in line as before.
-- The offer is information, never a charge. Every payment is still screened by `policy_url`, and a queued place is kept whether or not the agent pays.
-- Eligibility still does not reserve capacity. A reserved slot would be a separate product; see [RESERVED_CAPACITY.md](RESERVED_CAPACITY.md) (a proposal).
-
-## Durability, recovery and operational limits
-
-`fastlane.jsonl` contains Concert's receipt history; the gateway's `settlements.jsonl` contains its signed authorization and settlement records. The gateway journal is append-only JSON lines, fsync'd per record and locked against a second writer; a torn final line or a settled record that regresses stops startup instead of being discarded. Preserve both, along with the stable admission secret. Use consistent, encrypted backups. The service fails closed on journal corruption or I/O failure. Do not run multiple Concert processes against one journal or clone journals into independently charging deployments. This release uses a single-writer architecture, not distributed transactional storage.
-
-Identical authorizations are deduplicated by canonical payload hash and settled transaction ID. A consumed payment never renews a pass. A journaled but unconfirmed result blocks a different payment for that session. Any settlement outcome other than confirmed success is recorded as unknown, including a gateway that rejected the authorization when re-verifying it just before submission; in that case the gateway has no record for the fingerprint and never submitted it. The gateway does not rebroadcast a transaction after an uncertain process restart. Client timeouts do not imply chain failure.
-
-The gateway settles one authorization at a time per network, so a slow chain never delays another and one sponsor account never races itself. It refuses to re-verify an authorization it already settled, so while its journal survives, a lost or restored Concert journal cannot turn a settled payment into a new pass.
-
-For an unresolved payment:
-
-1. **Zero-downtime online reconciliation (recommended while Concert is live):** Open the Admin Portal **Fast lane** tab (as an `admin`) and click **Reconcile** on the unresolved receipt (entering the sponsor's transaction hash for Stellar), or call `POST /api/fastlane/reconcile` (Portal, CSRF + `admin`) / `POST /_room/fastlane/reconcile` (Admin API, `admin` bearer token) with `{"fingerprint":"<64-hex>","stellar_hash":"<optional>"}`. Concert acquires the gateway's per-network settlement mutex so it cannot race an in-flight settlement, verifies final on-chain ledger state read-only (never signing, broadcasting, or moving funds), updates both `settlements.jsonl` and `fastlane.jsonl`, writes a hash-chained `fastlane.reconcile` audit record, and **immediately unlocks the payer's session without restarting Concert**.
-2. **Offline crash recovery (`concert reconcile`):** If Concert is stopped (for example after a host crash or incomplete journal line), back up its data directory and run `concert reconcile -data-dir <data-dir> -networks-config <networks.json> <fingerprint> [Stellar transaction hash]` as the service account. The CLI acquires the exclusive journal lock (refusing to run while Concert is live), validates final ledger state against the saved authorization, records success in `settlements.jsonl`, and then restarting Concert allows the identical authorization to succeed.
-3. If final settlement cannot be proved on chain, keep the receipt unresolved and follow the merchant's reviewed support/refund procedure. No automatic release, re-signing or refund is provided.
-
-Payment eligibility begins when Concert durably records successful settlement, including after online or offline reconciliation. Set an explicit refund/support policy for delayed or unavailable service. Native transfers are not bound to a web origin at the ledger level; the local receipt journal is essential, and different independent merchants sharing one receiving address cannot rely on it for global replay prevention.
-
-### Receipt headroom alerts and audited offline archival (`concert archive-receipts`)
-
-`max_records` defaults to 100,000 and remains a hard fail-closed ceiling against unbounded memory/disk growth. Concert monitors journal headroom continuously:
-
-- **Proactive alerts:** Latched alerts fire at **80%** (`warn`) and **95%** (`critical`) via the Administrator Email Delivery queue (`mailer.CatFastlane`), the Portal **Fast lane** tab headroom bar/banner, and Prometheus (`concert_fastlane_records_used`, `concert_fastlane_records_max`, `concert_fastlane_unresolved`).
-- **Audited offline compaction:** During a planned maintenance window, stop Concert and run:
-
-```sh
-concert archive-receipts -data-dir /var/lib/concert/data -older-than 720h -dry-run
-concert archive-receipts -data-dir /var/lib/concert/data -older-than 720h
-```
-
-`concert archive-receipts` acquires `fastlane.lock` exclusively (refusing to run while Concert is live), validates every line of `fastlane.jsonl` fail-closed, preserves **every** `pending`, `unknown`, active (unexpired), and recent receipt, writes only expired `settled` receipts older than `-older-than` to an atomic `0600` `fastlane-archive-<UTC>.jsonl` file plus a `.sha256` checksum file, fsyncs the archive and directory before atomically rewriting `fastlane.jsonl`, and records a hash-chained `fastlane.archive` event in `audit.jsonl`.
-
-Backups, key rotation, redemptions across replicas, administrative pass revocation and automated refunds are not implemented. Short pass lifetimes bound ordinary admission risk but do not replace incident response.
 
 ## Protocol references
-
-Reviewed September 27, 2026. Go dependencies are pinned in `go.mod` and `go.sum`.
 
 - [x402 v2 specification](https://github.com/x402-foundation/x402/blob/main/specs/x402-specification-v2.md)
 - [Exact XRPL](https://github.com/x402-foundation/x402/blob/main/specs/schemes/exact/scheme_exact_xrpl.md), [Exact Stellar](https://github.com/x402-foundation/x402/blob/main/specs/schemes/exact/scheme_exact_stellar.md), [Exact Hedera](https://github.com/x402-foundation/x402/blob/main/specs/schemes/exact/scheme_exact_hedera.md), [Exact SVM](https://github.com/x402-foundation/x402/blob/main/specs/schemes/exact/scheme_exact_svm.md)
 - [Stellar SEP-50 NFT interface](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0050.md), [SEP-53 message signing](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0053.md)
-- [XRPL account_nfts](https://xrpl.org/docs/references/http-websocket-apis/public-api-methods/account-methods/account_nfts)
-
+- [XRPL account_nfts](https://xrpl.org/docs/references/http-websocket-apis/public-api-methods/account-methods/account_nfts) & [account_lines](https://xrpl.org/docs/references/http-websocket-apis/public-api-methods/account-methods/account_lines)

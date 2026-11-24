@@ -18,6 +18,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -273,5 +274,86 @@ func TestHopMTLS_PublicBrowserAllowedWhileHopRequiresClientCert(t *testing.T) {
 	}
 	if got := leafApp.topo.leaf.accepted.Load(); got != 1 {
 		t.Fatalf("leaf accepted = %d, want 1", got)
+	}
+}
+
+func TestHopMTLS_ReplaySaturatedDegradesGracefullyAndExportsMetric(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("origin-ok"))
+	}))
+	defer origin.Close()
+
+	secret := []byte("concert-hop-sat-test-secret-0123456789ab")
+	dataDir := t.TempDir()
+
+	leafCfg := testConfig(origin.URL)
+	leafCfg.role = roleLeaf
+	leafCfg.nodeID = "leaf-sat"
+	leafCfg.hostCap = 10
+	leafCfg.hopSecret = secret
+	leafCfg.hopPeers = "127.0.0.1/32,::1/128"
+	leafCfg.hopReplayGuard = true
+	leafCfg.hopRequireNonce = true
+	leafCfg.hopReplayMax = hop.MinReplayMax // 1024 across 256 shards (4/shard)
+	leafCfg.hardened = true
+	leafCfg.secureCookie = true
+	leafCfg.statsAuth = true
+	leafCfg.adminToken = "test-admin-token-0123456789abcdef"
+	leafCfg.admitSecret = []byte("admit-secret-for-hardened-leaf-test-0123")
+	leafCfg.dataDir = dataDir
+	leafCfg.abuseEnabled = true
+	leafCfg.abuseStrikes = 2
+	leafApp, leafSrv := newTestApp(t, leafCfg, nil)
+
+	signer, err := hop.NewSigner(secret, "edge-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Send enough distinct signed hop claims to saturate at least several shards.
+	// In hardened mode, saturated claims must:
+	//  1. Increment concert_leaf_hop_replay_evictions_total (and leaf.replayEvictions),
+	//  2. Increment leaf.rejected (not accepted) and degrade gracefully to direct
+	//     handling (200 OK via leaf room, NOT 403 ban / forged-pass strike!).
+	client := &http.Client{Timeout: 5 * time.Second}
+	var saturatedSeen bool
+	for i := 0; i < 2000; i++ {
+		hdr := signer.Sign(hop.Claim{
+			Client: netip.MustParseAddr("198.51.100.42"),
+			Class:  hop.ClassPage,
+			Proto:  "h2",
+		}, http.MethodGet, "/drop", "")
+		req, _ := http.NewRequest(http.MethodGet, leafSrv.URL+"/drop", nil)
+		req.Header.Set(hop.Header, hdr)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("req %d: %v", i, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode == http.StatusForbidden {
+			t.Fatalf("req %d got 403 Forbidden — replay saturation must NOT award abuse strikes!", i)
+		}
+		if leafApp.topo.leaf.replayEvictions.Load() >= 3 {
+			saturatedSeen = true
+			break
+		}
+	}
+	if !saturatedSeen {
+		t.Fatalf("expected replay saturation evictions >= 3 with hopReplayMax=%d, got %d",
+			leafCfg.hopReplayMax, leafApp.topo.leaf.replayEvictions.Load())
+	}
+	if leafApp.topo.leaf.rejected.Load() < leafApp.topo.leaf.replayEvictions.Load() {
+		t.Fatalf("hardened saturation should reject hop claim (rejected=%d < evictions=%d)",
+			leafApp.topo.leaf.rejected.Load(), leafApp.topo.leaf.replayEvictions.Load())
+	}
+
+	// Verify Prometheus metric exports concert_leaf_hop_replay_evictions_total > 0.
+	metrics := leafApp.renderPrometheusMetrics()
+	if !strings.Contains(metrics, "concert_leaf_hop_replay_evictions_total ") {
+		t.Fatalf("metrics missing concert_leaf_hop_replay_evictions_total:\n%s", metrics)
+	}
+	if strings.Contains(metrics, "concert_leaf_hop_replay_evictions_total 0\n") {
+		t.Fatalf("concert_leaf_hop_replay_evictions_total is 0, expected > 0")
 	}
 }
