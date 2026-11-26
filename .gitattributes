@@ -1,0 +1,4 @@
+clients/** linguist-vendored
+clients/**/docs/** linguist-documentation
+docs/** linguist-documentation
+todo/** linguist-documentation

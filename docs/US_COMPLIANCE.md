@@ -12,11 +12,17 @@ Reviewed September 27, 2026. Concert supplies controls to support lawful operati
 
 These are engineering measures. The code does not supply a sanctions intelligence feed, identify beneficial owners, perform KYC, obtain licenses, calculate tax, file reports, or enforce all rules on the upstream business. Existing paid grants are not screened on every HTTP request; their configured duration is the maximum normal interval before another grant decision. Add an operational emergency-denial process appropriate to the service.
 
-## Sanctions and policy service
+## Screening policy modes (`policy_mode`)
 
-OFAC's [virtual-currency industry guidance](https://ofac.treasury.gov/media/913571/download?inline=) describes risk-based sanctions compliance, including screening, geographic information and internal controls. A list of known wallet addresses alone is insufficient. Consider current sanctions programs, counterparties, location and relevant transaction risk. OFAC's [50 Percent Rule](https://ofac.treasury.gov/faqs/401) can apply to entities owned in aggregate by blocked persons even when those entities are not individually named on a list.
+`econcert` supports three explicit screening modes on mainnet:
 
-Integrate an operator-controlled service with an appropriate screening provider and review process. Configure `policy_url` and a separate `CONCERT_POLICY_TOKEN`. Concert sends an authenticated POST:
+1. **`"webhook"` (Recommended for regulated enterprises):** Sends an authenticated POST to `policy_url` (with bearer token `CONCERT_POLICY_TOKEN`) before every new payment settlement, direct challenge, or NFT/token grant. Fails closed on timeout, HTTP error, malformed response, or expired assessment (`expires_at` must be strictly in the future and ≤ 10 minutes away).
+2. **`"blocklist"` (Built-in local sanctions / denylist file):** Hot-reloads a local newline-delimited file (`policy_blocklist_file`, supporting wallet addresses, CIDRs, and `#` comments) with zero external network dependency. Refuses matched wallets/IPs fail-closed and fails closed if the file is unreadable.
+3. **`"none"` (Explicit operator opt-in):** Disables external/local pre-screening. Refused at startup and reload in `-enterprise-hardened` mode on mainnet unless `"allow_unscreened_mainnet": true` is explicitly configured.
+
+OFAC's [virtual-currency industry guidance](https://ofac.treasury.gov/media/913571/download?inline=) describes risk-based sanctions compliance, including screening, geographic information and internal controls. A list of known wallet addresses alone is insufficient for regulated entities; consider current sanctions programs, counterparties, location and relevant transaction risk. OFAC's [50 Percent Rule](https://ofac.treasury.gov/faqs/401) can apply to entities owned in aggregate by blocked persons even when those entities are not individually named on a list.
+
+Integrate an operator-controlled service with an appropriate screening provider and review process when using `policy_mode: "webhook"`. Configure `policy_url` and a separate `CONCERT_POLICY_TOKEN`. Concert sends an authenticated POST:
 
 ```json
 {

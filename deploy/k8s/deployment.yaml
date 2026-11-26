@@ -1,0 +1,181 @@
+# Hardened Enterprise Edition (econcert) Kubernetes Deployment.
+# Uses econcert-only controls: CONCERT_HARDENED, CONCERT_ADMIN_TOKENS_FILE,
+# CONCERT_PORTAL_USERS_FILE, and optional concert-kv HA / x402 Fast-Lane.
+# For the Apache-2.0 Core Edition (concert), see deploy/k8s/concert-deployment.yaml.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: econcert
+  labels:
+    app.kubernetes.io/name: econcert
+    app.kubernetes.io/component: waiting-room-proxy
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: econcert
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: econcert
+    spec:
+      serviceAccountName: econcert
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: econcert
+          image: ghcr.io/andreimerlescu/econcert:v0.3.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: portal
+              containerPort: 8081
+              protocol: TCP
+          env:
+            - name: CONCERT_LISTEN
+              value: ":8080"
+            - name: CONCERT_UPSTREAM
+              value: "https://origin-0.origin.svc.cluster.local:8443,https://origin-1.origin.svc.cluster.local:8443"
+            - name: CONCERT_CAPACITY
+              value: "200"
+            - name: CONCERT_MAX_QUEUE
+              value: "2000"
+            - name: CONCERT_HARDENED
+              value: "true"
+            - name: CONCERT_STATS_AUTH
+              value: "true"
+            - name: CONCERT_READ_ONLY_SETTINGS
+              value: "true"
+            - name: CONCERT_SECURE_COOKIE
+              value: "true"
+            - name: CONCERT_HSTS_MAX_AGE
+              value: "31536000"
+            - name: CONCERT_LOG_FORMAT
+              value: "json"
+            - name: CONCERT_PRIVACY_SCRUB_QUERY
+              value: "true"
+            - name: CONCERT_UPSTREAM_HEALTH_PATH
+              value: "/healthz"
+            - name: CONCERT_UPSTREAM_CB_FAILURES
+              value: "5"
+            - name: CONCERT_DATA_DIR
+              value: "/var/lib/concert/data"
+            - name: CONCERT_ADMIT_SECRET_FILE
+              value: "/run/secrets/concert/admit_secret"
+            - name: CONCERT_ADMIN_TOKENS_FILE
+              value: "/run/secrets/concert/admin_tokens"
+            - name: CONCERT_PORTAL_USERS_FILE
+              value: "/run/secrets/concert/portal_users.json"
+            - name: CONCERT_PORTAL_TLS_CERT
+              value: "/run/certs/portal/tls.crt"
+            - name: CONCERT_PORTAL_TLS_KEY
+              value: "/run/certs/portal/tls.key"
+            - name: CONCERT_PORTAL_SECURE_COOKIE
+              value: "true"
+          livenessProbe:
+            httpGet:
+              path: /_room/healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /_room/readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 2
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "2"
+              memory: "1Gi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/concert/data
+            - name: secrets
+              mountPath: /run/secrets/concert
+              readOnly: true
+            - name: portal-tls
+              mountPath: /run/certs/portal
+              readOnly: true
+      volumes:
+        # Persistent volume so tamper-evident audit.jsonl, bans.json, and queue
+        # snapshots survive pod restarts under CONCERT_HARDENED=true. For
+        # multi-replica deployments with local Fast-Lane journals, convert to a
+        # StatefulSet with volumeClaimTemplates (one ReadWriteOnce PVC per pod).
+        - name: data
+          persistentVolumeClaim:
+            claimName: econcert-data
+        - name: secrets
+          secret:
+            secretName: concert-secrets
+            defaultMode: 0400
+        - name: portal-tls
+          secret:
+            secretName: concert-portal-tls
+            defaultMode: 0400
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: econcert
+  labels:
+    app.kubernetes.io/name: econcert
+spec:
+  selector:
+    app.kubernetes.io/name: econcert
+  sessionAffinity: ClientIP
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: econcert
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: econcert
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: econcert
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: econcert
+  endpoints:
+    - port: http
+      path: /_room/metrics
+      interval: 15s
+      authorization:
+        type: Bearer
+        credentials:
+          name: concert-secrets
+          key: metrics_viewer_token

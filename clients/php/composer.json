@@ -1,0 +1,27 @@
+{
+  "name": "concert/concert-php",
+  "description": "Official PSR-7/PSR-15 PHP SDK for Concert waiting room, Ed25519 rm1 signing, active cache purging, waiting-room signal parsing, and crypto-only AI agent pass bidding.",
+  "type": "library",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/andreimerlescu/concert",
+  "require": {
+    "php": ">=8.1",
+    "ext-json": "*",
+    "ext-sodium": "*"
+  },
+  "suggest": {
+    "ext-curl": "Recommended for CachePurgeClient and AgentBidClient HTTPS transport",
+    "psr/http-message": "For typed PSR-7 ServerRequestInterface and ResponseInterface integration",
+    "psr/http-server-middleware": "For PSR-15 middleware pipeline registration",
+    "psr/http-server-handler": "For PSR-15 request handler integration"
+  },
+  "autoload": {
+    "psr-4": {
+      "Concert\\": "src/"
+    }
+  },
+  "scripts": {
+    "test": "php src/Tests/run.php"
+  },
+  "minimum-stability": "stable"
+}

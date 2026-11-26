@@ -1,0 +1,101 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: concert-alerts
+  labels:
+    app.kubernetes.io/name: concert
+    app.kubernetes.io/component: observability
+    release: prometheus
+spec:
+  groups:
+    - name: concert.waiting-room
+      interval: 30s
+      rules:
+        - alert: HighQueueDepth
+          expr: |
+            concert_room_max_queue_depth > 0
+            and (concert_room_live_queue_depth / concert_room_max_queue_depth) > 0.8
+          for: 2m
+          labels:
+            severity: warning
+            category: queue
+          annotations:
+            summary: "Concert waiting-room queue depth exceeds 80% of cap on {{ $labels.instance }}"
+            description: "Live waiting-room queue depth is {{ $value | humanizePercentage }} of concert_room_max_queue_depth. Inspect upstream latency and origin capacity before the 503 capacity breaker trips."
+
+        - alert: CapacityBreakerActive
+          expr: |
+            rate(concert_room_rejected_503_total[5m]) > 0
+          for: 1m
+          labels:
+            severity: critical
+            category: capacity
+          annotations:
+            summary: "Concert 503 capacity breaker actively rejecting arrivals on {{ $labels.instance }}"
+            description: "Concert is rejecting {{ $value | printf \"%.2f\" }} visitors/sec with HTTP 503 because concert_room_live_queue_depth hit concert_room_max_queue_depth."
+
+    - name: concert.origin-health
+      interval: 30s
+      rules:
+        - alert: OriginUnhealthy
+          expr: |
+            (concert_upstream_backends_total > 0 and concert_upstream_backends_healthy == 0)
+            or concert_ready == 0
+          for: 1m
+          labels:
+            severity: critical
+            category: silence
+          annotations:
+            summary: "Concert origin pool unhealthy or node not ready on {{ $labels.instance }}"
+            description: "All configured upstream origin backends are unhealthy (concert_upstream_backends_healthy == 0) or concert_ready == 0. Traffic cannot be served until an origin recovers."
+
+        - alert: UpstreamBodyIdleTimeouts
+          expr: |
+            increase(concert_upstream_body_idle_timeouts_total[5m]) > 5
+          for: 2m
+          labels:
+            severity: warning
+            category: silence
+          annotations:
+            summary: "Elevated upstream response-body idle timeouts on {{ $labels.instance }}"
+            description: "{{ $value | printf \"%.0f\" }} non-stream upstream responses aborted due to response-body idle timeout in the last 5m. Investigate slow-loris or stalled origin handlers."
+
+    - name: concert.guardrails
+      interval: 30s
+      rules:
+        - alert: GuardHostShedding
+          expr: |
+            rate(concert_guard_shed_total[5m]) > 0
+          for: 1m
+          labels:
+            severity: critical
+            category: security
+          annotations:
+            summary: "Concert host-protection guardrail shedding traffic with 503 on {{ $labels.instance }}"
+            description: "Host memory, file descriptor, or connection ceilings triggered shedding at {{ $value | printf \"%.2f\" }} req/s (concert_guard_shed_total). Scale pods or relieve host pressure."
+
+    - name: concert.fastlane
+      interval: 30s
+      rules:
+        - alert: FastLaneSettlementFailure
+          expr: |
+            concert_fastlane_unresolved > 0
+          for: 5m
+          labels:
+            severity: critical
+            category: fastlane
+          annotations:
+            summary: "Unresolved 4-chain Fast-Lane receipts awaiting reconciliation on {{ $labels.instance }}"
+            description: "{{ $value | printf \"%.0f\" }} Fast-Lane receipts (Solana/Stellar/Hedera/XRPL) remain in pending or unknown settlement state for >5m. Check RPC node health and run Fast-Lane reconciliation."
+
+        - alert: FastLaneJournalNearCapacity
+          expr: |
+            concert_fastlane_records_max > 0
+            and (concert_fastlane_records_used / concert_fastlane_records_max) > 0.85
+          for: 5m
+          labels:
+            severity: warning
+            category: fastlane
+          annotations:
+            summary: "Fast-Lane receipt journal above 85% capacity on {{ $labels.instance }}"
+            description: "fastlane.jsonl is at {{ $value | humanizePercentage }} of max_records. Archive resolved receipts before new Fast-Lane settlements are blocked."

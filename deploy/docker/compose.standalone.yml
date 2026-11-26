@@ -1,0 +1,41 @@
+# Standalone Core Edition (concert) with a declarative Concertfile.
+# Start with: docker compose -f deploy/docker/compose.standalone.yml up --build
+services:
+  concert:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: concert:v0.3.0
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    command: ["-config", "/etc/concert/Concertfile"]
+    environment:
+      CONCERT_ADMIT_SECRET: "${CONCERT_ADMIT_SECRET:-change-me-to-a-32-plus-char-random-secret-value}"
+      CONCERT_PORTAL_PASS: "${CONCERT_PORTAL_PASS:-change-me-admin-portal-password}"
+    ports:
+      - "8080:8080"
+      - "127.0.0.1:8081:8081"
+    volumes:
+      - ./Concertfile.standalone:/etc/concert/Concertfile:ro
+      - concert_data:/var/lib/concert/data
+    depends_on:
+      - origin
+    networks:
+      - concert_net
+
+  # Replace with your real HTTP application container.
+  origin:
+    image: hashicorp/http-echo:1.0
+    command: ["-listen=:3000", "-text=Hello from origin behind Concert"]
+    networks:
+      - concert_net
+
+volumes:
+  concert_data:
+
+networks:
+  concert_net:

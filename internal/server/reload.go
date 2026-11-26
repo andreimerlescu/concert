@@ -1,0 +1,529 @@
+package server
+
+import (
+	"context"
+	"crypto/tls"
+	"errors"
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"net/http/httputil"
+	"os"
+	"strings"
+
+	"github.com/andreimerlescu/concert/internal/static"
+	"github.com/andreimerlescu/room"
+	"github.com/andreimerlescu/sema"
+	"github.com/gin-gonic/gin"
+)
+
+// Hot reconfiguration.
+//
+// Everything concert serves is built from one configuration into a
+// generation: the gin engine with its routes and middleware, the reverse
+// proxy, the asset, stream and priority pools and the ban rules. Each
+// request loads the current generation once, so a change never alters the
+// rules halfway through a request. Changing a setting builds a complete new
+// generation, binds any new listen address, saves settings.json, and then
+// swaps everything in at once. If any step before the save fails, nothing
+// that is running changes.
+//
+// State that must outlive a change is not rebuilt: the waiting room and its
+// queue, the abuse registry with its bans and strikes, the admission pass
+// signer, the priority grants and ranked line, and the counters. They are
+// reconfigured in place; room documents every setter as safe to call while
+// traffic flows.
+//
+// Pools (assets.global, streams.sem, and the priority lane) are resized in
+// place on commit via non-draining SetCap (sema v1.3.0 / rankedSem), so
+// shrinking never revokes in-flight requests and never temporarily
+// over-admits on reload. Failed reloads never mutate live caps because
+// SetCap runs only inside commit.
+
+// generation is everything built from one configuration.
+type generation struct {
+	a          *app
+	cfg        config
+	abuse      *abuseRegistry // a.abuse, or nil when -abuse=false
+	banRules   []pathRule
+	untracked  []pathRule // paths the portal's queue view ignores
+	assets     *assetGuard
+	static     *static.Server
+	microCache *pageMicroCache
+	guard      *guardState
+	routes     *routeTable
+	streams    *streamGuard
+	lane       *rankedSem // priority lane; see priority.go
+	upstreams  *upstreamPool
+	proxy      *httputil.ReverseProxy
+	// forward proxies an admitted request. forwardPage is the same for the
+	// room's and the lane's page requests, except on a leaf, where they
+	// first take a host slot behind the edge's traffic; see topology.go.
+	forward     gin.HandlerFunc
+	forwardPage gin.HandlerFunc
+	engine      *gin.Engine
+	html        []byte // custom waiting room page; nil means room's own
+	busyHTML    []byte // branded 503 busy page (-busy-html or defaultBusyHTML)
+}
+
+// defaultBusyHTML holds Concert's embedded 503 busy page bytes when populated
+// by edition_core.go; loadBusyHTML falls back to it when -busy-html is unset.
+var defaultBusyHTML []byte
+
+// current is the generation serving requests now.
+func (a *app) current() *generation {
+	return a.gen.Load()
+}
+
+// buildGeneration builds a generation from next, which must already be
+// normalized, without changing anything that is running. Pieces whose
+// settings did not change are carried over from prev so that in-flight
+// requests, idle upstream connections, per-visitor asset limits and lane
+// waiters are kept.
+func (a *app) buildGeneration(next config, prev *generation) (*generation, error) {
+	html, err := readWaitingRoomHTML(next)
+	if err != nil {
+		return nil, err
+	}
+	busyHTML, err := loadBusyHTML(next.busyHTMLFile)
+	if err != nil {
+		return nil, err
+	}
+
+	g := &generation{a: a, cfg: next, html: html, busyHTML: busyHTML, banRules: parsePaths(next.banPaths)}
+	if next.abuseEnabled {
+		g.abuse = a.abuse
+	}
+	g.untracked = append(g.untracked, parsePaths(next.assets)...)
+	g.untracked = append(g.untracked, parsePaths(next.assetPublic)...)
+	g.untracked = append(g.untracked, parsePaths(next.bypass)...)
+	g.untracked = append(g.untracked, parsePaths(next.streamPaths)...)
+	g.untracked = append(g.untracked, pathRule{path: "/_room", prefix: true})
+	g.untracked = append(g.untracked, untrackedEnterprisePaths()...)
+
+	baseModify := a.tierResponse(a.prio.grants.modifyResponse)
+	siteModify := wrapSiteHeadersModify(baseModify, next.siteHeaders)
+	onCBOpen := func(target, reason string) {
+		a.notifyAlert(alertEvent{
+			Category:    alertCatSilence,
+			Severity:    alertSevCritical,
+			Title:       "Upstream circuit breaker opened",
+			Summary:     fmt.Sprintf("Backend %s circuit breaker opened after repeated failures (%s).", target, reason),
+			Fingerprint: "cb:" + target,
+			Details:     map[string]string{"backend": target, "reason": reason},
+		})
+	}
+	if prev != nil && sameProxy(prev.cfg, next) && sameSiteRoutes(prev.cfg, next) {
+		g.proxy = prev.proxy
+		g.upstreams = prev.upstreams
+		g.routes = prev.routes
+	} else {
+		proxy, pool, err := newEnterpriseProxy(next, a.stats, siteModify, a.topo)
+		if err != nil {
+			return nil, err
+		}
+		pool.onCircuitOpen = onCBOpen
+		rt, rerr := buildRouteTable(next, a.stats, baseModify, a.topo, onCBOpen)
+		if rerr != nil {
+			pool.close()
+			return nil, rerr
+		}
+		g.proxy = proxy
+		g.upstreams = pool
+		g.routes = rt
+	}
+	g.forward = g.proxyForward
+	g.forwardPage = g.wrapForwardPage(g.forward)
+
+	var users *userStore
+	if prev != nil && sameUserPools(prev.cfg, next) {
+		users = prev.assets.users
+	} else {
+		users = newUserStore(next.assetUserCapH1, next.assetUserCapH2)
+	}
+	var global sema.PrioritySemaphore
+	if prev != nil {
+		global = prev.assets.global
+	} else if global, err = sema.NewPriority(next.effectiveAssetCap()); err != nil {
+		return nil, fmt.Errorf("asset semaphore: %w", err)
+	}
+	g.assets = &assetGuard{
+		admit:       a.admit,
+		prio:        a.prio.grants,
+		laneRank:    priorityRank(next.priorityLaneRank),
+		users:       users,
+		global:      global,
+		userWait:    next.assetUserWait,
+		globalWait:  next.assetWait,
+		protoHeader: next.clientProtoHeader,
+		stats:       a.stats,
+		strike:      g.strike,
+	}
+
+	if prev != nil && sameStatic(prev.cfg, next) {
+		g.static = prev.static
+	} else {
+		st, serr := static.New(static.Config{
+			Root:          next.staticRoot,
+			Mounts:        next.parsedStaticMounts,
+			AllowExt:      next.parsedStaticAllowExt,
+			CacheControl:  next.staticCacheControl,
+			Fallback:      next.staticFallback,
+			Compress:      next.compress,
+			ServeDirIndex: !next.hasFastCGI,
+		})
+		if serr != nil {
+			return nil, serr
+		}
+		g.static = st
+	}
+
+	var streamSem sema.Semaphore
+	if prev != nil {
+		streamSem = prev.streams.sem
+	} else if streamSem, err = sema.New(next.streamCap); err != nil {
+		return nil, fmt.Errorf("stream semaphore: %w", err)
+	}
+	g.streams = &streamGuard{
+		admit:  a.admit,
+		sem:    streamSem,
+		stats:  a.stats,
+		strike: g.strike,
+	}
+
+	// The lane is reused across reloads and resized in place via non-draining
+	// SetCap during commit, preserving queued waiters without over-admission.
+	if prev != nil {
+		g.lane = prev.lane
+	} else {
+		g.lane = newRankedSem(next.effectivePriorityCap())
+	}
+
+	if prev != nil && sameMicroCache(prev.cfg, next) {
+		g.microCache = prev.microCache
+	} else {
+		mc, mcErr := buildMicroCache(next, a.stats)
+		if mcErr != nil {
+			return nil, fmt.Errorf("page cache: %w", mcErr)
+		}
+		g.microCache = mc
+	}
+
+	gs, gErr := buildGuardState(next, prev, a)
+	if gErr != nil {
+		if g.microCache != nil && (prev == nil || g.microCache != prev.microCache) {
+			g.microCache.close()
+		}
+		return nil, gErr
+	}
+	g.guard = gs
+
+	engine, err := buildRouter(g)
+	if err != nil {
+		if g.microCache != nil && (prev == nil || g.microCache != prev.microCache) {
+			g.microCache.close()
+		}
+		return nil, err
+	}
+	g.engine = engine
+	return g, nil
+}
+
+func sameProxy(a, b config) bool {
+	return a.upstream == b.upstream && a.preserveHost == b.preserveHost &&
+		a.headerTimeout == b.headerTimeout && a.upstreamBodyIdleTimeout == b.upstreamBodyIdleTimeout &&
+		a.trustedProxies == b.trustedProxies &&
+		a.upstreamHealthPath == b.upstreamHealthPath &&
+		a.upstreamHealthInterval == b.upstreamHealthInterval &&
+		a.upstreamCBFailures == b.upstreamCBFailures &&
+		a.upstreamCBCooldown == b.upstreamCBCooldown &&
+		a.upstreamCA == b.upstreamCA &&
+		a.upstreamClientCert == b.upstreamClientCert &&
+		a.upstreamClientKey == b.upstreamClientKey &&
+		a.upstreamRetries == b.upstreamRetries &&
+		a.staticRoot == b.staticRoot &&
+		a.fcgiIndex == b.fcgiIndex &&
+		a.fcgiDenyPaths == b.fcgiDenyPaths &&
+		a.compress == b.compress
+}
+
+func sameStatic(a, b config) bool {
+	return a.staticRoot == b.staticRoot &&
+		a.staticMounts == b.staticMounts &&
+		a.staticAllowExt == b.staticAllowExt &&
+		a.staticCacheControl == b.staticCacheControl &&
+		a.staticFallback == b.staticFallback &&
+		a.compress == b.compress &&
+		a.hasFastCGI == b.hasFastCGI
+}
+
+func sameUserPools(a, b config) bool {
+	return a.assetUserCapH1 == b.assetUserCapH1 && a.assetUserCapH2 == b.assetUserCapH2 && a.admitTTL == b.admitTTL
+}
+
+func readWaitingRoomHTML(cfg config) ([]byte, error) {
+	if cfg.htmlFile == "" {
+		return waitingWeb.ReadFile("web/waiting.html")
+	}
+	html, err := os.ReadFile(cfg.htmlFile)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read -html %s: %w", cfg.htmlFile, err)
+	}
+	return html, nil
+}
+
+func loadBusyHTML(path string) ([]byte, error) {
+	p := strings.TrimSpace(path)
+	if p == "" {
+		return defaultBusyHTML, nil
+	}
+	html, err := os.ReadFile(p)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read -busy-html %s: %w", path, err)
+	}
+	return html, nil
+}
+
+// applyRoom configures the waiting room from cfg. html is the -html file or,
+// without one, Concert's built-in page (web/waiting.html); a zero ticket TTL
+// restores room's default.
+// price becomes room's RateFunc only while paid skip-the-line is configured
+// (-rate or -surge above 0); otherwise room has none, and paid promotion is
+// off. The portal's "move to front" uses AdminPromote, which needs no
+// RateFunc. Every value is validated before it gets here, so an error means
+// room's own limits changed.
+// capacity is the room's page capacity: -cap, or what an edge's leaves
+// offer (see app.edgeCap).
+func applyRoom(wr *room.WaitingRoom, cfg config, capacity int32, html []byte, price func(int64) float64) error {
+	wr.SetSecureCookie(cfg.secureCookie)
+	wr.SetCookiePath(cfg.cookiePath)
+	wr.SetCookieDomain(cfg.cookieDomain)
+	wr.SetHTML(html)
+	wr.SetSkipURL(cfg.skipURL)
+	wr.SetScope(cfg.roomScope)
+	var verifyErr error
+	if len(cfg.parsedRoomVerifyKeys) > 0 {
+		verifyErr = wr.SetEd25519VerifyKeys(cfg.parsedRoomVerifyKeys)
+	} else {
+		wr.SetVerifier(nil)
+	}
+	var signedTTLErr error
+	if cfg.roomSignedMaxTTL > 0 {
+		signedTTLErr = wr.SetSignedMaxTTL(cfg.roomSignedMaxTTL)
+	}
+	var leaseFracErr error
+	if cfg.roomLeaseFraction > 0 {
+		leaseFracErr = wr.SetLeaseFraction(cfg.roomLeaseFraction)
+	}
+	if cfg.rate > 0 || cfg.surge > 0 {
+		wr.SetRateFunc(price)
+	} else {
+		wr.SetRateFunc(nil)
+	}
+	return errors.Join(
+		verifyErr,
+		signedTTLErr,
+		leaseFracErr,
+		wr.SetCap(capacity),
+		wr.SetMaxQueueDepth(cfg.maxQueue),
+		wr.SetReaperInterval(cfg.reaper),
+		wr.SetTokenTTL(cfg.tokenTTL),
+		wr.SetFirstPollGrace(cfg.firstPollGrace),
+		wr.SetReadyGrace(cfg.readyGrace),
+		wr.SetIdlePollTTL(cfg.idlePollTTL),
+		wr.SetPassDuration(cfg.passDuration),
+		wr.Validate(),
+	)
+}
+
+// commit makes g the running generation and applies lp. It is used at
+// startup (prev is nil, lp is nil) and for every change after that. It
+// returns only the waiting room's error; everything else cannot fail.
+func (a *app) commit(g *generation, lp *listenPlan) error {
+	prev := a.current()
+	cfg := g.cfg
+
+	roomErr := applyRoom(a.room, cfg, a.edgeCap(cfg), g.html, a.price)
+	if prev != nil {
+		if want := cfg.effectiveAssetCap(); g.assets.global.Cap() != want {
+			_ = g.assets.global.SetCap(want)
+		}
+		if g.streams.sem.Cap() != cfg.streamCap {
+			_ = g.streams.sem.SetCap(cfg.streamCap)
+		}
+		if want := cfg.effectivePriorityCap(); g.lane.Cap() != want {
+			g.lane.SetCap(want)
+		}
+	}
+	a.admit.configure(cfg.admitTTL, cfg.cookiePath, cfg.cookieDomain, cfg.secureCookie)
+	a.abuse.setParams(abuseParamsFrom(cfg))
+	a.setPricing(cfg.rate, cfg.surge)
+	if a.history != nil {
+		a.history.setRetention(cfg.historyRetention)
+	}
+	a.applyEnterpriseReload(cfg)
+	if prev == nil || prev.assets.users != g.assets.users {
+		g.assets.users.startJanitor(janitorInterval(cfg.admitTTL), cfg.admitTTL)
+	}
+	if g.guard != nil && g.guard.shedder != nil && (prev == nil || prev.guard == nil || prev.guard.shedder != g.guard.shedder) {
+		g.guard.shedder.Start(context.Background())
+	}
+	if cfg.htmlFile != "" && (prev == nil || prev.cfg.htmlFile != cfg.htmlFile) {
+		log.Printf("custom waiting room loaded from %s — it must treat cookies_required as terminal "+
+			"and check document.cookie for room_probe before its first poll", cfg.htmlFile)
+	}
+
+	a.gen.Store(g)
+
+	if prev != nil {
+		if prev.assets.users != g.assets.users {
+			prev.assets.users.close()
+		}
+		if prev.static != nil && prev.static != g.static {
+			_ = prev.static.Close()
+		}
+		if prev.microCache != nil && prev.microCache != g.microCache {
+			prev.microCache.close()
+		}
+		if prev.guard != nil && prev.guard.shedder != nil && (g.guard == nil || prev.guard.shedder != g.guard.shedder) {
+			prev.guard.shedder.Stop()
+		}
+		if prev.proxy != g.proxy {
+			prev.upstreams.close()
+			if t, ok := prev.proxy.Transport.(*http.Transport); ok {
+				t.CloseIdleConnections()
+			}
+		}
+		if prev.routes != nil && prev.routes != g.routes {
+			prev.routes.close()
+		}
+	}
+	lp.commit()
+	return roomErr
+}
+
+// ─── listeners ───────────────────────────────────────────────────────────────
+
+// listenPlan is the listener changes one reconfiguration needs. prepare
+// binds every new address and builds any new certificate configuration, so
+// a failure changes nothing; commit switches over; abort releases whatever
+// prepare bound.
+type listenPlan struct {
+	main, portal *endpoint
+
+	setTLS   bool
+	tls      *tls.Config
+	tlsClose func()
+	appRef   *app
+
+	mainLn, portalLn     net.Listener
+	mainAddr, portalAddr string
+	portalOff            bool
+}
+
+// attachEndpoints records the running listeners so later changes can move
+// them. Called by run once they exist.
+func (a *app) attachEndpoints(main, portal *endpoint) {
+	a.settings.mu.Lock()
+	a.mainEP, a.portalEP = main, portal
+	a.settings.mu.Unlock()
+}
+
+// prepareListeners binds what next needs. Caller holds a.settings.mu.
+// Without running listeners (tests, or before run starts serving) it still
+// validates the certificate configuration.
+func (a *app) prepareListeners(next config) (*listenPlan, error) {
+	lp := &listenPlan{main: a.mainEP, portal: a.portalEP, appRef: a}
+
+	if cur := a.current().cfg; tlsChanged(cur, next) {
+		tc, _, tlsClose, err := newACMETLSConfigWithLifecycle(context.Background(), next, a.acmeKVSync())
+		if err != nil {
+			return nil, err
+		}
+		lp.setTLS, lp.tls, lp.tlsClose = true, tc, tlsClose
+	}
+
+	if ep := a.mainEP; ep != nil && next.listen != ep.addr() {
+		ln, err := bindMove(ep, next.listen)
+		if err != nil {
+			return nil, err
+		}
+		lp.mainLn, lp.mainAddr = ln, next.listen
+	}
+
+	if ep := a.portalEP; ep != nil {
+		if want := portalAddress(next); want != ep.addr() {
+			if want == "" {
+				lp.portalOff = true
+			} else {
+				ln, err := bindMove(ep, want)
+				if err != nil {
+					lp.abort()
+					return nil, err
+				}
+				lp.portalLn, lp.portalAddr = ln, want
+			}
+		}
+	}
+	return lp, nil
+}
+
+func (lp *listenPlan) commit() {
+	if lp == nil {
+		return
+	}
+	if lp.setTLS && lp.main != nil {
+		lp.main.setTLS(lp.tls)
+		if lp.tlsClose != nil && lp.appRef != nil {
+			lp.appRef.onClose(lp.tlsClose)
+		}
+		if lp.tls != nil {
+			log.Printf("main: TLS on for new connections")
+		} else {
+			log.Printf("main: TLS off for new connections")
+		}
+	} else if lp.tlsClose != nil {
+		lp.tlsClose()
+	}
+	if lp.mainLn != nil && lp.main != nil {
+		lp.main.serveOn(lp.mainLn, lp.mainAddr)
+	}
+	if lp.portal != nil {
+		switch {
+		case lp.portalOff:
+			lp.portal.stopServing()
+		case lp.portalLn != nil:
+			lp.portal.serveOn(lp.portalLn, lp.portalAddr)
+		}
+	}
+}
+
+func (lp *listenPlan) abort() {
+	if lp == nil {
+		return
+	}
+	if lp.tlsClose != nil {
+		lp.tlsClose()
+	}
+	for _, ln := range []net.Listener{lp.mainLn, lp.portalLn} {
+		if ln != nil {
+			_ = ln.Close()
+		}
+	}
+}
+
+// portalAddress is where the portal should listen, or "" for off.
+func portalAddress(cfg config) string {
+	if cfg.portal.enabled() {
+		return cfg.portal.listen
+	}
+	return ""
+}
+
+func tlsChanged(a, b config) bool {
+	return strings.Join(a.tlsHosts, ",") != strings.Join(b.tlsHosts, ",") ||
+		a.tlsEmail != b.tlsEmail || a.tlsCacheDir != b.tlsCacheDir || a.tlsStaging != b.tlsStaging ||
+		a.tlsCert != b.tlsCert || a.tlsKey != b.tlsKey || a.tlsMinVersion != b.tlsMinVersion ||
+		a.tlsDNSProvider != b.tlsDNSProvider || a.tlsDNSWebhookURL != b.tlsDNSWebhookURL
+}

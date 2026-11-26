@@ -1,0 +1,161 @@
+# Enterprise Active-Active Edge -> Leaf Mesh + concert-kv HA topology (econcert).
+# Two active-active edges share CONCERT_ADMIT_SECRET, CONCERT_HOP_SECRET, and
+# concert-kv for cross-edge ban sync, fast-lane pass cookies, and live revocation,
+# dispatching admitted traffic across two capacity-calibrated leaves.
+#
+# Start with:
+#   docker compose -f deploy/docker/compose.enterprise.yml up --build
+#
+# For production, mount 0600 secret files and set CONCERT_*_FILE (such as
+# CONCERT_KV_PASSWORD_FILE=/run/secrets/kv_password) instead of inline defaults.
+x-econcert-common: &econcert-common
+  build:
+    context: ../..
+    dockerfile: Dockerfile.econcert
+  image: econcert:v0.3.0
+  restart: unless-stopped
+  read_only: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
+services:
+  concert-kv:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.kv
+    image: concert-kv:v0.3.0
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    command: ["-listen", "0.0.0.0:6379", "-data-dir", "/var/lib/concert-kv"]
+    environment:
+      CONCERT_KV_PASSWORD: "${CONCERT_KV_PASSWORD:-change-me-to-a-32-plus-char-kv-cluster-secret}"
+    volumes:
+      - kv_data:/var/lib/concert-kv
+    networks:
+      - mesh_net
+
+  origin-1:
+    image: hashicorp/http-echo:1.0
+    command: ["-listen=:3000", "-text=Origin 1 behind econcert leaf-1"]
+    networks:
+      - mesh_net
+
+  origin-2:
+    image: hashicorp/http-echo:1.0
+    command: ["-listen=:3000", "-text=Origin 2 behind econcert leaf-2"]
+    networks:
+      - mesh_net
+
+  leaf-1:
+    <<: *econcert-common
+    environment:
+      CONCERT_ROLE: "leaf"
+      CONCERT_NODE_ID: "leaf-1"
+      CONCERT_LISTEN: ":8080"
+      CONCERT_UPSTREAM: "http://origin-1:3000"
+      CONCERT_HOST_CAP: "10"
+      CONCERT_HOP_PEERS: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+      CONCERT_ADMIT_SECRET: "${CONCERT_ADMIT_SECRET:-change-me-to-a-32-plus-char-random-secret-value}"
+      CONCERT_HOP_SECRET: "${CONCERT_HOP_SECRET:-change-me-to-a-32-plus-char-hop-mesh-secret-key}"
+      CONCERT_DATA_DIR: "/var/lib/concert/data"
+    volumes:
+      - leaf1_data:/var/lib/concert/data
+    depends_on:
+      - origin-1
+    networks:
+      - mesh_net
+
+  leaf-2:
+    <<: *econcert-common
+    environment:
+      CONCERT_ROLE: "leaf"
+      CONCERT_NODE_ID: "leaf-2"
+      CONCERT_LISTEN: ":8080"
+      CONCERT_UPSTREAM: "http://origin-2:3000"
+      CONCERT_HOST_CAP: "10"
+      CONCERT_HOP_PEERS: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+      CONCERT_ADMIT_SECRET: "${CONCERT_ADMIT_SECRET:-change-me-to-a-32-plus-char-random-secret-value}"
+      CONCERT_HOP_SECRET: "${CONCERT_HOP_SECRET:-change-me-to-a-32-plus-char-hop-mesh-secret-key}"
+      CONCERT_DATA_DIR: "/var/lib/concert/data"
+    volumes:
+      - leaf2_data:/var/lib/concert/data
+    depends_on:
+      - origin-2
+    networks:
+      - mesh_net
+
+  edge-1:
+    <<: *econcert-common
+    environment:
+      CONCERT_ROLE: "edge"
+      CONCERT_NODE_ID: "edge-1"
+      CONCERT_LISTEN: ":8080"
+      CONCERT_UPSTREAM: "http://leaf-1:8080,http://leaf-2:8080"
+      CONCERT_HOP_LEAVES: "http://leaf-1:8080,http://leaf-2:8080"
+      CONCERT_HOP_AUTO_CAP: "true"
+      CONCERT_PRIORITY_CAP: "4"
+      CONCERT_KV_ADDR: "concert-kv:6379"
+      CONCERT_KV_PASSWORD: "${CONCERT_KV_PASSWORD:-change-me-to-a-32-plus-char-kv-cluster-secret}"
+      CONCERT_ADMIT_SECRET: "${CONCERT_ADMIT_SECRET:-change-me-to-a-32-plus-char-random-secret-value}"
+      CONCERT_HOP_SECRET: "${CONCERT_HOP_SECRET:-change-me-to-a-32-plus-char-hop-mesh-secret-key}"
+      CONCERT_PORTAL_LISTEN: "0.0.0.0:8081"
+      CONCERT_PORTAL_ALLOW: "127.0.0.1/32,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+      CONCERT_PORTAL_PASS: "${CONCERT_PORTAL_PASS:-change-me-admin-portal-password}"
+      CONCERT_DATA_DIR: "/var/lib/concert/data"
+    ports:
+      - "8080:8080"
+      - "127.0.0.1:8081:8081"
+    volumes:
+      - edge1_data:/var/lib/concert/data
+    depends_on:
+      - concert-kv
+      - leaf-1
+      - leaf-2
+    networks:
+      - mesh_net
+
+  edge-2:
+    <<: *econcert-common
+    environment:
+      CONCERT_ROLE: "edge"
+      CONCERT_NODE_ID: "edge-2"
+      CONCERT_LISTEN: ":8080"
+      CONCERT_UPSTREAM: "http://leaf-1:8080,http://leaf-2:8080"
+      CONCERT_HOP_LEAVES: "http://leaf-1:8080,http://leaf-2:8080"
+      CONCERT_HOP_AUTO_CAP: "true"
+      CONCERT_PRIORITY_CAP: "4"
+      CONCERT_KV_ADDR: "concert-kv:6379"
+      CONCERT_KV_PASSWORD: "${CONCERT_KV_PASSWORD:-change-me-to-a-32-plus-char-kv-cluster-secret}"
+      CONCERT_ADMIT_SECRET: "${CONCERT_ADMIT_SECRET:-change-me-to-a-32-plus-char-random-secret-value}"
+      CONCERT_HOP_SECRET: "${CONCERT_HOP_SECRET:-change-me-to-a-32-plus-char-hop-mesh-secret-key}"
+      CONCERT_PORTAL_LISTEN: "0.0.0.0:8081"
+      CONCERT_PORTAL_ALLOW: "127.0.0.1/32,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+      CONCERT_PORTAL_PASS: "${CONCERT_PORTAL_PASS:-change-me-admin-portal-password}"
+      CONCERT_DATA_DIR: "/var/lib/concert/data"
+    ports:
+      - "8090:8080"
+      - "127.0.0.1:8091:8081"
+    volumes:
+      - edge2_data:/var/lib/concert/data
+    depends_on:
+      - concert-kv
+      - leaf-1
+      - leaf-2
+    networks:
+      - mesh_net
+
+volumes:
+  kv_data:
+  leaf1_data:
+  leaf2_data:
+  edge1_data:
+  edge2_data:
+
+networks:
+  mesh_net:

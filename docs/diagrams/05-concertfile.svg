@@ -1,0 +1,139 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 832" width="720" height="832">
+  <defs>
+    <style>
+      .sans { font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+      .mono { font-family: 'SF Mono', 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    </style>
+    <marker id="arr-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#0284c7"/>
+    </marker>
+    <marker id="arr-teal" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#0d9488"/>
+    </marker>
+    <marker id="arr-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#d97706"/>
+    </marker>
+    <marker id="arr-rose" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#db2777"/>
+    </marker>
+  </defs>
+
+  <!-- TOP: Concertfile + Global Block -->
+  <rect x="16" y="16" width="688" height="136" rx="16" fill="#f0f9ff" stroke="#0284c7" stroke-width="2.2"/>
+  <!-- File icon -->
+  <g transform="translate(36, 33)" fill="none" stroke="#0284c7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M5 2 H14 L19 7 V20 H5 Z"/>
+    <polyline points="14,2 14,7 19,7"/>
+    <line x1="8" y1="12" x2="16" y2="12"/>
+    <line x1="8" y1="16" x2="14" y2="16"/>
+  </g>
+  <text x="66" y="51" class="mono" font-size="19" font-weight="700" fill="#0f172a">Concertfile</text>
+  <rect x="208" y="31" width="160" height="28" rx="14" fill="#0f172a"/>
+  <text x="288" y="49.5" text-anchor="middle" class="mono" font-size="12.5" font-weight="700" fill="#7dd3fc">-config | .json</text>
+  <rect x="488" y="31" width="198" height="28" rx="14" fill="#0284c7"/>
+  <text x="587" y="49.5" text-anchor="middle" class="sans" font-size="12.5" font-weight="700" fill="#ffffff">Single Source of Truth</text>
+
+  <!-- Global block strip -->
+  <rect x="34" y="72" width="652" height="64" rx="11" fill="#ffffff" stroke="#7c3aed" stroke-width="1.75"/>
+  <rect x="46" y="88" width="124" height="32" rx="16" fill="#7c3aed"/>
+  <text x="108" y="108.5" text-anchor="middle" class="mono" font-size="12.5" font-weight="700" fill="#ffffff">Global { ... }</text>
+  <text x="184" y="99" class="mono" font-size="13" font-weight="600" fill="#0f172a">listen :443 · http_listen :80 · ACME · http3 on</text>
+  <text x="184" y="122" class="mono" font-size="12.5" font-weight="500" fill="#334155">portal_listen :8081 · upload timeouts 30s / 10m</text>
+
+  <!-- Arrow down to Shared Listener -->
+  <line x1="360" y1="152" x2="360" y2="192" stroke="#0284c7" stroke-width="2.5" marker-end="url(#arr-blue)"/>
+
+  <!-- MIDDLE: Shared Front Listener + SNI Router -->
+  <rect x="16" y="196" width="688" height="98" rx="16" fill="#f5f3ff" stroke="#7c3aed" stroke-width="2.2"/>
+  <!-- Globe icon -->
+  <g transform="translate(36, 214)" fill="none" stroke="#7c3aed" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="11" cy="11" r="9"/>
+    <ellipse cx="11" cy="11" rx="4.2" ry="9"/>
+    <line x1="2" y1="11" x2="20" y2="11"/>
+  </g>
+  <text x="68" y="232" class="sans" font-size="17.5" font-weight="700" fill="#0f172a">Shared :80 / :443 Listener + SNI Router</text>
+  <rect x="492" y="212" width="194" height="28" rx="14" fill="#be185d"/>
+  <text x="589" y="230.5" text-anchor="middle" class="mono" font-size="12.5" font-weight="700" fill="#ffffff">Unknown Host → 421</text>
+  <text x="68" y="262" class="sans" font-size="14" font-weight="500" fill="#334155">Dispatches TLS &amp; UDP HTTP/3 by Host · :80 ACME &amp; 301 redirect · Portal :8081</text>
+
+  <!-- Branch arrows to 2 Isolated Sites -->
+  <line x1="360" y1="294" x2="360" y2="312" stroke="#7c3aed" stroke-width="2.2"/>
+  <line x1="183" y1="312" x2="537" y2="312" stroke="#7c3aed" stroke-width="2.2"/>
+  <line x1="183" y1="312" x2="183" y2="334" stroke="#0d9488" stroke-width="2.4" marker-end="url(#arr-teal)"/>
+  <line x1="537" y1="312" x2="537" y2="334" stroke="#d97706" stroke-width="2.4" marker-end="url(#arr-amber)"/>
+
+  <!-- SITE 1: shop.example.com -->
+  <rect x="16" y="338" width="334" height="288" rx="16" fill="#f0fdfa" stroke="#0d9488" stroke-width="2.2"/>
+  <rect x="34" y="354" width="184" height="30" rx="15" fill="#0f766e"/>
+  <text x="126" y="374" text-anchor="middle" class="mono" font-size="13.5" font-weight="700" fill="#ffffff">shop.example.com</text>
+  <rect x="228" y="356" width="106" height="26" rx="13" fill="#0f172a"/>
+  <text x="281" y="373.5" text-anchor="middle" class="mono" font-size="12.5" font-weight="700" fill="#5eead4">wordpress</text>
+
+  <rect x="34" y="400" width="298" height="58" rx="11" fill="#ffffff" stroke="#0d9488" stroke-width="1.6"/>
+  <text x="183" y="424" text-anchor="middle" class="sans" font-size="15" font-weight="700" fill="#0f172a">os.Root Static &amp; Bans</text>
+  <text x="183" y="446" text-anchor="middle" class="mono" font-size="12.5" fill="#334155">/var/www/shop · xmlrpc ban</text>
+
+  <line x1="183" y1="458" x2="183" y2="474" stroke="#0d9488" stroke-width="2" marker-end="url(#arr-teal)"/>
+
+  <rect x="34" y="478" width="298" height="58" rx="11" fill="#ffffff" stroke="#7c3aed" stroke-width="1.6"/>
+  <text x="183" y="502" text-anchor="middle" class="sans" font-size="15" font-weight="700" fill="#0f172a">Micro-Cache + Isolated Room</text>
+  <text x="183" y="524" text-anchor="middle" class="mono" font-size="12.5" fill="#6d28d9">micro_cache 15s · cap 12 + 4</text>
+
+  <line x1="183" y1="536" x2="183" y2="552" stroke="#0d9488" stroke-width="2" marker-end="url(#arr-teal)"/>
+
+  <rect x="34" y="556" width="298" height="54" rx="11" fill="#0f172a"/>
+  <text x="183" y="580" text-anchor="middle" class="mono" font-size="13.5" font-weight="700" fill="#7dd3fc">fcgi+unix://php8.3-fpm.sock</text>
+  <text x="183" y="600" text-anchor="middle" class="sans" font-size="12.5" fill="#cbd5e1">Auto room_scope isolation</text>
+
+  <!-- SITE 2: api.example.com -->
+  <rect x="370" y="338" width="334" height="288" rx="16" fill="#fffbeb" stroke="#d97706" stroke-width="2.2"/>
+  <rect x="388" y="354" width="168" height="30" rx="15" fill="#b45309"/>
+  <text x="472" y="374" text-anchor="middle" class="mono" font-size="13.5" font-weight="700" fill="#ffffff">api.example.com</text>
+  <rect x="566" y="356" width="122" height="26" rx="13" fill="#0f172a"/>
+  <text x="627" y="373.5" text-anchor="middle" class="mono" font-size="12.5" font-weight="700" fill="#fde68a">queue 1000</text>
+
+  <rect x="388" y="400" width="298" height="58" rx="11" fill="#ffffff" stroke="#d97706" stroke-width="1.6"/>
+  <text x="537" y="424" text-anchor="middle" class="sans" font-size="15" font-weight="700" fill="#0f172a">Static &amp; Bypass Paths</text>
+  <text x="537" y="446" text-anchor="middle" class="mono" font-size="12.5" fill="#334155">/static/* · bypass /healthz</text>
+
+  <line x1="537" y1="458" x2="537" y2="474" stroke="#d97706" stroke-width="2" marker-end="url(#arr-amber)"/>
+
+  <rect x="388" y="478" width="298" height="58" rx="11" fill="#ffffff" stroke="#7c3aed" stroke-width="1.6"/>
+  <text x="537" y="502" text-anchor="middle" class="sans" font-size="15" font-weight="700" fill="#0f172a">Isolated Waiting Room</text>
+  <text x="537" y="524" text-anchor="middle" class="mono" font-size="12.5" fill="#6d28d9">cap 40 + 10 prio · 429 JSON</text>
+
+  <line x1="537" y1="536" x2="537" y2="552" stroke="#d97706" stroke-width="2" marker-end="url(#arr-amber)"/>
+
+  <rect x="388" y="556" width="298" height="54" rx="11" fill="#0f172a"/>
+  <text x="537" y="580" text-anchor="middle" class="mono" font-size="13.5" font-weight="700" fill="#fde68a">http://127.0.0.1:3000, :3001</text>
+  <text x="537" y="600" text-anchor="middle" class="sans" font-size="12.5" fill="#cbd5e1">Health-checked upstream pool</text>
+
+  <!-- BOTTOM: Zero-Downtime Hot Reload Loop -->
+  <rect x="16" y="646" width="688" height="170" rx="16" fill="#f8fafc" stroke="#0d9488" stroke-width="2.2"/>
+  <!-- Reload loop icon -->
+  <g transform="translate(36, 663)" fill="none" stroke="#0f766e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M19 11 A8 8 0 1 1 16.5 5.2"/>
+    <polyline points="17,1 17,6 12,6"/>
+  </g>
+  <text x="66" y="681" class="sans" font-size="17" font-weight="700" fill="#0f172a">Zero-Downtime Hot Reload</text>
+  <rect x="436" y="661" width="250" height="28" rx="14" fill="#0f172a"/>
+  <text x="561" y="679.5" text-anchor="middle" class="mono" font-size="12.5" font-weight="700" fill="#5eead4">kill -HUP  or  Portal Reload</text>
+
+  <!-- Parse & Validate -> Y-fork -->
+  <rect x="34" y="714" width="212" height="78" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.8"/>
+  <text x="140" y="746" text-anchor="middle" class="sans" font-size="15.5" font-weight="700" fill="#0f172a">Parse &amp; Validate</text>
+  <text x="140" y="771" text-anchor="middle" class="sans" font-size="13.5" fill="#334155">Syntax, roots &amp; pools</text>
+
+  <path d="M 246 738 L 274 738 L 274 726 L 302 726" fill="none" stroke="#0d9488" stroke-width="2.2" marker-end="url(#arr-teal)"/>
+  <path d="M 246 768 L 274 768 L 274 780 L 302 780" fill="none" stroke="#db2777" stroke-width="2.2" marker-end="url(#arr-rose)"/>
+
+  <rect x="306" y="704" width="380" height="44" rx="11" fill="#f0fdfa" stroke="#0d9488" stroke-width="1.8"/>
+  <rect x="316" y="714" width="76" height="24" rx="12" fill="#0f766e"/>
+  <text x="354" y="730.5" text-anchor="middle" class="sans" font-size="12.5" font-weight="700" fill="#ffffff">Valid</text>
+  <text x="404" y="731" class="sans" font-size="14.5" font-weight="700" fill="#0f172a">Atomic Generation Swap</text>
+
+  <rect x="306" y="758" width="380" height="44" rx="11" fill="#fdf2f8" stroke="#db2777" stroke-width="1.8"/>
+  <rect x="316" y="768" width="76" height="24" rx="12" fill="#be185d"/>
+  <text x="354" y="784.5" text-anchor="middle" class="sans" font-size="12.5" font-weight="700" fill="#ffffff">Invalid</text>
+  <text x="404" y="785" class="sans" font-size="14.5" font-weight="700" fill="#0f172a">Auto Rollback (stays live)</text>
+</svg>

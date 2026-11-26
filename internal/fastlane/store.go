@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
@@ -31,6 +32,7 @@ type Receipt struct {
 
 type ledger struct {
 	mu            sync.Mutex
+	dir           string
 	file          *os.File
 	lock          *os.File
 	bad           error
@@ -72,7 +74,7 @@ func openLedger(dir string, max int) (*ledger, error) {
 			return nil, err
 		}
 	}
-	l := &ledger{file: f, lock: lock, max: max, bySession: map[string]Receipt{}, byFingerprint: map[string]string{}, receipts: map[string]Receipt{}, byTransaction: map[string]string{}}
+	l := &ledger{dir: dir, file: f, lock: lock, max: max, bySession: map[string]Receipt{}, byFingerprint: map[string]string{}, receipts: map[string]Receipt{}, byTransaction: map[string]string{}}
 	s := bufio.NewScanner(f)
 	s.Buffer(make([]byte, 4096), 128<<10)
 	for s.Scan() {
@@ -190,7 +192,51 @@ func (l *ledger) summary() map[string]any {
 	for _, r := range l.bySession {
 		n[r.State]++
 	}
-	return map[string]any{"states": n, "receipts": len(l.byFingerprint), "capacity": l.max, "healthy": l.bad == nil}
+	used := len(l.byFingerprint)
+	pct := 0
+	if l.max > 0 {
+		pct = (used * 100) / l.max
+	}
+	return map[string]any{
+		"states":       n,
+		"receipts":     used,
+		"capacity":     l.max,
+		"records_used": used,
+		"max_records":  l.max,
+		"usage_pct":    pct,
+		"healthy":      l.bad == nil,
+	}
+}
+
+func (l *ledger) stats() (used, max, unresolved int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	used = len(l.byFingerprint)
+	max = l.max
+	for _, r := range l.receipts {
+		if r.State == "pending" || r.State == "unknown" {
+			unresolved++
+		}
+	}
+	return used, max, unresolved
+}
+
+func (l *ledger) unresolved() []Receipt {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []Receipt
+	for _, r := range l.receipts {
+		if r.State == "pending" || r.State == "unknown" {
+			out = append(out, r)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Started.Equal(out[j].Started) {
+			return out[i].Started.Before(out[j].Started)
+		}
+		return out[i].Fingerprint < out[j].Fingerprint
+	})
+	return out
 }
 
 func (l *ledger) fingerprint(fp string) (Receipt, bool) {
@@ -198,4 +244,138 @@ func (l *ledger) fingerprint(fp string) (Receipt, bool) {
 	defer l.mu.Unlock()
 	r, ok := l.receipts[fp]
 	return r, ok
+}
+
+func (l *ledger) slideExpiry(sessionID string, nextExp time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	r, ok := l.bySession[sessionID]
+	if !ok || r.State != "settled" || !nextExp.After(r.Expires) {
+		return
+	}
+	r.Expires = nextExp
+	l.bySession[sessionID] = r
+	l.receipts[r.Fingerprint] = r
+}
+
+func (l *ledger) setMax(max int) {
+	if max <= 0 {
+		return
+	}
+	l.mu.Lock()
+	l.max = max
+	l.mu.Unlock()
+}
+
+// archiveOnline compacts expired settled receipts older than olderThan while
+// Concert stays live, keeping fastlane.lock continuously held under l.mu.
+func (l *ledger) archiveOnline(olderThan time.Duration, dryRun bool, now time.Time) (ArchiveReport, error) {
+	var rep ArchiveReport
+	if olderThan < 0 {
+		return rep, errors.New("older_than must be non-negative")
+	}
+	now = now.UTC()
+	cutoff := now.Add(-olderThan)
+	rep.DryRun = dryRun
+	rep.OlderThan = olderThan.String()
+	rep.Cutoff = cutoff
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.bad != nil {
+		return rep, l.bad
+	}
+	order := make([]string, 0, len(l.receipts))
+	for fp := range l.receipts {
+		order = append(order, fp)
+	}
+	sort.Slice(order, func(i, j int) bool {
+		a, b := l.receipts[order[i]], l.receipts[order[j]]
+		if !a.Started.Equal(b.Started) {
+			return a.Started.Before(b.Started)
+		}
+		return a.Fingerprint < b.Fingerprint
+	})
+	rep.TotalBefore = len(order)
+	var kept, archived []Receipt
+	for _, fp := range order {
+		r := l.receipts[fp]
+		if r.State != "settled" {
+			kept = append(kept, r)
+			rep.KeptUnresolved++
+			continue
+		}
+		if !r.Expires.IsZero() && !r.Expires.Before(now) {
+			kept = append(kept, r)
+			rep.KeptActive++
+			continue
+		}
+		ref := r.Expires
+		if ref.IsZero() {
+			ref = r.Settled
+		}
+		if ref.IsZero() {
+			ref = r.Started
+		}
+		if !ref.Before(cutoff) {
+			kept = append(kept, r)
+			rep.KeptRecent++
+			continue
+		}
+		archived = append(archived, r)
+	}
+	rep.Kept = len(kept)
+	rep.Archived = len(archived)
+	if dryRun || len(archived) == 0 {
+		return rep, nil
+	}
+
+	archiveName := fmt.Sprintf("fastlane-archive-%s.jsonl", now.Format("20060102T150405Z"))
+	archivePath := filepath.Join(l.dir, archiveName)
+	if _, err := os.Stat(archivePath); err == nil {
+		return rep, fmt.Errorf("archive file %s already exists; wait 1s before retrying", archivePath)
+	}
+	sum, err := writeReceiptsAtomic(archivePath, archived)
+	if err != nil {
+		return rep, fmt.Errorf("write archive: %w", err)
+	}
+	checksumPath := archivePath + ".sha256"
+	if err := writeBytesAtomic(checksumPath, []byte(fmt.Sprintf("%s  %s\n", sum, archiveName))); err != nil {
+		return rep, fmt.Errorf("write archive checksum: %w", err)
+	}
+	if err := syncDir(l.dir); err != nil {
+		return rep, fmt.Errorf("sync archive dir: %w", err)
+	}
+
+	journalPath := filepath.Join(l.dir, "fastlane.jsonl")
+	if l.file != nil {
+		_ = l.file.Sync()
+		_ = l.file.Close()
+		l.file = nil
+	}
+	if _, err := writeReceiptsAtomic(journalPath, kept); err != nil {
+		l.bad = fmt.Errorf("online archive rewrite failed: %w", err)
+		return rep, l.bad
+	}
+	if err := syncDir(l.dir); err != nil {
+		l.bad = fmt.Errorf("online archive dir sync failed: %w", err)
+		return rep, l.bad
+	}
+	f, err := os.OpenFile(journalPath, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0600)
+	if err != nil {
+		l.bad = fmt.Errorf("reopen compacted journal: %w", err)
+		return rep, l.bad
+	}
+	l.file = f
+	l.bySession = map[string]Receipt{}
+	l.byFingerprint = map[string]string{}
+	l.receipts = map[string]Receipt{}
+	l.byTransaction = map[string]string{}
+	for _, r := range kept {
+		l.apply(r)
+	}
+	rep.ArchiveFile = archivePath
+	rep.ChecksumFile = checksumPath
+	rep.ArchiveSHA256 = sum
+	return rep, nil
 }

@@ -3,6 +3,9 @@
 summaries/
 lemmings/
 bin/
+dist/
 *.log
 logs/*
 !logs/.keep
+._*
+.github/

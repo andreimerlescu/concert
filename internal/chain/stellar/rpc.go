@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/andreimerlescu/concert/internal/chain/httpx"
+	"github.com/andreimerlescu/concert/internal/opt"
 	"github.com/stellar/go-stellar-sdk/strkey"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
@@ -119,8 +120,21 @@ func (c RPC) Transaction(ctx context.Context, hash string) (TxStatus, error) {
 // Horizon is the subset of Horizon REST the scheme uses.
 type Horizon struct{ URL string }
 
+// HorizonBalance represents one balance entry returned by Horizon's account
+// endpoint. IsAuthorized is an [opt.Option] because Horizon omits or sends null
+// for native balances and assets without explicit authorization flags; only
+// Some(false) marks an unauthorized trustline.
+type HorizonBalance struct {
+	Balance      string           `json:"balance"`
+	AssetType    string           `json:"asset_type"`
+	AssetCode    string           `json:"asset_code"`
+	AssetIssuer  string           `json:"asset_issuer"`
+	IsAuthorized opt.Option[bool] `json:"is_authorized"`
+}
+
 type HorizonAccount struct {
-	Sequence string `json:"sequence"`
+	Sequence string           `json:"sequence"`
+	Balances []HorizonBalance `json:"balances"`
 	Signers  []struct {
 		Key    string `json:"key"`
 		Weight int    `json:"weight"`
@@ -128,6 +142,29 @@ type HorizonAccount struct {
 	Thresholds struct {
 		Med int `json:"med_threshold"`
 	} `json:"thresholds"`
+}
+
+type HorizonPayment struct {
+	ID                    string    `json:"id"`
+	Type                  string    `json:"type"`
+	TransactionHash       string    `json:"transaction_hash"`
+	TransactionSuccessful bool      `json:"transaction_successful"`
+	CreatedAt             time.Time `json:"created_at"`
+	From                  string    `json:"from"`
+	To                    string    `json:"to"`
+	Amount                string    `json:"amount"`
+	AssetType             string    `json:"asset_type"`
+	AssetCode             string    `json:"asset_code"`
+	AssetIssuer           string    `json:"asset_issuer"`
+}
+
+type HorizonTransaction struct {
+	Hash       string    `json:"hash"`
+	Successful bool      `json:"successful"`
+	CreatedAt  time.Time `json:"created_at"`
+	MemoType   string    `json:"memo_type"`
+	Memo       string    `json:"memo"`
+	Envelope   string    `json:"envelope_xdr"`
 }
 
 func (h Horizon) get(ctx context.Context, path string, out any) error {
@@ -145,6 +182,46 @@ func (h Horizon) Passphrase(ctx context.Context) (string, error) {
 	}
 	err := h.get(ctx, "/", &root)
 	return root.Passphrase, err
+}
+
+func (h Horizon) Payments(ctx context.Context, account string, limit int) ([]HorizonPayment, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	var page struct {
+		Embedded struct {
+			Records []HorizonPayment `json:"records"`
+		} `json:"_embedded"`
+	}
+	path := "/accounts/" + account + "/payments?order=desc&limit=" + strconv.Itoa(limit)
+	if err := h.get(ctx, path, &page); err != nil {
+		return nil, err
+	}
+	return page.Embedded.Records, nil
+}
+
+func (h Horizon) Transaction(ctx context.Context, hash string) (*HorizonTransaction, error) {
+	var tx HorizonTransaction
+	if err := h.get(ctx, "/transactions/"+hash, &tx); err != nil {
+		return nil, err
+	}
+	return &tx, nil
+}
+
+// Submit posts a base64 XDR transaction envelope to Horizon's /transactions endpoint.
+func (h Horizon) Submit(ctx context.Context, envelopeXDR string) (string, error) {
+	var out struct {
+		Hash       string `json:"hash"`
+		Successful bool   `json:"successful"`
+	}
+	err := httpx.PostFormJSON(ctx, strings.TrimRight(h.URL, "/")+"/transactions", map[string]string{"tx": envelopeXDR}, &out)
+	if err != nil {
+		return "", err
+	}
+	if !out.Successful || out.Hash == "" {
+		return out.Hash, errors.New("horizon transaction submission failed")
+	}
+	return out.Hash, nil
 }
 
 const defaultLedgerSeconds = 5

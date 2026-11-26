@@ -1,0 +1,19 @@
+# Sample Concertfile for deploy/docker/compose.wordpress.yml
+{
+    listen :8080
+    data_dir /var/lib/concert/data
+    portal_listen 0.0.0.0:8081
+    portal_allow 127.0.0.1/32, ::1/128, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+    body_read_idle_timeout 30s
+    max_upload_time 10m
+}
+
+localhost, 127.0.0.1 {
+    preset wordpress
+    root /var/www/html
+    upstream fcgi://wordpress:9000
+    cap 12
+    priority_cap 4
+    micro_cache 15s
+    ban_paths /xmlrpc.php, /.env, /.git/*
+}

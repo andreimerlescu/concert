@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Find your way in · Concert</title>
+<link rel="stylesheet" href="/_concert/waiting.css">
+<script src="/_concert/wallet-adapters.js" defer></script>
+<script src="/_concert/access.js" defer></script>
+</head>
+<body>
+<header class="masthead">
+  <a class="wordmark" href="/">concert<span class="brand-dot">.</span></a>
+  <span class="pill" id="mode-label">WALLET ACCESS</span>
+</header>
+<main class="access-layout">
+  <div class="access-intro">
+    <p class="eyebrow">YOUR WALLET. YOUR WAY IN.</p>
+    <h1>A little less waiting.<br><span>A lot more possibility.</span></h1>
+    <p class="lede">Purchase a fast-lane pass in any configured token (XRP/RLUSD, XLM/USDC, SOL/USDC, HBAR) or prove you hold an eligible NFT or token balance. The standard FIFO queue is always open.</p>
+  </div>
+
+  <div class="notice" id="message" role="status" aria-live="polite" hidden></div>
+
+  <div class="access-columns" id="access-options" hidden>
+    <!-- 01 / PAID FAST-LANE PASS -->
+    <section class="access-card">
+      <p class="eyebrow cyan">01 / PAY AS YOU GO</p>
+      <h2>Fast-lane pass</h2>
+      <p id="pass-description"></p>
+      <div class="field">
+        <label for="offer">Payment network &amp; currency</label>
+        <select id="offer"></select>
+      </div>
+      <div class="price" id="price"></div>
+      <div class="price-label" id="price-sublabel">Fast-lane admission charge · network fees paid by your wallet</div>
+      <p class="help" id="recipient"></p>
+      <div class="prereq-note" id="offer-prereq" hidden></div>
+      <div class="field" id="pay-wallet-wrap" hidden>
+        <label for="pay-wallet-address">Your wallet address (required for gated offers)</label>
+        <input id="pay-wallet-address" autocomplete="off" spellcheck="false" placeholder="Public wallet address">
+      </div>
+      <label class="consent">
+        <input type="checkbox" id="consent">
+        <span>I’ve reviewed the price, <a id="terms-link" href="#">terms</a>, and <a id="refund-link" href="#">refund policy</a>. I understand this pass grants priority waiting-room access subject to capacity.</span>
+      </label>
+      <div class="btn-stack">
+        <button class="button button-primary" id="pay" disabled>Connect browser wallet &amp; pay ↗</button>
+        <button class="button" id="pay-direct" disabled hidden>Pay from any wallet (QR + Destination Tag / Memo) ↗</button>
+        <button class="button" id="retry-payment" hidden>Retry saved payment · no new signature</button>
+      </div>
+      <div class="direct-box" id="pay-direct-box" hidden>
+        <p class="eyebrow cyan">SCAN OR SEND FROM ANY WALLET</p>
+        <div class="qr-frame" id="pay-qr" aria-label="Payment QR code"></div>
+        <div class="direct-fields" id="pay-direct-fields"></div>
+        <div class="direct-actions">
+          <a class="button" id="pay-direct-uri" href="#">Open in wallet app ↗</a>
+          <button class="button button-primary" id="pay-direct-check" type="button">Check ledger now</button>
+        </div>
+        <p class="help" id="pay-direct-status" role="status"></p>
+      </div>
+      <p class="help" id="wallet-help">Supports Phantom, Solflare, Backpack, GemWallet, Crossmark, Freighter, HashPack, or any mobile/hardware wallet via QR + Memo. Automated agents can pay directly via x402.</p>
+      <details>
+        <summary>Use a signed x402 payment header</summary>
+        <p>Paste the base64 PAYMENT-SIGNATURE produced by your wallet or the Concert agent client. Never paste a private key or recovery phrase.</p>
+        <div class="field">
+          <label for="payment-payload">Signed payment header</label>
+          <textarea id="payment-payload" spellcheck="false" autocomplete="off"></textarea>
+        </div>
+        <button class="button" id="submit-payment">Verify &amp; settle payment</button>
+      </details>
+    </section>
+
+    <!-- 02 / NFT & TOKEN HOLDER ACCESS -->
+    <section class="access-card">
+      <p class="eyebrow">02 / YOUR HOLDINGS ARE YOUR PASS</p>
+      <h2>NFT &amp; token holder access</h2>
+      <p id="nft-description">Prove you own an eligible NFT or meet a minimum token balance. Your holdings are checked on-chain first—no NFT transfer or pass fee required.</p>
+      <div class="field">
+        <label for="collection">Eligible NFT collection or token balance rule</label>
+        <select id="collection"></select>
+      </div>
+      <div class="field">
+        <label for="wallet-address">Your public wallet address</label>
+        <input id="wallet-address" autocomplete="off" spellcheck="false" placeholder="r..., G..., 0.0.N, or Solana base58">
+      </div>
+      <div class="field" id="token-id-wrap">
+        <label for="token-id">Specific NFT ID / mint / serial <span class="help">(optional — auto-detected on all chains)</span></label>
+        <input id="token-id" autocomplete="off" spellcheck="false" placeholder="Leave blank to auto-detect">
+      </div>
+      <div class="btn-stack">
+        <button class="button button-primary" id="prove-direct" hidden>Prove via 1-drop / Memo transaction (Any Wallet) ↗</button>
+        <button class="button" id="prove">Connect browser wallet &amp; sign message ↗</button>
+      </div>
+      <div class="direct-box" id="prove-direct-box" hidden>
+        <p class="eyebrow">WALLET OWNERSHIP PROOF · 1 DROP / MEMO</p>
+        <div class="qr-frame" id="prove-qr" aria-label="Ownership proof QR code"></div>
+        <div class="direct-fields" id="prove-direct-fields"></div>
+        <div class="direct-actions">
+          <a class="button" id="prove-direct-uri" href="#">Open in wallet app ↗</a>
+          <button class="button button-primary" id="prove-direct-check" type="button">Check ledger now</button>
+        </div>
+        <p class="help" id="prove-direct-status" role="status"></p>
+      </div>
+      <details>
+        <summary>Sign a challenge message manually (NFTs)</summary>
+        <button class="button" id="challenge">Create sign-in message</button>
+        <div class="field">
+          <label for="challenge-message">Message to sign</label>
+          <textarea id="challenge-message" readonly></textarea>
+        </div>
+        <div class="field">
+          <label for="signature">Base64 signature</label>
+          <textarea id="signature" spellcheck="false"></textarea>
+        </div>
+        <div class="field">
+          <label for="public-key">Public key (XRPL only)</label>
+          <input id="public-key" spellcheck="false">
+        </div>
+        <button class="button" id="submit-proof">Check ownership</button>
+      </details>
+    </section>
+  </div>
+
+  <div class="actions">
+    <a class="button" id="return" href="/">← Return to the standard queue</a>
+    <a class="button button-primary" id="enter" href="/" hidden>Use my fast-lane pass ↗</a>
+    <button class="button" id="refresh">Check admission status</button>
+  </div>
+
+  <div class="access-footer">
+    <p id="merchant"></p>
+    <a id="privacy-link" href="#">Privacy</a>
+    <a id="policy-link" href="#">Refunds &amp; support</a>
+    <p class="help" id="sliding-note">Active fast-lane sessions refresh automatically as you browse and never interrupt an in-flight checkout. Confirmed payment receipts can always be recovered after a connection interruption.</p>
+  </div>
+  <noscript><p class="notice">JavaScript is required for wallet access. You can continue with the standard queue.</p></noscript>
+</main>
+<footer class="page-footer">
+  <span>CONCERT / BUILT FOR THE FULL HOUSE</span>
+  <span>XRP · RLUSD · XLM · HBAR · SOL</span>
+</footer>
+</body>
+</html>

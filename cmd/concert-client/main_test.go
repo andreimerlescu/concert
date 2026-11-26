@@ -79,6 +79,17 @@ func (c *concert) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/_concert/nft/verify":
 		_ = json.NewDecoder(r.Body).Decode(&c.proof)
 		reply(200, map[string]any{"valid": true})
+	case "/_concert/direct/challenge":
+		reply(200, map[string]any{
+			"challenge_id":    "dc-1",
+			"instructions":    "Send 0.000001 XRP with Destination Tag 424242",
+			"wallet_uri":      "xrpl:rDest?dt=424242&amount=0.000001&memo=concert:abcd",
+			"destination_tag": 424242,
+			"memo":            "concert:abcd",
+			"expires":         "2030-01-01T00:00:00Z",
+		})
+	case "/_concert/direct/verify":
+		reply(200, map[string]any{"eligible": true, "kind": "token", "transaction": "tx-direct-1"})
 	}
 }
 
@@ -199,5 +210,29 @@ func TestNFTProofSignsTheChallenge(t *testing.T) {
 	sig, _ := base64.StdEncoding.DecodeString(s.c.proof["signature"])
 	if s.c.proof["nonce"] != "n1" || !solana.VerifyMessage(base58.Bitcoin.Encode(s.pub), s.c.message, sig) {
 		t.Fatalf("proof: %v", s.c.proof)
+	}
+}
+
+func TestWithinBudget_NativeAndXRPLIOU(t *testing.T) {
+	if !withinBudget("xrpl:0", "RLUSD:rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De", "0.99", "1.00") {
+		t.Fatal("0.99 RLUSD should be within 1.00 budget")
+	}
+	if withinBudget("xrpl:0", "RLUSD:rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De", "1.01", "1.00") {
+		t.Fatal("1.01 RLUSD should exceed 1.00 budget")
+	}
+	if !withinBudget("solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "990000", "1000000") {
+		t.Fatal("990000 USDC atomic should be within 1000000 budget")
+	}
+	if withinBudget("solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp", "SOL", "0", "1000") {
+		t.Fatal("zero amount must be refused")
+	}
+}
+
+func TestDirectChallengeAndVerify(t *testing.T) {
+	s := newSetup(t)
+	s.env["CONCERT_TOKEN_RULE"] = "rlusd-holders"
+	s.env["CONCERT_WALLET_ADDRESS"] = "rPayer11111111111111111111111111"
+	if err := s.run("--direct"); err != nil {
+		t.Fatalf("--direct failed: %v", err)
 	}
 }

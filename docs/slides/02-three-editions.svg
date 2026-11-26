@@ -1,0 +1,147 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 640" width="1200" height="640">
+  <defs>
+    <style>
+      .sans { font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+      .mono { font-family: 'SF Mono', 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    </style>
+    <marker id="arr-purple" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#8b5cf6"/>
+    </marker>
+    <marker id="arr-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#1a8cd8"/>
+    </marker>
+    <marker id="arr-rose" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#d9468f"/>
+    </marker>
+  </defs>
+
+  <!-- Header -->
+  <rect x="28" y="18" width="298" height="28" rx="14" fill="#7c3aed"/>
+  <text x="177" y="36" text-anchor="middle" class="sans" font-size="11.5" font-weight="700" letter-spacing="1.0" fill="#ffffff">02 · THREE EDITIONS, ONE CODE BASE</text>
+  <text x="340" y="37" class="sans" font-size="14" font-weight="600" fill="#747c90">Go build tags compile each binary with only the packages it needs</text>
+  <rect x="1044" y="18" width="128" height="28" rx="14" fill="#8b5cf6" fill-opacity="0.12" stroke="#8b5cf6" stroke-width="1.5"/>
+  <text x="1108" y="36" text-anchor="middle" class="mono" font-size="11.5" font-weight="700" fill="#8b5cf6">concert v0.3.0</text>
+  <line x1="28" y1="60" x2="1172" y2="60" stroke="#747c90" stroke-opacity="0.25" stroke-width="1"/>
+
+  <!-- Left Box: Single Repository -->
+  <rect x="28" y="82" width="268" height="530" rx="14" fill="#747c90" fill-opacity="0.06" stroke="#747c90" stroke-width="1.75"/>
+  <rect x="46" y="100" width="174" height="24" rx="12" fill="#52586b"/>
+  <text x="133" y="116" text-anchor="middle" class="sans" font-size="10.5" font-weight="700" letter-spacing="0.9" fill="#ffffff">SINGLE GO REPOSITORY</text>
+
+  <text x="48" y="152" class="mono" font-size="12" font-weight="700" fill="#8b5cf6">cmd/</text>
+  <text x="64" y="174" class="mono" font-size="11.5" fill="#747c90">├─ concert/        (core)</text>
+  <text x="64" y="194" class="mono" font-size="11.5" fill="#1a8cd8">├─ wpconcert/      (+wp)</text>
+  <text x="64" y="214" class="mono" font-size="11.5" fill="#d9468f">└─ econcert/       (+ent)</text>
+
+  <line x1="48" y1="234" x2="276" y2="234" stroke="#747c90" stroke-opacity="0.25" stroke-width="1"/>
+
+  <text x="48" y="258" class="mono" font-size="12" font-weight="700" fill="#8b5cf6">internal/</text>
+  <rect x="48" y="270" width="228" height="62" rx="8" fill="#8b5cf6" fill-opacity="0.10" stroke="#8b5cf6" stroke-width="1.25"/>
+  <text x="60" y="290" class="mono" font-size="11" font-weight="700" fill="#8b5cf6">Core packages (all builds)</text>
+  <text x="60" y="308" class="mono" font-size="10.5" fill="#747c90">server · static · configfile</text>
+  <text x="60" y="323" class="mono" font-size="10.5" fill="#747c90">bench · capacity</text>
+
+  <rect x="48" y="344" width="228" height="58" rx="8" fill="#1a8cd8" fill-opacity="0.10" stroke="#1a8cd8" stroke-width="1.25"/>
+  <text x="60" y="364" class="mono" font-size="11" font-weight="700" fill="#1a8cd8">WordPress tag (+wordpress)</text>
+  <text x="60" y="382" class="mono" font-size="10.5" fill="#747c90">fcgi · microcache · wp</text>
+  <text x="60" y="396" class="mono" font-size="10.5" fill="#747c90">fcgi_bridge.go</text>
+
+  <rect x="48" y="414" width="228" height="72" rx="8" fill="#d9468f" fill-opacity="0.10" stroke="#d9468f" stroke-width="1.25"/>
+  <text x="60" y="434" class="mono" font-size="11" font-weight="700" fill="#d9468f">Enterprise tag (+enterprise)</text>
+  <text x="60" y="452" class="mono" font-size="10.5" fill="#747c90">hop · fastlane · gateway</text>
+  <text x="60" y="467" class="mono" font-size="10.5" fill="#747c90">mailer · chain/* · x402</text>
+  <text x="60" y="481" class="mono" font-size="10.5" fill="#747c90">topology · rbac · cluster</text>
+
+  <rect x="48" y="504" width="228" height="88" rx="10" fill="#252136"/>
+  <text x="162" y="527" text-anchor="middle" class="sans" font-size="11.5" font-weight="700" fill="#f8fafc">Compile-Time Isolation</text>
+  <text x="162" y="546" text-anchor="middle" class="sans" font-size="10.5" fill="#cbd5e1">• Tag guards fail loud if mistagged</text>
+  <text x="162" y="563" text-anchor="middle" class="sans" font-size="10.5" fill="#cbd5e1">• CLI prints edition migration hints</text>
+  <text x="162" y="580" text-anchor="middle" class="sans" font-size="10.5" fill="#cbd5e1">• Separate CycloneDX 1.5 SBOMs</text>
+
+  <!-- Connector arrows from Repo to the 3 Onion Layers -->
+  <path d="M 296 150 L 352 150" fill="none" stroke="#d9468f" stroke-width="2.2" marker-end="url(#arr-rose)"/>
+  <path d="M 296 292 L 382 292" fill="none" stroke="#1a8cd8" stroke-width="2.2" marker-end="url(#arr-blue)"/>
+  <path d="M 296 476 L 412 476" fill="none" stroke="#8b5cf6" stroke-width="2.2" marker-end="url(#arr-purple)"/>
+
+  <!-- Outer Onion Layer: econcert -->
+  <rect x="360" y="82" width="812" height="530" rx="16" fill="#d9468f" fill-opacity="0.06" stroke="#d9468f" stroke-width="2"/>
+  <rect x="380" y="98" width="128" height="26" rx="13" fill="#be185d"/>
+  <text x="444" y="115" text-anchor="middle" class="mono" font-size="12" font-weight="700" fill="#ffffff">3 · econcert</text>
+  <rect x="518" y="99" width="242" height="24" rx="12" fill="#252136"/>
+  <text x="639" y="115" text-anchor="middle" class="mono" font-size="10.8" font-weight="600" fill="#f9a8d4">-tags "wordpress,enterprise"</text>
+  <rect x="980" y="99" width="172" height="24" rx="12" fill="#d9468f" fill-opacity="0.14" stroke="#d9468f" stroke-width="1.2"/>
+  <text x="1066" y="115" text-anchor="middle" class="mono" font-size="10.5" font-weight="700" fill="#d9468f">40 SBOM components</text>
+
+  <!-- econcert additive feature chips (row of 4) -->
+  <rect x="382" y="138" width="182" height="56" rx="9" fill="#d9468f" fill-opacity="0.10" stroke="#d9468f" stroke-width="1.4"/>
+  <text x="473" y="160" text-anchor="middle" class="sans" font-size="11.5" font-weight="700" fill="#d9468f">Edge / Leaf Mesh</text>
+  <text x="473" y="178" text-anchor="middle" class="sans" font-size="10.5" fill="#747c90">mTLS · weighted shares</text>
+
+  <rect x="576" y="138" width="184" height="56" rx="9" fill="#d9468f" fill-opacity="0.10" stroke="#d9468f" stroke-width="1.4"/>
+  <text x="668" y="160" text-anchor="middle" class="sans" font-size="11.5" font-weight="700" fill="#d9468f">RBAC · MFA · SSO</text>
+  <text x="668" y="178" text-anchor="middle" class="sans" font-size="10.5" fill="#747c90">Argon2id · TOTP · audit log</text>
+
+  <rect x="772" y="138" width="184" height="56" rx="9" fill="#d9468f" fill-opacity="0.10" stroke="#d9468f" stroke-width="1.4"/>
+  <text x="864" y="160" text-anchor="middle" class="sans" font-size="11.5" font-weight="700" fill="#d9468f">Redis HA &amp; Mailer</text>
+  <text x="864" y="178" text-anchor="middle" class="sans" font-size="10.5" fill="#747c90">Ban sync · alert dedupe</text>
+
+  <rect x="968" y="138" width="184" height="56" rx="9" fill="#d9468f" fill-opacity="0.10" stroke="#d9468f" stroke-width="1.4"/>
+  <text x="1060" y="160" text-anchor="middle" class="sans" font-size="11.5" font-weight="700" fill="#d9468f">x402 Fast-Lane</text>
+  <text x="1060" y="178" text-anchor="middle" class="sans" font-size="10.5" fill="#747c90">Online reconcile · archive</text>
+
+  <!-- Middle Onion Layer: wpconcert -->
+  <rect x="390" y="214" width="756" height="374" rx="15" fill="#1a8cd8" fill-opacity="0.07" stroke="#1a8cd8" stroke-width="2"/>
+  <rect x="410" y="230" width="136" height="26" rx="13" fill="#0369a1"/>
+  <text x="478" y="247" text-anchor="middle" class="mono" font-size="12" font-weight="700" fill="#ffffff">2 · wpconcert</text>
+  <rect x="556" y="231" width="144" height="24" rx="12" fill="#252136"/>
+  <text x="628" y="247" text-anchor="middle" class="mono" font-size="10.8" font-weight="600" fill="#7dd3fc">-tags wordpress</text>
+  <rect x="954" y="231" width="172" height="24" rx="12" fill="#1a8cd8" fill-opacity="0.14" stroke="#1a8cd8" stroke-width="1.2"/>
+  <text x="1040" y="247" text-anchor="middle" class="mono" font-size="10.5" font-weight="700" fill="#1a8cd8">23 SBOM components</text>
+
+  <!-- wpconcert additive feature chips (row of 3) -->
+  <rect x="412" y="270" width="228" height="56" rx="9" fill="#1a8cd8" fill-opacity="0.10" stroke="#1a8cd8" stroke-width="1.4"/>
+  <text x="526" y="292" text-anchor="middle" class="sans" font-size="11.5" font-weight="700" fill="#1a8cd8">Pure-Stdlib FastCGI 1.0</text>
+  <text x="526" y="310" text-anchor="middle" class="sans" font-size="10.5" fill="#747c90">fcgi+unix:// · try_files · upload guards</text>
+
+  <rect x="654" y="270" width="228" height="56" rx="9" fill="#1a8cd8" fill-opacity="0.10" stroke="#1a8cd8" stroke-width="1.4"/>
+  <text x="768" y="292" text-anchor="middle" class="sans" font-size="11.5" font-weight="700" fill="#1a8cd8">Anonymous GET Micro-Cache</text>
+  <text x="768" y="310" text-anchor="middle" class="sans" font-size="10.5" fill="#747c90">Singleflight collapse · cart/login bypass</text>
+
+  <rect x="896" y="270" width="230" height="56" rx="9" fill="#1a8cd8" fill-opacity="0.10" stroke="#1a8cd8" stroke-width="1.4"/>
+  <text x="1011" y="292" text-anchor="middle" class="sans" font-size="11.5" font-weight="700" fill="#1a8cd8">WordPress CLI &amp; Presets</text>
+  <text x="1011" y="310" text-anchor="middle" class="sans" font-size="10.5" fill="#747c90">preset wordpress · doctor · init</text>
+
+  <!-- Inner Core Onion Layer: concert -->
+  <rect x="420" y="346" width="698" height="218" rx="14" fill="#8b5cf6" fill-opacity="0.09" stroke="#8b5cf6" stroke-width="2"/>
+  <rect x="440" y="362" width="122" height="26" rx="13" fill="#7c3aed"/>
+  <text x="501" y="379" text-anchor="middle" class="mono" font-size="12" font-weight="700" fill="#ffffff">1 · concert</text>
+  <rect x="572" y="363" width="144" height="24" rx="12" fill="#252136"/>
+  <text x="644" y="379" text-anchor="middle" class="mono" font-size="10.8" font-weight="600" fill="#ddd6fe">default build tags</text>
+  <rect x="926" y="363" width="172" height="24" rx="12" fill="#8b5cf6" fill-opacity="0.14" stroke="#8b5cf6" stroke-width="1.2"/>
+  <text x="1012" y="379" text-anchor="middle" class="mono" font-size="10.5" font-weight="700" fill="#8b5cf6">23 SBOM components</text>
+
+  <!-- Core 2x3 feature grid -->
+  <rect x="442" y="404" width="208" height="62" rx="9" fill="#8b5cf6" fill-opacity="0.11" stroke="#8b5cf6" stroke-width="1.4"/>
+  <text x="546" y="428" text-anchor="middle" class="sans" font-size="11.8" font-weight="700" fill="#8b5cf6">FIFO Waiting Room</text>
+  <text x="546" y="448" text-anchor="middle" class="sans" font-size="10.5" fill="#747c90">Priority lane · Ed25519 passes</text>
+
+  <rect x="664" y="404" width="208" height="62" rx="9" fill="#8b5cf6" fill-opacity="0.11" stroke="#8b5cf6" stroke-width="1.4"/>
+  <text x="768" y="428" text-anchor="middle" class="sans" font-size="11.8" font-weight="700" fill="#8b5cf6">TLS · HTTP/2 · HTTP/3</text>
+  <text x="768" y="448" text-anchor="middle" class="sans" font-size="10.5" fill="#747c90">ACME :80→:443 · opt-in QUIC</text>
+
+  <rect x="886" y="404" width="212" height="62" rx="9" fill="#8b5cf6" fill-opacity="0.11" stroke="#8b5cf6" stroke-width="1.4"/>
+  <text x="992" y="428" text-anchor="middle" class="sans" font-size="11.8" font-weight="700" fill="#8b5cf6">os.Root Static Offload</text>
+  <text x="992" y="448" text-anchor="middle" class="sans" font-size="10.5" fill="#747c90">.br/.gz · ETag · Range · jail</text>
+
+  <rect x="442" y="480" width="208" height="62" rx="9" fill="#0d9488" fill-opacity="0.10" stroke="#0d9488" stroke-width="1.4"/>
+  <text x="546" y="504" text-anchor="middle" class="sans" font-size="11.8" font-weight="700" fill="#0d9488">Concertfile Multi-Vhost</text>
+  <text x="546" y="524" text-anchor="middle" class="sans" font-size="10.5" fill="#747c90">SNI dispatch · SIGHUP reload</text>
+
+  <rect x="664" y="480" width="208" height="62" rx="9" fill="#0d9488" fill-opacity="0.10" stroke="#0d9488" stroke-width="1.4"/>
+  <text x="768" y="504" text-anchor="middle" class="sans" font-size="11.8" font-weight="700" fill="#0d9488">Abuse &amp; Slowloris Defense</text>
+  <text x="768" y="524" text-anchor="middle" class="sans" font-size="10.5" fill="#747c90">Strikes · bans · upload timeouts</text>
+
+  <rect x="886" y="480" width="212" height="62" rx="9" fill="#0d9488" fill-opacity="0.10" stroke="#0d9488" stroke-width="1.4"/>
+  <text x="992" y="504" text-anchor="middle" class="sans" font-size="11.8" font-weight="700" fill="#0d9488">Portal &amp; Observability</text>
+  <text x="992" y="524" text-anchor="middle" class="sans" font-size="10.5" fill="#747c90">Site switcher · /_room/metrics</text>
+</svg>

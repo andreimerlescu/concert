@@ -6,24 +6,71 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/andreimerlescu/concert/internal/chain/httpx"
+	"github.com/andreimerlescu/concert/internal/opt"
 )
+
+// rippleEpochOffset is the number of seconds between Unix epoch (1970-01-01)
+// and the XRPL Ripple Epoch (2000-01-01T00:00:00Z).
+const rippleEpochOffset int64 = 946684800
 
 // AccountInfo is the validated account state the scheme consults.
 type AccountInfo struct {
 	Sequence   uint32
 	Flags      uint32
 	RegularKey string
+	Balance    string // native XRP balance in drops
 }
 
 // TxResult is a transaction lookup.
 type TxResult struct {
-	Found          bool
-	Validated      bool
-	Result         string
-	DeliveredDrops string
-	Blob           string
+	Found             bool
+	Validated         bool
+	Result            string
+	DeliveredDrops    string
+	DeliveredCurrency string
+	DeliveredIssuer   string
+	DeliveredValue    string
+	Blob              string
+}
+
+// TrustLine is one entry returned by rippled's account_lines RPC.
+type TrustLine struct {
+	Account  string `json:"account"`  // counterparty / issuer
+	Balance  string `json:"balance"`  // decimal string from holder's perspective
+	Currency string `json:"currency"` // 3-char or 40-char hex
+	Freeze   bool   `json:"freeze"`
+	FreezeP  bool   `json:"freeze_peer"`
+}
+
+// AccountTxEntry is a validated payment entry returned by account_tx.
+// DestinationTag uses [opt.Option] so an explicit tag of 0 (Some(0)) is
+// distinct from an omitted destination tag (None).
+type AccountTxEntry struct {
+	Hash              string
+	Validated         bool
+	LedgerIndex       uint32
+	Date              time.Time // UTC close time from XRPL tx.date (Ripple Epoch), zero if omitted
+	Result            string
+	TxType            string
+	Account           string
+	Destination       string
+	DestinationTag    opt.Option[uint32]
+	Flags             uint32
+	Memos             []string // decoded UTF-8 MemoData strings
+	DeliveredDrops    string
+	DeliveredCurrency string
+	DeliveredIssuer   string
+	DeliveredValue    string
+}
+
+// TokenLedger extends Ledger with trustline and account_tx queries used for
+// token balance gating and direct destination-tag/memo verification.
+type TokenLedger interface {
+	AccountLines(ctx context.Context, account, peer string, marker any) ([]TrustLine, any, error)
+	AccountTx(ctx context.Context, account string, ledgerIndexMin uint32, limit int) ([]AccountTxEntry, error)
 }
 
 // Ledger is everything the scheme asks of the network; tests fake it.
@@ -76,16 +123,14 @@ func (c RPC) call(ctx context.Context, method string, params map[string]any, out
 func (c RPC) NetworkID(ctx context.Context) (uint32, error) {
 	var out struct {
 		Info struct {
-			NetworkID *uint32 `json:"network_id"`
+			NetworkID opt.Option[uint32] `json:"network_id"`
 		} `json:"info"`
 	}
 	if err := c.call(ctx, "server_info", map[string]any{}, &out); err != nil {
 		return 0, err
 	}
-	if out.Info.NetworkID == nil {
-		return 0, nil // Mainnet servers may omit it
-	}
-	return *out.Info.NetworkID, nil
+	// Mainnet rippled servers may omit network_id; absent defaults to 0.
+	return out.Info.NetworkID.UnwrapOr(0), nil
 }
 
 func (c RPC) LedgerIndex(ctx context.Context) (uint32, error) {
@@ -104,6 +149,7 @@ func (c RPC) AccountInfo(ctx context.Context, account string) (AccountInfo, erro
 			Sequence   uint32 `json:"Sequence"`
 			Flags      uint32 `json:"Flags"`
 			RegularKey string `json:"RegularKey"`
+			Balance    string `json:"Balance"`
 		} `json:"account_data"`
 	}
 	if err := c.call(ctx, "account_info", map[string]any{"account": account, "ledger_index": "validated"}, &out); err != nil {
@@ -112,7 +158,7 @@ func (c RPC) AccountInfo(ctx context.Context, account string) (AccountInfo, erro
 	if !out.Validated {
 		return AccountInfo{}, errors.New("unvalidated account data")
 	}
-	return AccountInfo{Sequence: out.Data.Sequence, Flags: out.Data.Flags, RegularKey: out.Data.RegularKey}, nil
+	return AccountInfo{Sequence: out.Data.Sequence, Flags: out.Data.Flags, RegularKey: out.Data.RegularKey, Balance: out.Data.Balance}, nil
 }
 
 func (c RPC) TicketAvailable(ctx context.Context, account string, ticket uint32) (bool, error) {
@@ -182,11 +228,181 @@ func (c RPC) Tx(ctx context.Context, hash string) (TxResult, error) {
 	r := TxResult{Found: true, Validated: out.Validated}
 	if out.Meta != nil {
 		r.Result = out.Meta.Result
-		if s, ok := out.Meta.Delivered.(string); ok {
-			r.DeliveredDrops = s
-		}
+		parseDelivered(out.Meta.Delivered, &r.DeliveredDrops, &r.DeliveredCurrency, &r.DeliveredIssuer, &r.DeliveredValue)
 	}
 	return r, nil
+}
+
+func parseDelivered(raw any, drops, cur, iss, val *string) {
+	switch v := raw.(type) {
+	case string:
+		*drops = v
+	case map[string]any:
+		c, _ := v["currency"].(string)
+		i, _ := v["issuer"].(string)
+		valStr, _ := v["value"].(string)
+		*cur, *iss, *val = c, i, valStr
+	}
+}
+
+func (c RPC) AccountLines(ctx context.Context, account, peer string, marker any) ([]TrustLine, any, error) {
+	var out struct {
+		Validated bool        `json:"validated"`
+		Lines     []TrustLine `json:"lines"`
+		Marker    any         `json:"marker"`
+	}
+	p := map[string]any{"account": account, "ledger_index": "validated", "limit": 400}
+	if peer != "" {
+		p["peer"] = peer
+	}
+	if marker != nil {
+		p["marker"] = marker
+	}
+	if err := c.call(ctx, "account_lines", p, &out); err != nil {
+		return nil, nil, err
+	}
+	if !out.Validated {
+		return nil, nil, errors.New("unvalidated account_lines data")
+	}
+	return out.Lines, out.Marker, nil
+}
+
+func (c RPC) AccountTx(ctx context.Context, account string, ledgerIndexMin uint32, limit int) ([]AccountTxEntry, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	p := map[string]any{
+		"account":          account,
+		"ledger_index_max": -1,
+		"limit":            limit,
+		"forward":          false,
+		"binary":           false,
+	}
+	if ledgerIndexMin > 0 {
+		p["ledger_index_min"] = ledgerIndexMin
+	} else {
+		p["ledger_index_min"] = -1
+	}
+	var out struct {
+		Transactions []struct {
+			Validated bool `json:"validated"`
+			Tx        *struct {
+				Hash           string             `json:"hash"`
+				LedgerIndex    uint32             `json:"ledger_index"`
+				Date           uint32             `json:"date"`
+				TxType         string             `json:"TransactionType"`
+				Account        string             `json:"Account"`
+				Destination    string             `json:"Destination"`
+				DestinationTag opt.Option[uint32] `json:"DestinationTag"`
+				Flags          uint32             `json:"Flags"`
+				Memos          []struct {
+					Memo struct {
+						MemoData string `json:"MemoData"`
+					} `json:"Memo"`
+				} `json:"Memos"`
+			} `json:"tx"`
+			TxJSON *struct {
+				LedgerIndex    uint32             `json:"ledger_index"`
+				Date           uint32             `json:"date"`
+				TxType         string             `json:"TransactionType"`
+				Account        string             `json:"Account"`
+				Destination    string             `json:"Destination"`
+				DestinationTag opt.Option[uint32] `json:"DestinationTag"`
+				Flags          uint32             `json:"Flags"`
+				Memos          []struct {
+					Memo struct {
+						MemoData string `json:"MemoData"`
+					} `json:"Memo"`
+				} `json:"Memos"`
+			} `json:"tx_json"`
+			Hash string `json:"hash"`
+			Meta *struct {
+				Result    string `json:"TransactionResult"`
+				Delivered any    `json:"delivered_amount"`
+			} `json:"meta"`
+		} `json:"transactions"`
+	}
+	if err := c.call(ctx, "account_tx", p, &out); err != nil {
+		return nil, err
+	}
+	res := make([]AccountTxEntry, 0, len(out.Transactions))
+	for _, item := range out.Transactions {
+		if !item.Validated {
+			continue
+		}
+		var e AccountTxEntry
+		e.Validated = true
+		if item.Tx != nil {
+			e.Hash = item.Tx.Hash
+			e.LedgerIndex = item.Tx.LedgerIndex
+			if item.Tx.Date > 0 {
+				e.Date = time.Unix(int64(item.Tx.Date)+rippleEpochOffset, 0).UTC()
+			}
+			e.TxType = item.Tx.TxType
+			e.Account = item.Tx.Account
+			e.Destination = item.Tx.Destination
+			e.DestinationTag = item.Tx.DestinationTag
+			e.Flags = item.Tx.Flags
+			for _, m := range item.Tx.Memos {
+				if b, err := decodeHexString(m.Memo.MemoData); err == nil {
+					e.Memos = append(e.Memos, string(b))
+				}
+			}
+		} else if item.TxJSON != nil {
+			e.Hash = item.Hash
+			e.LedgerIndex = item.TxJSON.LedgerIndex
+			if item.TxJSON.Date > 0 {
+				e.Date = time.Unix(int64(item.TxJSON.Date)+rippleEpochOffset, 0).UTC()
+			}
+			e.TxType = item.TxJSON.TxType
+			e.Account = item.TxJSON.Account
+			e.Destination = item.TxJSON.Destination
+			e.DestinationTag = item.TxJSON.DestinationTag
+			e.Flags = item.TxJSON.Flags
+			for _, m := range item.TxJSON.Memos {
+				if b, err := decodeHexString(m.Memo.MemoData); err == nil {
+					e.Memos = append(e.Memos, string(b))
+				}
+			}
+		} else {
+			continue
+		}
+		if item.Meta != nil {
+			e.Result = item.Meta.Result
+			parseDelivered(item.Meta.Delivered, &e.DeliveredDrops, &e.DeliveredCurrency, &e.DeliveredIssuer, &e.DeliveredValue)
+		}
+		res = append(res, e)
+	}
+	return res, nil
+}
+
+func decodeHexString(s string) ([]byte, error) {
+	if len(s)%2 != 0 {
+		return nil, errors.New("odd hex length")
+	}
+	out := make([]byte, len(s)/2)
+	for i := 0; i < len(out); i++ {
+		hi, ok1 := hexVal(s[2*i])
+		lo, ok2 := hexVal(s[2*i+1])
+		if !ok1 || !ok2 {
+			return nil, errors.New("invalid hex")
+		}
+		out[i] = hi<<4 | lo
+	}
+	return out, nil
+}
+
+func hexVal(c byte) (byte, bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', true
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, true
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, true
+	default:
+		return 0, false
+	}
 }
 
 func (c RPC) AccountNFTs(ctx context.Context, account string, marker any) ([]NFT, any, error) {

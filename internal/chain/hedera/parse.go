@@ -19,23 +19,31 @@ var entityID = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
 
 func ValidEntityID(s string) bool { return entityID.MatchString(s) }
 
-// Transfer is one HBAR account amount, in tinybars.
+// Transfer is one account amount (tinybars for HBAR, base units for HTS).
 type Transfer struct {
 	Account string
 	Amount  int64
 }
 
+// TokenTransferList is one HTS fungible token transfer group inside a CryptoTransfer.
+type TokenTransferList struct {
+	Token     string
+	Transfers []Transfer
+}
+
 // Parsed is a validated, payer-signed transfer transaction.
 type Parsed struct {
-	Raw           []byte
-	Signed        []*services.SignedTransaction
-	Body          *services.TransactionBody // the first node's body
-	TransactionID string                    // account@seconds.nanos, nanos zero-padded
-	FeePayer      string
-	Transfers     []Transfer
-	TokenTransfer bool
-	MaxFee        uint64
-	Nodes         []string
+	Raw            []byte
+	Signed         []*services.SignedTransaction
+	Body           *services.TransactionBody // the first node's body
+	TransactionID  string                    // account@seconds.nanos, nanos zero-padded
+	FeePayer       string
+	Memo           string
+	Transfers      []Transfer
+	TokenTransfers []TokenTransferList
+	TokenTransfer  bool
+	MaxFee         uint64
+	Nodes          []string
 }
 
 func accountString(a *services.AccountID) (string, error) {
@@ -145,7 +153,31 @@ func Parse(b64 string) (*Parsed, error) {
 	if err := noUnknown(ct.CryptoTransfer); err != nil {
 		return nil, err
 	}
+	p.Memo = b.Memo
 	p.TokenTransfer = len(ct.CryptoTransfer.TokenTransfers) > 0
+	for _, ttl := range ct.CryptoTransfer.TokenTransfers {
+		if len(ttl.NftTransfers) > 0 {
+			return nil, errors.New("NFT transfers are not accepted")
+		}
+		tokID, err := tokenString(ttl.Token)
+		if err != nil {
+			return nil, err
+		}
+		entry := TokenTransferList{Token: tokID}
+		seenTok := map[string]bool{}
+		for _, aa := range ttl.Transfers {
+			if aa.IsApproval || aa.HookCall != nil {
+				return nil, errors.New("approved or hooked token transfers are not accepted")
+			}
+			acct, err := accountString(aa.AccountID)
+			if err != nil || seenTok[acct] {
+				return nil, errors.New("invalid or repeated token transfer account")
+			}
+			seenTok[acct] = true
+			entry.Transfers = append(entry.Transfers, Transfer{acct, aa.Amount})
+		}
+		p.TokenTransfers = append(p.TokenTransfers, entry)
+	}
 	seen := map[string]bool{}
 	if tl := ct.CryptoTransfer.Transfers; tl != nil {
 		for _, aa := range tl.AccountAmounts {
@@ -162,6 +194,13 @@ func Parse(b64 string) (*Parsed, error) {
 	}
 	p.MaxFee = b.TransactionFee
 	return p, nil
+}
+
+func tokenString(t *services.TokenID) (string, error) {
+	if t == nil {
+		return "", errors.New("missing token ID")
+	}
+	return fmt.Sprintf("%d.%d.%d", t.ShardNum, t.RealmNum, t.TokenNum), nil
 }
 
 var errNotTransfer = errors.New("not a transfer transaction")

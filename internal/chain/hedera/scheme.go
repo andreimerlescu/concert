@@ -166,7 +166,8 @@ func (n keyNode) signsAll(p *Parsed) bool {
 // transaction ID once a receipt reports SUCCESS.
 type Submitter func(ctx context.Context, p *Parsed, network string) (string, error)
 
-// Scheme verifies and settles "exact" HBAR payments with one managed sponsor.
+// Scheme verifies and settles "exact" HBAR and HTS fungible token payments
+// (either payer-pays-fees with zero hot keys or with one managed sponsor).
 type Scheme struct {
 	Network    string
 	FeePayer   string
@@ -174,6 +175,7 @@ type Scheme struct {
 	MaxFee     uint64
 	Submit     Submitter
 	sponsorKey hiero.PrivateKey
+	hasSponsor bool
 }
 
 // New builds a scheme that signs as feePayer with the DER sponsor key.
@@ -181,16 +183,39 @@ func New(network, mirror, feePayer, sponsorKeyDER string, maxFee uint64) (*Schem
 	if network != Mainnet && network != Testnet {
 		return nil, errors.New("unsupported Hedera network")
 	}
-	key, err := hiero.PrivateKeyFromStringDer(sponsorKeyDER)
-	if err != nil {
-		return nil, errors.New("invalid Hedera sponsor key")
-	}
 	if maxFee == 0 {
 		maxFee = DefaultMaxFeeTinybars
 	}
-	s := &Scheme{Network: network, FeePayer: feePayer, Mirror: Mirror{URL: mirror}, MaxFee: maxFee, sponsorKey: key}
+	s := &Scheme{Network: network, FeePayer: feePayer, Mirror: Mirror{URL: mirror}, MaxFee: maxFee}
+	if strings.TrimSpace(sponsorKeyDER) != "" {
+		key, err := hiero.PrivateKeyFromStringDer(sponsorKeyDER)
+		if err != nil {
+			return nil, errors.New("invalid Hedera sponsor key")
+		}
+		s.sponsorKey = key
+		s.hasSponsor = true
+	}
 	s.Submit = s.submit
 	return s, nil
+}
+
+// NewUnsponsored creates a zero-hot-key Hedera scheme for payer-pays-fees
+// HBAR/HTS payments, direct memo proofs, token balance gating, and NFT checks.
+func NewUnsponsored(network, mirror string, maxFee uint64) (*Scheme, error) {
+	return New(network, mirror, "", "", maxFee)
+}
+
+func isPayerPaid(r x402.Requirements) bool {
+	if r.Extra == nil {
+		return false
+	}
+	if fp, _ := r.Extra["feePayer"].(string); fp != "" {
+		return false
+	}
+	if v, ok := r.Extra["areFeesSponsored"].(bool); ok && !v {
+		return true
+	}
+	return false
 }
 
 func invalid(reason, payer string) x402.VerifyResponse { return x402.Invalid(reason, payer) }
@@ -206,13 +231,16 @@ func (s *Scheme) requirements(p x402.Payload, r x402.Requirements) string {
 		return "accepted_payment_requirements_mismatch"
 	case r.Network != s.Network:
 		return "network_mismatch"
-	case r.Asset != "0.0.0":
-		return "invalid_asset" // Concert settles HBAR only
+	case !ValidEntityID(r.Asset):
+		return "invalid_asset"
 	case !ValidEntityID(r.PayTo):
 		return "invalid_exact_hedera_payload_pay_to"
 	}
 	if _, ok := new(big.Int).SetString(r.Amount, 10); !ok || strings.HasPrefix(r.Amount, "-") {
 		return "invalid_amount"
+	}
+	if isPayerPaid(r) {
+		return ""
 	}
 	fp, _ := r.Extra["feePayer"].(string)
 	if !ValidEntityID(fp) {
@@ -256,7 +284,8 @@ func (s *Scheme) verify(ctx context.Context, p x402.Payload, r x402.Requirements
 	if reason := s.requirements(p, r); reason != "" {
 		return nil, invalid(reason, "")
 	}
-	feePayer := r.Extra["feePayer"].(string)
+	payerPaid := isPayerPaid(r)
+	feePayer, _ := r.Extra["feePayer"].(string)
 	enc, err := payloadTransaction(p)
 	if err != nil {
 		return nil, invalid("invalid_exact_hedera_payload_transaction_could_not_be_decoded", "")
@@ -268,16 +297,32 @@ func (s *Scheme) verify(ctx context.Context, p x402.Payload, r x402.Requirements
 	if err != nil {
 		return nil, invalid("invalid_exact_hedera_payload_transaction_could_not_be_decoded", "")
 	}
-	ts := tx.Transfers
-	switch {
-	case tx.FeePayer != feePayer:
-		return nil, invalid("invalid_exact_hedera_payload_fee_payer_mismatch", "")
-	case sum(ts).Sign() != 0:
+	if wantMemo, ok := r.Extra["memo"].(string); ok && wantMemo != "" && tx.Memo != wantMemo {
+		return nil, invalid("invalid_exact_hedera_payload_memo_mismatch", "")
+	}
+	var ts []Transfer
+	isHBAR := r.Asset == "0.0.0"
+	if isHBAR {
+		ts = tx.Transfers
+		if tx.TokenTransfer {
+			return nil, invalid("invalid_exact_hedera_payload_asset_mismatch", "")
+		}
+	} else {
+		if len(tx.Transfers) > 0 || len(tx.TokenTransfers) != 1 || tx.TokenTransfers[0].Token != r.Asset {
+			return nil, invalid("invalid_exact_hedera_payload_asset_mismatch", "")
+		}
+		ts = tx.TokenTransfers[0].Transfers
+	}
+	if sum(ts).Sign() != 0 {
 		return nil, invalid("invalid_exact_hedera_payload_hbar_sum_non_zero", "")
-	case net(ts, feePayer).Sign() < 0:
-		return nil, invalid("invalid_exact_hedera_payload_fee_payer_transferring_hbar", "")
-	case tx.TokenTransfer:
-		return nil, invalid("invalid_exact_hedera_payload_asset_mismatch", "")
+	}
+	if !payerPaid {
+		if tx.FeePayer != feePayer {
+			return nil, invalid("invalid_exact_hedera_payload_fee_payer_mismatch", "")
+		}
+		if net(ts, feePayer).Sign() < 0 {
+			return nil, invalid("invalid_exact_hedera_payload_fee_payer_transferring_hbar", "")
+		}
 	}
 	want, _ := new(big.Int).SetString(r.Amount, 10)
 	if net(ts, r.PayTo).Cmp(want) != 0 {
@@ -303,6 +348,9 @@ func (s *Scheme) verify(ctx context.Context, p x402.Payload, r x402.Requirements
 	if len(payers) != 1 {
 		return nil, invalid("invalid_exact_hedera_payload_multiple_payers", payer)
 	}
+	if payerPaid && tx.FeePayer != payer {
+		return nil, invalid("invalid_exact_hedera_payload_fee_payer_mismatch", payer)
+	}
 	if tx.MaxFee > s.MaxFee {
 		return nil, invalid("invalid_exact_hedera_payload_max_fee_too_high", payer)
 	}
@@ -314,9 +362,16 @@ func (s *Scheme) verify(ctx context.Context, p x402.Payload, r x402.Requirements
 	if err != nil || !key.signsAll(tx) {
 		return nil, invalid("invalid_exact_hedera_payload_signature_invalid", payer)
 	}
-	balance, ok := new(big.Int).SetString(account.Balance.Balance.String(), 10)
-	if !ok || balance.Cmp(big.NewInt(payers[0].Amount)) < 0 {
-		return nil, invalid("invalid_exact_hedera_payload_preflight_failed", payer)
+	if isHBAR {
+		balance, ok := new(big.Int).SetString(account.Balance.Balance.String(), 10)
+		if !ok || balance.Cmp(big.NewInt(payers[0].Amount)) < 0 {
+			return nil, invalid("invalid_exact_hedera_payload_preflight_failed", payer)
+		}
+	} else {
+		tokBal, err := s.TokenBalance(ctx, payer, r.Asset)
+		if err != nil || tokBal.Cmp(big.NewInt(payers[0].Amount)) < 0 {
+			return nil, invalid("invalid_exact_hedera_payload_preflight_failed", payer)
+		}
 	}
 	return tx, x402.Valid(payer)
 }
@@ -383,6 +438,64 @@ func (m Mirror) Nodes(ctx context.Context) (map[string]string, error) {
 	return out, nil
 }
 
+// TLSNodes maps node account IDs to their TLS gRPC endpoints (:50212), falling
+// back to :50211 only if no TLS endpoints are advertised. Returns whether TLS
+// endpoints were selected.
+func (m Mirror) TLSNodes(ctx context.Context) (map[string]string, bool, error) {
+	tlsOut := map[string]string{}
+	plainOut := map[string]string{}
+	next := "/api/v1/network/nodes?limit=25"
+	for page := 0; next != "" && page < 20; page++ {
+		var resp struct {
+			Nodes []struct {
+				Account   string `json:"node_account_id"`
+				Endpoints []struct {
+					Domain string `json:"domain_name"`
+					IP     string `json:"ip_address_v4"`
+					Port   int    `json:"port"`
+				} `json:"service_endpoints"`
+			} `json:"nodes"`
+			Links struct {
+				Next string `json:"next"`
+			} `json:"links"`
+		}
+		if err := m.get(ctx, next, &resp); err != nil {
+			return nil, false, err
+		}
+		for _, n := range resp.Nodes {
+			if !ValidEntityID(n.Account) {
+				continue
+			}
+			for _, e := range n.Endpoints {
+				host := e.Domain
+				if host == "" {
+					host = e.IP
+				}
+				if host == "" {
+					continue
+				}
+				if e.Port == 50212 {
+					if _, exists := tlsOut[n.Account]; !exists {
+						tlsOut[n.Account] = fmt.Sprintf("%s:%d", host, e.Port)
+					}
+				} else if e.Port == 50211 {
+					if _, exists := plainOut[n.Account]; !exists {
+						plainOut[n.Account] = fmt.Sprintf("%s:%d", host, e.Port)
+					}
+				}
+			}
+		}
+		next = resp.Links.Next
+	}
+	if len(tlsOut) > 0 {
+		return tlsOut, true, nil
+	}
+	if len(plainOut) > 0 {
+		return plainOut, false, nil
+	}
+	return nil, false, errors.New("mirror node listed no consensus nodes")
+}
+
 func ledgerID(network string) (*hiero.LedgerID, error) {
 	switch network {
 	case Mainnet:
@@ -393,13 +506,13 @@ func ledgerID(network string) (*hiero.LedgerID, error) {
 	return nil, errors.New("unsupported Hedera network")
 }
 
-// client connects to the nodes a transaction was frozen for.
+// client connects to the nodes a transaction was frozen for, preferring TLS (:50212).
 func (s *Scheme) client(ctx context.Context, network string, want []string) (*hiero.Client, error) {
 	ledger, err := ledgerID(network)
 	if err != nil {
 		return nil, err
 	}
-	nodes, err := s.Mirror.Nodes(ctx)
+	nodes, useTLS, err := s.Mirror.TLSNodes(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -420,6 +533,9 @@ func (s *Scheme) client(ctx context.Context, network string, want []string) (*hi
 	}
 	c := hiero.ClientForNetwork(m)
 	c.SetLedgerID(*ledger)
+	if useTLS {
+		c.SetTransportSecurity(true)
+	}
 	return c, nil
 }
 
@@ -433,13 +549,15 @@ func (s *Scheme) submit(ctx context.Context, p *Parsed, network string) (string,
 		return "", err
 	}
 	defer c.Close()
-	fp, err := hiero.AccountIDFromString(s.FeePayer)
-	if err != nil {
-		return "", err
-	}
-	c.SetOperator(fp, s.sponsorKey)
-	if tx, err = hiero.TransactionSign(tx, s.sponsorKey); err != nil {
-		return "", err
+	if s.hasSponsor && s.FeePayer != "" && p.FeePayer == s.FeePayer {
+		fp, err := hiero.AccountIDFromString(s.FeePayer)
+		if err != nil {
+			return "", err
+		}
+		c.SetOperator(fp, s.sponsorKey)
+		if tx, err = hiero.TransactionSign(tx, s.sponsorKey); err != nil {
+			return "", err
+		}
 	}
 	resp, err := hiero.TransactionExecute(tx, c)
 	if err != nil {
@@ -455,9 +573,8 @@ func (s *Scheme) submit(ctx context.Context, p *Parsed, network string) (string,
 	return p.TransactionID, nil
 }
 
-// Reconcile confirms a journaled payment on the mirror node without
-// submitting anything: one successful CRYPTOTRANSFER whose exact net
-// amounts debit payer and credit payTo.
+// Reconcile confirms a journaled payment (HBAR or HTS fungible token) on the
+// mirror node without submitting anything.
 func (s *Scheme) Reconcile(ctx context.Context, p x402.Payload, r x402.Requirements, payer string) (string, error) {
 	enc, err := payloadTransaction(p)
 	if err != nil {
@@ -475,7 +592,11 @@ func (s *Scheme) Reconcile(ctx context.Context, p x402.Payload, r x402.Requireme
 			Nonce     int    `json:"nonce"`
 			Scheduled bool   `json:"scheduled"`
 			Name      string `json:"name"`
-			Tokens    []any  `json:"token_transfers"`
+			Tokens    []struct {
+				TokenID string      `json:"token_id"`
+				Account string      `json:"account"`
+				Amount  json.Number `json:"amount"`
+			} `json:"token_transfers"`
 			Transfers []struct {
 				Account string      `json:"account"`
 				Amount  json.Number `json:"amount"`
@@ -485,36 +606,59 @@ func (s *Scheme) Reconcile(ctx context.Context, p x402.Payload, r x402.Requireme
 	if err := s.Mirror.get(ctx, "/api/v1/transactions/"+at[0]+"-"+secs+"-"+nanos, &data); err != nil {
 		return "", err
 	}
+	isHBAR := r.Asset == "0.0.0"
+	want, _ := new(big.Int).SetString(r.Amount, 10)
 	for _, t := range data.Transactions {
-		if t.Result != "SUCCESS" || t.Nonce != 0 || t.Scheduled || t.Name != "CRYPTOTRANSFER" || len(t.Tokens) > 0 {
+		if t.Result != "SUCCESS" || t.Nonce != 0 || t.Scheduled || t.Name != "CRYPTOTRANSFER" {
 			continue
 		}
+		if isHBAR {
+			if len(t.Tokens) > 0 {
+				continue
+			}
+			var ts []Transfer
+			for _, x := range t.Transfers {
+				n, err := strconv.ParseInt(x.Amount.String(), 10, 64)
+				if err != nil {
+					return "", errors.New("unparseable mirror amount")
+				}
+				ts = append(ts, Transfer{x.Account, n})
+			}
+			if net(ts, payer).Cmp(new(big.Int).Neg(want)) == 0 && net(ts, r.PayTo).Cmp(want) == 0 {
+				return tx.TransactionID, nil
+			}
+			return "", errors.New("ledger transfer does not match exact payment")
+		}
 		var ts []Transfer
-		for _, x := range t.Transfers {
+		for _, x := range t.Tokens {
+			if x.TokenID != r.Asset {
+				continue
+			}
 			n, err := strconv.ParseInt(x.Amount.String(), 10, 64)
 			if err != nil {
-				return "", errors.New("unparseable mirror amount")
+				return "", errors.New("unparseable mirror token amount")
 			}
 			ts = append(ts, Transfer{x.Account, n})
 		}
-		want, _ := new(big.Int).SetString(r.Amount, 10)
 		if net(ts, payer).Cmp(new(big.Int).Neg(want)) == 0 && net(ts, r.PayTo).Cmp(want) == 0 {
 			return tx.TransactionID, nil
 		}
-		return "", errors.New("ledger transfer does not match exact payment")
+		return "", errors.New("ledger token transfer does not match exact payment")
 	}
-	return "", errors.New("native HBAR payment not finalized")
+	return "", errors.New("Hedera payment not finalized")
 }
 
-// NewPayment builds and signs the payer's part of an HBAR payment: a
-// transfer whose transaction ID (and so fee payer) is the sponsor, frozen
-// for up to three consensus nodes, as the official x402 Hedera client does.
+// NewPayment builds and signs the payer's part of an HBAR or HTS token payment:
+// uses extra.feePayer when fee-sponsored, or payer itself when payer-pays-fees.
 func NewPayment(ctx context.Context, mirror Mirror, payer string, key hiero.PrivateKey, r x402.Requirements) (string, error) {
 	amount, err := strconv.ParseInt(r.Amount, 10, 64)
 	if err != nil || amount <= 0 {
 		return "", errors.New("invalid amount")
 	}
 	feePayer, _ := r.Extra["feePayer"].(string)
+	if feePayer == "" {
+		feePayer = payer
+	}
 	from, err := hiero.AccountIDFromString(payer)
 	if err != nil {
 		return "", err
@@ -527,9 +671,18 @@ func NewPayment(ctx context.Context, mirror Mirror, payer string, key hiero.Priv
 	if err != nil {
 		return "", err
 	}
-	nodes, err := mirror.Nodes(ctx)
+	nodes, _, err := mirror.TLSNodes(ctx)
 	if err != nil {
 		return "", err
+	}
+	if len(nodes) < 3 {
+		if plain, perr := mirror.Nodes(ctx); perr == nil {
+			for k, v := range plain {
+				if _, ok := nodes[k]; !ok {
+					nodes[k] = v
+				}
+			}
+		}
 	}
 	var ids []hiero.AccountID
 	for id := range nodes { // map order is random: spread payments over nodes
@@ -541,14 +694,26 @@ func NewPayment(ctx context.Context, mirror Mirror, payer string, key hiero.Priv
 			break
 		}
 	}
-	tx, err := hiero.NewTransferTransaction().
-		AddHbarTransfer(from, hiero.HbarFromTinybar(-amount)).
-		AddHbarTransfer(to, hiero.HbarFromTinybar(amount)).
+	builder := hiero.NewTransferTransaction().
 		SetTransactionID(hiero.TransactionIDGenerate(fp)).
 		SetNodeAccountIDs(ids).
 		SetMaxTransactionFee(hiero.HbarFromTinybar(DefaultMaxFeeTinybars)).
-		SetTransactionValidDuration(120 * time.Second).
-		Freeze()
+		SetTransactionValidDuration(120 * time.Second)
+	if r.Asset == "0.0.0" {
+		builder.AddHbarTransfer(from, hiero.HbarFromTinybar(-amount)).
+			AddHbarTransfer(to, hiero.HbarFromTinybar(amount))
+	} else {
+		tid, err := hiero.TokenIDFromString(r.Asset)
+		if err != nil {
+			return "", err
+		}
+		builder.AddTokenTransfer(tid, from, -amount).
+			AddTokenTransfer(tid, to, amount)
+	}
+	if memo, ok := r.Extra["memo"].(string); ok && memo != "" {
+		builder.SetTransactionMemo(memo)
+	}
+	tx, err := builder.Freeze()
 	if err != nil {
 		return "", err
 	}

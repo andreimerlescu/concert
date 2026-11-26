@@ -3,19 +3,16 @@
 // see them.
 //
 //	concert-client               pay for a fast-lane pass (CONCERT_ACCEPT_TERMS=yes)
-//	concert-client --nft         prove NFT ownership for a short lease
+//	concert-client --nft         prove NFT ownership for a fast-lane lease
+//	concert-client --direct      create & poll a direct Destination-Tag/Memo challenge
 //	concert-client --wait PATH   wait in line for PATH, then print the response
+//
+// Supports native coins AND issued tokens/stablecoins across all 4 chains:
+// XRPL (XRP + IOUs like RLUSD), Stellar (XLM + CODE:ISSUER + Soroban SACs),
+// Hedera (HBAR + HTS fungible tokens), and Solana (SOL + SPL / Token-2022).
 //
 // A signed authorization is saved to the state file before it is sent, and
 // the client never signs a second one while the first is unresolved.
-//
-// --wait needs no wallet keys and never pays. It holds a place in Concert's
-// line with the saved session (Concert's -agent-queue), retrying as the
-// server's Retry-After says, and reports the fast-lane offer when Concert
-// makes one; paying stays the explicit default command above. The state
-// file is locked only while the session is renewed, so a payment can be
-// made with the same session while a --wait runs, and the waiting place is
-// then admitted through the fast lane.
 package main
 
 import (
@@ -65,6 +62,19 @@ func payload(key, value string) json.RawMessage {
 	return b
 }
 
+func isSponsored(extra map[string]any) bool {
+	if extra == nil {
+		return false
+	}
+	if v, ok := extra["areFeesSponsored"].(bool); ok {
+		return v
+	}
+	if fp, ok := extra["feePayer"].(string); ok && strings.TrimSpace(fp) != "" {
+		return true
+	}
+	return false
+}
+
 func walletFromEnvironment(network string, n gateway.Network, getenv func(string) string) (*wallet, error) {
 	switch family(network) {
 	case "xrpl":
@@ -92,6 +102,11 @@ func walletFromEnvironment(network string, n gateway.Network, getenv func(string
 		return &wallet{
 			address: kp.Address(),
 			pay: func(ctx context.Context, r x402.Requirements) (json.RawMessage, error) {
+				// Use classic payer-pays-fees payment when unsponsored or classic asset (XLM / CODE:ISSUER).
+				if !isSponsored(r.Extra) || r.Asset == "XLM" || strings.Contains(r.Asset, ":") {
+					tx, err := stellar.NewClassicPayment(ctx, horizon, network, kp, r)
+					return payload("transaction", tx), err
+				}
 				want, err := stellar.Passphrase(network)
 				if err != nil {
 					return nil, err
@@ -140,20 +155,29 @@ func walletFromEnvironment(network string, n gateway.Network, getenv func(string
 				if got, err := rpc.Network(ctx); err != nil || got != network {
 					return nil, errors.New("RPC network mismatch")
 				}
-				to, err := solana.ParsePublicKey(r.PayTo)
+				if r.Asset == "SOL" {
+					to, err := solana.ParsePublicKey(r.PayTo)
+					if err != nil {
+						return nil, err
+					}
+					lamports, ok := new(big.Int).SetString(r.Amount, 10)
+					if !ok || !lamports.IsUint64() || lamports.Sign() <= 0 {
+						return nil, errors.New("invalid amount")
+					}
+					bh, err := rpc.LatestBlockhash(ctx)
+					if err != nil {
+						return nil, err
+					}
+					tx := solana.Sign(solana.NewTransfer(from, to, lamports.Uint64(), bh), priv)
+					return payload("transaction", base64.StdEncoding.EncodeToString(tx)), nil
+				}
+				// SPL / Token-2022 exact payment: prepare unsigned tx (ATA + TransferChecked) and sign locally.
+				unsignedRaw, err := solana.New(network, n.RPC).PreparePayment(ctx, from.String(), r)
 				if err != nil {
 					return nil, err
 				}
-				lamports, ok := new(big.Int).SetString(r.Amount, 10)
-				if !ok || !lamports.IsUint64() || lamports.Sign() <= 0 {
-					return nil, errors.New("invalid amount")
-				}
-				bh, err := rpc.LatestBlockhash(ctx)
-				if err != nil {
-					return nil, err
-				}
-				tx := solana.Sign(solana.NewTransfer(from, to, lamports.Uint64(), bh), priv)
-				return payload("transaction", base64.StdEncoding.EncodeToString(tx)), nil
+				signed := solana.Sign(unsignedRaw, priv)
+				return payload("transaction", base64.StdEncoding.EncodeToString(signed)), nil
 			},
 			sign: func(m string) ([]byte, string) { return ed25519.Sign(priv, []byte(m)), "" },
 		}, nil
@@ -234,12 +258,44 @@ func (f failure) err(fallback string) error {
 	return errors.New(fallback)
 }
 
-var nativeAssets = map[string]string{"xrpl": "XRP", "hedera": "0.0.0", "solana": "SOL"}
+func withinBudget(network, asset, amountStr, maxStr string) bool {
+	amountStr = strings.TrimSpace(amountStr)
+	maxStr = strings.TrimSpace(maxStr)
+	if amountStr == "" || maxStr == "" {
+		return false
+	}
+	// XRPL IOUs (e.g. "0.99" RLUSD) use exact decimal comparison.
+	if family(network) == "xrpl" && asset != "XRP" {
+		cmp, err := xrpl.CompareDecimal(amountStr, maxStr)
+		if err != nil || cmp > 0 {
+			return false
+		}
+		pos, err := xrpl.CompareDecimal(amountStr, "0")
+		return err == nil && pos > 0
+	}
+	budget, okB := new(big.Int).SetString(maxStr, 10)
+	amount, okA := new(big.Int).SetString(amountStr, 10)
+	return okB && okA && amount.Sign() > 0 && amount.Cmp(budget) <= 0
+}
 
-// preparePayment signs one authorization for the offer on network, only if
-// it pays expectedPayTo in the native currency within the budget. It never
-// picks another offer or signs a replacement.
-func (c *client) preparePayment(ctx context.Context, session, network string, w *wallet, maxAtomic, expectedPayTo string) (string, error) {
+func allowedScheme(network, asset, scheme string) bool {
+	switch family(network) {
+	case "solana":
+		if asset == "SOL" {
+			return scheme == solana.SchemeName || scheme == "exact"
+		}
+		return scheme == "exact"
+	case "xrpl", "stellar", "hedera":
+		return scheme == "exact"
+	default:
+		return false
+	}
+}
+
+// preparePayment signs one authorization for the offer on network (and optional
+// expectedAsset), only if it pays expectedPayTo within the spending budget.
+// It never picks another offer or signs a replacement.
+func (c *client) preparePayment(ctx context.Context, session, network string, w *wallet, maxAmount, expectedPayTo, expectedAsset string) (string, error) {
 	var disc struct {
 		failure
 		Resource *x402.Resource      `json:"resource"`
@@ -257,35 +313,21 @@ func (c *client) preparePayment(ctx context.Context, session, network string, w 
 	}
 	var r *x402.Requirements
 	for i := range disc.Accepts {
-		if disc.Accepts[i].Network == network {
-			r = &disc.Accepts[i]
-			break
+		cand := &disc.Accepts[i]
+		if cand.Network != network {
+			continue
 		}
-	}
-	budget, okBudget := new(big.Int).SetString(maxAtomic, 10)
-	var amount *big.Int
-	okAmount := false
-	if r != nil {
-		amount, okAmount = new(big.Int).SetString(r.Amount, 10)
-	}
-	if r == nil || !okBudget || !okAmount || expectedPayTo == "" || r.PayTo != expectedPayTo || amount.Cmp(budget) > 0 || amount.Sign() <= 0 {
-		return "", errors.New("network, recipient or spending budget mismatch")
-	}
-	asset, scheme := nativeAssets[family(network)], "exact"
-	if family(network) == "stellar" {
-		pass, err := stellar.Passphrase(network)
-		if err != nil {
-			return "", err
+		if expectedAsset != "" && cand.Asset != expectedAsset {
+			continue
 		}
-		if asset, err = stellar.NativeAsset(pass); err != nil {
-			return "", err
-		}
+		r = cand
+		break
 	}
-	if family(network) == "solana" {
-		scheme = solana.SchemeName
+	if r == nil || expectedPayTo == "" || r.PayTo != expectedPayTo || !withinBudget(network, r.Asset, r.Amount, maxAmount) {
+		return "", errors.New("network, asset, recipient or spending budget mismatch")
 	}
-	if r.Asset != asset || r.Scheme != scheme {
-		return "", errors.New("only the configured native currency scheme is supported")
+	if !allowedScheme(network, r.Asset, r.Scheme) {
+		return "", errors.New("unsupported payment scheme for configured asset")
 	}
 	proof, err := w.pay(ctx, *r)
 	if err != nil {
@@ -400,21 +442,14 @@ func main() {
 	}
 }
 
-const usage = "usage: concert-client [--nft | --wait PATH]"
+const usage = "usage: concert-client [--nft | --direct | --wait PATH [-bid -max-bid USD [-bid-chain xrpl|stellar|hedera|solana] [-bid-asset ASSET] [-bid-poll-interval 1s]]]"
 
 func run(ctx context.Context, args []string, getenv func(string) string) error {
-	nft, waitPath := false, ""
-	for i := 0; i < len(args); i++ {
-		switch {
-		case args[i] == "--nft" && !nft && waitPath == "":
-			nft = true
-		case args[i] == "--wait" && !nft && waitPath == "" && i+1 < len(args) && strings.HasPrefix(args[i+1], "/"):
-			waitPath = args[i+1]
-			i++
-		default:
-			return errors.New(usage)
-		}
+	opts, err := parseCLIArgs(args)
+	if err != nil {
+		return err
 	}
+	nft, direct, waitPath := opts.nft, opts.direct, opts.waitPath
 	origin := strings.TrimRight(env("CONCERT_ORIGIN", "http://127.0.0.1:8080"), "/")
 	if err := checkOrigin(origin); err != nil {
 		return err
@@ -428,15 +463,7 @@ func run(ctx context.Context, args []string, getenv func(string) string) error {
 		return err
 	}
 	if waitPath != "" {
-		return waitInLine(ctx, origin, network, file, waitPath, getenv, os.Stdout)
-	}
-	networks, err := gateway.LoadNetworks(env("CONCERT_NETWORKS_CONFIG", "examples/networks.json"))
-	if err != nil {
-		return err
-	}
-	n, ok := networks[network]
-	if !ok {
-		return errors.New("network configuration is missing")
+		return waitInLineWithBidding(ctx, origin, network, file, opts, getenv, os.Stdout)
 	}
 	unlock, err := lockState(file)
 	if err != nil {
@@ -449,11 +476,30 @@ func run(ctx context.Context, args []string, getenv func(string) string) error {
 		return err
 	}
 	c := newClient(origin)
-	w, err := walletFromEnvironment(network, n, getenv)
+	if err := c.renew(ctx, file, &st); err != nil {
+		return err
+	}
+	if direct {
+		out, err := c.runDirect(ctx, st.Session, getenv, os.Stdout)
+		if err != nil {
+			return err
+		}
+		b, _ := json.MarshalIndent(out, "", "  ")
+		fmt.Println(string(b))
+		fmt.Println("Session saved. Send it as the Concert-Session header on protected requests.")
+		return nil
+	}
+
+	networks, err := gateway.LoadNetworks(env("CONCERT_NETWORKS_CONFIG", "examples/networks.json"))
 	if err != nil {
 		return err
 	}
-	if err := c.renew(ctx, file, &st); err != nil {
+	n, ok := networks[network]
+	if !ok {
+		return errors.New("network configuration is missing")
+	}
+	w, err := walletFromEnvironment(network, n, getenv)
+	if err != nil {
 		return err
 	}
 	var out any
@@ -485,9 +531,72 @@ func lockState(file string) (func(), error) {
 
 // waitInLine renews the saved session under the state lock, releases the
 // lock, and waits in line for path with it, writing progress and then the
-// admitted response to out. It is bounded by CONCERT_CLIENT_MAX_WAIT
-// (default 1h) and by ctx.
+// admitted response to out.
+//
+// # Parameters
+//
+//   - ctx: Controls cancellation and deadlines.
+//   - origin: Validated Concert origin URL.
+//   - network: Configured CAIP-2 network string.
+//   - file: Absolute path to the client state file.
+//   - path: Target path starting with "/".
+//   - getenv: Environment variable lookup function.
+//   - out: Output writer for progress and admitted response body.
+//
+// # Returns
+//
+// nil on admission, or an error on failure or cancellation.
+//
+// # Example
+//
+//	// Internal CLI helper called by run when --wait is used without -bid.
+//
+// # Used By
+//
+// Generated from verified repository symbol references; do not hand-edit.
+//
+// No statically resolvable in-repo references found in the stated scope.
+//
+// Scope: cmd/concert-client package and tests; darwin/arm64, default tags.
+// Interface, callback, and external callers are not exhaustive.
 func waitInLine(ctx context.Context, origin, network, file, path string, getenv func(string) string, out io.Writer) error {
+	return waitInLineWithBidding(ctx, origin, network, file, cliOptions{waitPath: path}, getenv, out)
+}
+
+// waitInLineWithBidding renews the saved session under the state lock,
+// optionally initializes the local crypto bid signer when -bid is enabled,
+// releases the state lock, and runs the waiting-room + bidding loop.
+//
+// # Parameters
+//
+//   - ctx: Controls cancellation and deadlines.
+//   - origin: Validated Concert origin URL.
+//   - network: Configured CAIP-2 network string.
+//   - file: Absolute path to the client state file.
+//   - opts: Parsed CLI options including waitPath and optional bidding flags.
+//   - getenv: Environment variable lookup function.
+//   - out: Output writer for progress and admitted response body.
+//
+// # Returns
+//
+// nil on admission, or an error on configuration, bidding, or wait failure.
+//
+// # Example
+//
+//	// Internal CLI helper called by run when --wait is supplied.
+//
+// # Used By
+//
+// Generated from verified repository symbol references; do not hand-edit.
+//
+//   - cmd/concert-client/main.go:466 (direct call)
+//   - cmd/concert-client/main.go:466 (function value)
+//   - cmd/concert-client/main.go:563 (direct call)
+//   - cmd/concert-client/main.go:563 (function value)
+//
+// Scope: cmd/concert-client package and tests; darwin/arm64, default tags.
+// Interface, callback, and external callers are not exhaustive.
+func waitInLineWithBidding(ctx context.Context, origin, network, file string, opts cliOptions, getenv func(string) string, out io.Writer) error {
 	maxWait := time.Hour
 	if v := getenv("CONCERT_CLIENT_MAX_WAIT"); v != "" {
 		d, err := time.ParseDuration(v)
@@ -495,6 +604,14 @@ func waitInLine(ctx context.Context, origin, network, file, path string, getenv 
 			return errors.New("CONCERT_CLIENT_MAX_WAIT must be a positive duration, for example 30m")
 		}
 		maxWait = d
+	}
+	var bcfg bidConfig
+	if opts.bidEnabled {
+		var err error
+		bcfg, err = buildWaitBidConfig(opts, network, getenv)
+		if err != nil {
+			return err
+		}
 	}
 	unlock, err := lockState(file)
 	if err != nil {
@@ -511,24 +628,27 @@ func waitInLine(ctx context.Context, origin, network, file, path string, getenv 
 	}
 	ctx, cancel := context.WithTimeout(ctx, maxWait)
 	defer cancel()
-	return c.wait(ctx, path, st.Session, out)
+	return c.waitWithBidding(ctx, opts.waitPath, st.Session, bcfg, out)
 }
 
 // queued is Concert's answer to a client waiting in line.
 type queued struct {
-	Queued     bool   `json:"queued"`
-	Error      string `json:"error"`
-	Position   int64  `json:"position"`
-	QueueDepth int64  `json:"queue_depth"`
-	StatusURL  string `json:"status_url"`
-	RetryAfter int    `json:"retry_after_seconds"`
+	Queued     bool          `json:"queued"`
+	Error      string        `json:"error"`
+	Position   int64         `json:"position"`
+	QueueDepth int64         `json:"queue_depth"`
+	StatusURL  string        `json:"status_url"`
+	RetryAfter int           `json:"retry_after_seconds"`
+	Auction    *auctionOffer `json:"auction,omitempty"`
 	FastLane   *struct {
 		PaymentURL  string `json:"payment_url"`
 		PassSeconds int    `json:"pass_seconds"`
 		Offers      []struct {
-			Network string `json:"network"`
-			Asset   string `json:"asset"`
-			Amount  string `json:"amount"`
+			Network       string `json:"network"`
+			Asset         string `json:"asset"`
+			AssetSymbol   string `json:"asset_symbol"`
+			Amount        string `json:"amount"`
+			DisplayAmount string `json:"display_amount"`
 		} `json:"offers"`
 	} `json:"fast_lane"`
 }
@@ -539,8 +659,6 @@ const (
 	maxPageBytes = 16 << 20
 )
 
-// retryDelay is the server's Retry-After, else the body's
-// retry_after_seconds, else 5s, bounded to 1s-1m.
 func retryDelay(h http.Header, q queued) time.Duration {
 	d := 5 * time.Second
 	if n, err := strconv.Atoi(strings.TrimSpace(h.Get("Retry-After"))); err == nil {
@@ -551,18 +669,68 @@ func retryDelay(h http.Header, q queued) time.Duration {
 	return min(max(d, minRetry), maxRetry)
 }
 
-// wait requests path with session until Concert stops answering "queued",
-// then writes that response's status and body to out. It never pays: a
-// fast-lane offer is reported once, and paying stays a separate command.
 func (c *client) wait(ctx context.Context, path, session string, out io.Writer) error {
+	return c.waitWithBidding(ctx, path, session, bidConfig{}, out)
+}
+
+// waitWithBidding polls path holding session until admitted; when bidCfg.Enabled
+// is true and a 429 response includes an auction offer, it evaluates -max-bid,
+// submits a signed crypto bid, polls bid status, and either retries immediately
+// with the settled pass credentials or seamlessly continues waiting in line.
+//
+// # Parameters
+//
+//   - ctx: Controls cancellation and overall wait deadline.
+//   - path: Protected Concert path starting with "/".
+//   - session: Active Concert-Session token.
+//   - bidCfg: Agent bidding configuration (disabled when Enabled is false).
+//   - out: Output writer for progress logs and the admitted response body.
+//
+// # Returns
+//
+// nil once Concert returns a non-429 2xx/3xx response, or an error on refusal,
+// cancellation, transport failure, or fatal bidding error.
+//
+// # Example
+//
+//	// Internal client wait loop invoked by waitInLineWithBidding and tests.
+//
+// # Used By
+//
+// Generated from verified repository symbol references; do not hand-edit.
+//
+//   - cmd/concert-client/bidding_test.go:321 (direct call)
+//   - cmd/concert-client/bidding_test.go:321 (function value)
+//   - cmd/concert-client/bidding_test.go:404 (direct call)
+//   - cmd/concert-client/bidding_test.go:404 (function value)
+//   - cmd/concert-client/bidding_test.go:477 (direct call)
+//   - cmd/concert-client/bidding_test.go:477 (function value)
+//   - cmd/concert-client/bidding_test.go:546 (direct call)
+//   - cmd/concert-client/bidding_test.go:546 (function value)
+//   - cmd/concert-client/bidding_test.go:616 (direct call)
+//   - cmd/concert-client/bidding_test.go:616 (function value)
+//   - cmd/concert-client/bidding_test.go:633 (direct call)
+//   - cmd/concert-client/bidding_test.go:633 (function value)
+//   - cmd/concert-client/bidding_test.go:660 (direct call)
+//   - cmd/concert-client/bidding_test.go:660 (function value)
+//   - cmd/concert-client/main.go:631 (direct call)
+//   - cmd/concert-client/main.go:631 (function value)
+//   - cmd/concert-client/main.go:673 (direct call)
+//   - cmd/concert-client/main.go:673 (function value)
+//
+// Scope: cmd/concert-client package and tests; darwin/arm64, default tags.
+// Interface, callback, and external callers are not exhaustive.
+func (c *client) waitWithBidding(ctx context.Context, path, session string, bidCfg bidConfig, out io.Writer) error {
 	offered := false
+	var creds passCredentials
+	attemptedAuctions := make(map[string]struct{})
 	for {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.origin+path, nil)
 		if err != nil {
 			return err
 		}
 		req.Header.Set("Accept", "application/json")
-		req.Header.Set("Concert-Session", session)
+		attachPassCredentials(req, session, creds)
 		res, err := c.http.Do(req)
 		if err != nil {
 			return err
@@ -587,18 +755,40 @@ func (c *client) wait(ctx context.Context, path, session string, out io.Writer) 
 			offered = true
 			fmt.Fprintf(out, "Concert offers its fast lane (%d s pass) at %s:", q.FastLane.PassSeconds, q.FastLane.PaymentURL)
 			for _, o := range q.FastLane.Offers {
-				fmt.Fprintf(out, " %s %s on %s;", o.Amount, o.Asset, o.Network)
+				amt, sym := o.Amount, o.Asset
+				if o.DisplayAmount != "" && o.AssetSymbol != "" {
+					amt, sym = o.DisplayAmount, o.AssetSymbol
+				}
+				fmt.Fprintf(out, " %s %s on %s;", amt, sym, o.Network)
 			}
 			fmt.Fprintln(out, " this client does not pay; run concert-client with CONCERT_ACCEPT_TERMS=yes to pay with this session.")
 		}
+
+		if bidCfg.Enabled && q.Auction != nil {
+			auctionKey := or(strings.TrimSpace(q.Auction.AuctionID), q.Auction.Mode)
+			if _, tried := attemptedAuctions[auctionKey]; !tried {
+				if len(attemptedAuctions) >= maxAttemptedAuctions {
+					clear(attemptedAuctions)
+				}
+				attemptedAuctions[auctionKey] = struct{}{}
+				outcome, berr := c.attemptAuctionBid(ctx, session, *q.Auction, bidCfg, out)
+				if berr != nil {
+					return berr
+				}
+				if outcome.settled {
+					creds = outcome.creds
+					// Immediately retry the target URL with the settled pass credentials.
+					continue
+				}
+			}
+		}
+
 		if err := c.pause(ctx, retryDelay(res.Header, q)); err != nil {
 			return fmt.Errorf("stopped waiting at position %d: %w", q.Position, err)
 		}
 	}
 }
 
-// renew keeps the session ID, and with it any unresolved payment, while
-// refreshing the expiry. An expired session yields a new ID instead.
 func (c *client) renew(ctx context.Context, file string, st *state) error {
 	var s struct {
 		failure
@@ -623,7 +813,8 @@ func (c *client) pay(ctx context.Context, file string, st *state, network string
 		if getenv("CONCERT_ACCEPT_TERMS") != "yes" {
 			return nil, errors.New("review merchant terms and set CONCERT_ACCEPT_TERMS=yes")
 		}
-		p, err := c.preparePayment(ctx, st.Session, network, w, getenv("CONCERT_MAX_ATOMIC_AMOUNT"), getenv("CONCERT_EXPECT_PAY_TO"))
+		budget := or(getenv("CONCERT_MAX_ATOMIC_AMOUNT"), getenv("CONCERT_MAX_AMOUNT"))
+		p, err := c.preparePayment(ctx, st.Session, network, w, budget, getenv("CONCERT_EXPECT_PAY_TO"), getenv("CONCERT_EXPECT_ASSET"))
 		if err != nil {
 			return nil, err
 		}
@@ -668,6 +859,68 @@ func (c *client) proveNFT(ctx context.Context, session string, w *wallet, rule, 
 		return nil, errors.New(or(msg, "NFT proof failed"))
 	}
 	return out, nil
+}
+
+// runDirect requests a direct Destination-Tag/Memo challenge (for either a
+// paid pass or a 1-drop NFT/Token-Balance proof), prints instructions to out,
+// and polls /_concert/direct/verify until confirmed or ctx expires.
+func (c *client) runDirect(ctx context.Context, session string, getenv func(string) string, out io.Writer) (any, error) {
+	reqBody := map[string]any{}
+	if rule := strings.TrimSpace(getenv("CONCERT_TOKEN_RULE")); rule != "" {
+		reqBody["kind"] = "proof"
+		reqBody["rule_kind"] = "token"
+		reqBody["rule_id"] = rule
+		reqBody["address"] = strings.TrimSpace(getenv("CONCERT_WALLET_ADDRESS"))
+	} else if rule := strings.TrimSpace(getenv("CONCERT_NFT_RULE")); rule != "" {
+		reqBody["kind"] = "proof"
+		reqBody["rule_kind"] = "nft"
+		reqBody["rule_id"] = rule
+		reqBody["address"] = strings.TrimSpace(getenv("CONCERT_WALLET_ADDRESS"))
+		reqBody["token_id"] = strings.TrimSpace(getenv("CONCERT_NFT_TOKEN"))
+	} else {
+		idx, _ := strconv.Atoi(or(getenv("CONCERT_DIRECT_OFFER_INDEX"), "0"))
+		reqBody["kind"] = "payment"
+		reqBody["offer_index"] = idx
+		reqBody["address"] = strings.TrimSpace(getenv("CONCERT_WALLET_ADDRESS"))
+	}
+	var ch struct {
+		failure
+		ChallengeID    string `json:"challenge_id"`
+		Instructions   string `json:"instructions"`
+		WalletURI      string `json:"wallet_uri"`
+		DestinationTag uint32 `json:"destination_tag"`
+		Memo           string `json:"memo"`
+		Expires        string `json:"expires"`
+	}
+	status, err := c.request(ctx, "/direct/challenge", session, reqBody, nil, &ch)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK || ch.ChallengeID == "" {
+		return nil, ch.err("direct challenge failed")
+	}
+	fmt.Fprintf(out, "%s\nWallet URI: %s\n", ch.Instructions, ch.WalletURI)
+	if ch.DestinationTag > 0 {
+		fmt.Fprintf(out, "Destination Tag: %d\n", ch.DestinationTag)
+	}
+	fmt.Fprintf(out, "Memo: %s\nPolling for on-ledger confirmation (expires %s)…\n", ch.Memo, ch.Expires)
+
+	for {
+		var res map[string]any
+		st, err := c.request(ctx, "/direct/verify", session, map[string]string{"challenge_id": ch.ChallengeID}, nil, &res)
+		if err != nil {
+			return nil, err
+		}
+		if st == http.StatusOK && res["eligible"] == true {
+			return res, nil
+		}
+		if errMsg, _ := res["error"].(string); errMsg == "challenge_expired_or_unknown" {
+			return nil, errors.New(errMsg)
+		}
+		if err := c.pause(ctx, 3*time.Second); err != nil {
+			return nil, err
+		}
+	}
 }
 
 func or(a, b string) string {

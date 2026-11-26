@@ -47,30 +47,26 @@ func scNumber(v xdr.ScVal) (*big.Int, bool) {
 	return nil, false
 }
 
-// OwnsNFT verifies a SEP-53 signature by address, requires its master key
-// to carry at least the medium threshold (so one key of a multisignature
-// account does not authenticate it alone), and simulates the allowlisted
-// SEP-50 collection contract's balance(address) > 0. A token-specific rule
-// is refused: balance() proves collection membership only.
-func (s *Scheme) OwnsNFT(ctx context.Context, address, collection, token, message string, signature []byte) (string, error) {
-	if token != "" {
-		return "", errors.New("Stellar proofs cover the collection, not a specific token")
+// CheckNFTOwnership verifies that address currently holds an NFT in collection:
+// either a Soroban SEP-50 contract ("C...") with balance(address) > 0, OR a
+// classic Stellar issued-asset NFT ("CODE:ISSUER") with positive Horizon balance.
+func (s *Scheme) CheckNFTOwnership(ctx context.Context, address, collection string) (string, error) {
+	if !isValidGAccount(address) {
+		return "", errors.New("invalid Stellar G... address")
 	}
-	if !VerifySEP53(address, message, signature) {
-		return "", errors.New("invalid signature")
+	if len(collection) > 0 && collection[0] != 'C' {
+		bal, err := s.TokenBalance(ctx, address, collection)
+		if err != nil {
+			return "", err
+		}
+		if bal.Sign() <= 0 {
+			return "", errors.New("no NFT balance")
+		}
+		return collection, nil
 	}
 	acct, err := s.Horizon.Account(ctx, address)
 	if err != nil {
 		return "", err
-	}
-	weight := -1
-	for _, sg := range acct.Signers {
-		if sg.Key == address {
-			weight = sg.Weight
-		}
-	}
-	if weight < max(1, acct.Thresholds.Med) {
-		return "", errors.New("insufficient master-key authority")
 	}
 	rp, err := s.RPC.Passphrase(ctx)
 	if err != nil {
@@ -121,6 +117,34 @@ func (s *Scheme) OwnsNFT(ctx context.Context, address, collection, token, messag
 		return "", errors.New("no NFT balance")
 	}
 	return "collection-balance", nil
+}
+
+// OwnsNFT verifies a SEP-53 signature by address, requires its master key
+// to carry at least the medium threshold (so one key of a multisignature
+// account does not authenticate it alone), and checks SEP-50 or classic NFT
+// ownership. A token-specific rule is refused: balance() proves collection
+// membership only.
+func (s *Scheme) OwnsNFT(ctx context.Context, address, collection, token, message string, signature []byte) (string, error) {
+	if token != "" {
+		return "", errors.New("Stellar proofs cover the collection, not a specific token")
+	}
+	if !VerifySEP53(address, message, signature) {
+		return "", errors.New("invalid signature")
+	}
+	acct, err := s.Horizon.Account(ctx, address)
+	if err != nil {
+		return "", err
+	}
+	weight := -1
+	for _, sg := range acct.Signers {
+		if sg.Key == address {
+			weight = sg.Weight
+		}
+	}
+	if weight < max(1, acct.Thresholds.Med) {
+		return "", errors.New("insufficient master-key authority")
+	}
+	return s.CheckNFTOwnership(ctx, address, collection)
 }
 
 func contractAddress(c string) (xdr.ScAddress, error) {

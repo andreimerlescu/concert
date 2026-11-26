@@ -1,0 +1,140 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 884" width="720" height="884">
+  <defs>
+    <style>
+      .sans { font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+      .mono { font-family: 'SF Mono', 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    </style>
+    <marker id="arr-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#d97706"/>
+    </marker>
+    <marker id="arr-rose" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#db2777"/>
+    </marker>
+    <marker id="arr-teal" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#0d9488"/>
+    </marker>
+    <marker id="arr-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#0284c7"/>
+    </marker>
+  </defs>
+
+  <!-- TIER 1: Active-Active Edge Nodes + Redis HA -->
+  <rect x="16" y="16" width="688" height="172" rx="16" fill="#f5f3ff" stroke="#7c3aed" stroke-width="2.2"/>
+  <rect x="34" y="32" width="268" height="28" rx="14" fill="#7c3aed"/>
+  <text x="168" y="50.5" text-anchor="middle" class="sans" font-size="12.5" font-weight="700" letter-spacing="0.6" fill="#ffffff">TIER 1 · ACTIVE-ACTIVE EDGES</text>
+  <rect x="464" y="32" width="222" height="28" rx="14" fill="#0f172a"/>
+  <text x="575" y="50.5" text-anchor="middle" class="mono" font-size="12.5" font-weight="700" fill="#ddd6fe">Reports ?demand=&lt;n&gt;</text>
+
+  <!-- edge-1 -->
+  <rect x="34" y="74" width="182" height="96" rx="12" fill="#ffffff" stroke="#7c3aed" stroke-width="1.8"/>
+  <text x="125" y="103" text-anchor="middle" class="mono" font-size="16" font-weight="700" fill="#0f172a">edge-1</text>
+  <text x="125" y="128" text-anchor="middle" class="sans" font-size="13.5" font-weight="500" fill="#334155">Waiting Room</text>
+  <text x="125" y="150" text-anchor="middle" class="mono" font-size="12.5" font-weight="600" fill="#6d28d9">Signs Hop Claim</text>
+
+  <line x1="216" y1="122" x2="246" y2="122" stroke="#d97706" stroke-width="2.2" marker-start="url(#arr-amber)" marker-end="url(#arr-amber)"/>
+
+  <!-- Redis HA -->
+  <rect x="250" y="74" width="220" height="96" rx="12" fill="#fffbeb" stroke="#d97706" stroke-width="1.8"/>
+  <text x="360" y="103" text-anchor="middle" class="sans" font-size="15.5" font-weight="700" fill="#0f172a">Redis / Valkey HA</text>
+  <text x="360" y="128" text-anchor="middle" class="sans" font-size="13.5" font-weight="500" fill="#334155">Real-time ban sync</text>
+  <text x="360" y="150" text-anchor="middle" class="mono" font-size="12.5" font-weight="600" fill="#b45309">SET NX PX dedupe</text>
+
+  <line x1="470" y1="122" x2="500" y2="122" stroke="#d97706" stroke-width="2.2" marker-start="url(#arr-amber)" marker-end="url(#arr-amber)"/>
+
+  <!-- edge-2 -->
+  <rect x="504" y="74" width="182" height="96" rx="12" fill="#ffffff" stroke="#7c3aed" stroke-width="1.8"/>
+  <text x="595" y="103" text-anchor="middle" class="mono" font-size="16" font-weight="700" fill="#0f172a">edge-2</text>
+  <text x="595" y="128" text-anchor="middle" class="sans" font-size="13.5" font-weight="500" fill="#334155">Waiting Room</text>
+  <text x="595" y="150" text-anchor="middle" class="mono" font-size="12.5" font-weight="600" fill="#6d28d9">Signs Hop Claim</text>
+
+  <!-- Arrows from edge-1 & edge-2 to Trust Bridge -->
+  <line x1="125" y1="188" x2="125" y2="218" stroke="#db2777" stroke-width="2.4" marker-end="url(#arr-rose)"/>
+  <path d="M 595 188 L 595 204 L 380 204 L 380 218" fill="none" stroke="#db2777" stroke-width="2.4" marker-end="url(#arr-rose)"/>
+
+  <!-- MIDDLE TRUST BRIDGE: Native mTLS + Replay Guard (left) & Public Direct (right) -->
+  <rect x="16" y="222" width="458" height="134" rx="16" fill="#fdf2f8" stroke="#db2777" stroke-width="2.2"/>
+  <g transform="translate(34, 238)" fill="none" stroke="#be185d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="3" y="10" width="14" height="10" rx="2"/>
+    <path d="M6 10 V7 A4 4 0 0 1 14 7 V10"/>
+  </g>
+  <text x="62" y="256" class="sans" font-size="16.5" font-weight="700" fill="#0f172a">Native Leaf mTLS + Replay Guard</text>
+  <rect x="34" y="272" width="174" height="26" rx="13" fill="#0f172a"/>
+  <text x="121" y="289.5" text-anchor="middle" class="mono" font-size="12.5" font-weight="700" fill="#f9a8d4">-hop-require-mtls</text>
+  <rect x="218" y="272" width="238" height="26" rx="13" fill="#0f172a"/>
+  <text x="337" y="289.5" text-anchor="middle" class="mono" font-size="12.5" font-weight="700" fill="#f9a8d4">256-shard O(1) FIFO ring</text>
+  <text x="34" y="324" class="sans" font-size="13.5" font-weight="600" fill="#334155">Edge cert + single-use nonce · fail-closed hardened</text>
+  <text x="34" y="344" class="sans" font-size="13" font-weight="500" fill="#be185d">Default 1,048,576 nonces (-hop-replay-max)</text>
+
+  <!-- Direct Public Browsers -->
+  <rect x="490" y="222" width="214" height="134" rx="16" fill="#f0f9ff" stroke="#0284c7" stroke-width="2.2"/>
+  <g transform="translate(508, 239)" fill="none" stroke="#0284c7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="10" cy="10" r="8"/>
+    <ellipse cx="10" cy="10" rx="3.8" ry="8"/>
+    <line x1="2" y1="10" x2="18" y2="10"/>
+  </g>
+  <text x="536" y="255" class="sans" font-size="16" font-weight="700" fill="#0f172a">Direct Browsers</text>
+  <text x="508" y="286" class="sans" font-size="13.5" font-weight="600" fill="#334155">Same :443 port</text>
+  <text x="508" y="310" class="sans" font-size="13.5" font-weight="500" fill="#334155">No client cert needed</text>
+  <rect x="508" y="322" width="178" height="24" rx="12" fill="#0284c7"/>
+  <text x="597" y="338.5" text-anchor="middle" class="sans" font-size="12.5" font-weight="700" fill="#ffffff">Uses Leaf's Own Room</text>
+
+  <!-- Arrows down into Leaves -->
+  <line x1="184" y1="356" x2="184" y2="388" stroke="#0d9488" stroke-width="2.4" marker-end="url(#arr-teal)"/>
+  <line x1="390" y1="356" x2="390" y2="388" stroke="#0d9488" stroke-width="2.4" marker-end="url(#arr-teal)"/>
+  <line x1="597" y1="356" x2="597" y2="388" stroke="#0284c7" stroke-width="2.2" stroke-dasharray="6 4" marker-end="url(#arr-blue)"/>
+
+  <!-- TIER 2: Traffic-Weighted Leaves + Live Re-Benchmarking -->
+  <rect x="16" y="392" width="688" height="266" rx="16" fill="#f0fdfa" stroke="#0d9488" stroke-width="2.2"/>
+  <rect x="34" y="408" width="286" height="28" rx="14" fill="#0f766e"/>
+  <text x="177" y="426.5" text-anchor="middle" class="sans" font-size="12.5" font-weight="700" letter-spacing="0.6" fill="#ffffff">TIER 2 · TRAFFIC-WEIGHTED LEAVES</text>
+  <text x="336" y="427" class="sans" font-size="14" font-weight="600" fill="#0f766e">Proportional capacity per active edge</text>
+
+  <rect x="34" y="450" width="318" height="106" rx="12" fill="#ffffff" stroke="#0d9488" stroke-width="1.8"/>
+  <text x="52" y="478" class="mono" font-size="16" font-weight="700" fill="#0f172a">Leaf i-01</text>
+  <text x="158" y="478" class="sans" font-size="13.5" font-weight="600" fill="#0f766e">Host Gate &amp; Origin</text>
+  <text x="52" y="506" class="sans" font-size="13.5" font-weight="500" fill="#334155">• HopPriority &gt; Hop &gt; Direct</text>
+  <text x="52" y="530" class="sans" font-size="13.5" font-weight="500" fill="#334155">• Shares sized by edge demand</text>
+
+  <rect x="368" y="450" width="318" height="106" rx="12" fill="#ffffff" stroke="#0d9488" stroke-width="1.8"/>
+  <text x="386" y="478" class="mono" font-size="16" font-weight="700" fill="#0f172a">Leaf i-02</text>
+  <text x="492" y="478" class="sans" font-size="13.5" font-weight="600" fill="#0f766e">Host Gate &amp; Origin</text>
+  <text x="386" y="506" class="sans" font-size="13.5" font-weight="500" fill="#334155">• Full leaf → 503 Backpressure</text>
+  <text x="386" y="530" class="sans" font-size="13.5" font-weight="500" fill="#334155">• Edge retries bodyless on sibling</text>
+
+  <!-- Live Drained Re-Benchmarking Strip -->
+  <rect x="34" y="570" width="652" height="72" rx="12" fill="#0f172a"/>
+  <g transform="translate(50, 585)" fill="none" stroke="#c4b5fd" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3 16 A9 9 0 1 1 19 16"/>
+    <line x1="11" y1="15" x2="15.5" y2="9"/>
+    <circle cx="11" cy="15" r="1.5" fill="#c4b5fd"/>
+  </g>
+  <text x="80" y="601" class="sans" font-size="15.5" font-weight="700" fill="#ffffff">Drained Live Re-Benchmarking</text>
+  <rect x="486" y="581" width="184" height="26" rx="13" fill="#7c3aed"/>
+  <text x="578" y="598.5" text-anchor="middle" class="sans" font-size="12.5" font-weight="700" fill="#ffffff">409 Last-Leaf Guard</text>
+  <text x="52" y="627" class="mono" font-size="12.5" fill="#cbd5e1">Drains leaf → runs lemmings → updates capacity.json live</text>
+
+  <!-- BOTTOM PANEL: Zero-Downtime Fast-Lane Ops -->
+  <rect x="16" y="676" width="688" height="192" rx="16" fill="#fffbeb" stroke="#d97706" stroke-width="2.2"/>
+  <g transform="translate(36, 691)" fill="none" stroke="#b45309" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <polygon points="12,2 4,13 11,13 10,21 18,10 11,10"/>
+  </g>
+  <text x="64" y="710" class="sans" font-size="17.5" font-weight="700" fill="#0f172a">Zero-Downtime Fast-Lane Operations (x402)</text>
+
+  <rect x="34" y="730" width="208" height="120" rx="12" fill="#ffffff" stroke="#d97706" stroke-width="1.8"/>
+  <rect x="46" y="742" width="184" height="26" rx="13" fill="#b45309"/>
+  <text x="138" y="759.5" text-anchor="middle" class="sans" font-size="12.5" font-weight="700" fill="#ffffff">1 · Online Reconcile</text>
+  <text x="138" y="794" text-anchor="middle" class="sans" font-size="13.5" font-weight="600" fill="#0f172a">Settle pending receipts</text>
+  <text x="138" y="817" text-anchor="middle" class="sans" font-size="13" font-weight="500" fill="#334155">via Portal/API · no restart</text>
+
+  <rect x="256" y="730" width="208" height="120" rx="12" fill="#ffffff" stroke="#db2777" stroke-width="1.8"/>
+  <rect x="268" y="742" width="184" height="26" rx="13" fill="#be185d"/>
+  <text x="360" y="759.5" text-anchor="middle" class="sans" font-size="12.5" font-weight="700" fill="#ffffff">2 · 80% / 95% Alerts</text>
+  <text x="360" y="794" text-anchor="middle" class="sans" font-size="13.5" font-weight="600" fill="#0f172a">Journal headroom +</text>
+  <text x="360" y="817" text-anchor="middle" class="sans" font-size="13" font-weight="500" fill="#334155">O(1) LRU wallet limiter</text>
+
+  <rect x="478" y="730" width="208" height="120" rx="12" fill="#ffffff" stroke="#0d9488" stroke-width="1.8"/>
+  <rect x="490" y="742" width="184" height="26" rx="13" fill="#0f766e"/>
+  <text x="582" y="759.5" text-anchor="middle" class="sans" font-size="12.5" font-weight="700" fill="#ffffff">3 · Audited Archival</text>
+  <text x="582" y="794" text-anchor="middle" class="mono" font-size="12.5" font-weight="700" fill="#0f172a">archive-receipts</text>
+  <text x="582" y="817" text-anchor="middle" class="sans" font-size="13" font-weight="500" fill="#334155">SHA-256 + audit.jsonl</text>
+</svg>

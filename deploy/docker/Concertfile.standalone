@@ -1,0 +1,16 @@
+# Sample Concertfile for deploy/docker/compose.standalone.yml
+{
+    listen :8080
+    data_dir /var/lib/concert/data
+    portal_listen 0.0.0.0:8081
+    portal_allow 127.0.0.1/32, ::1/128, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+    upstream_timeout 60s
+}
+
+localhost, 127.0.0.1 {
+    upstream http://origin:3000
+    cap 20
+    priority_cap 4
+    max_queue 500
+    bypass /healthz
+}

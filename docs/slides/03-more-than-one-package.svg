@@ -1,0 +1,148 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 640" width="1200" height="640">
+  <defs>
+    <style>
+      .sans { font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+      .mono { font-family: 'SF Mono', 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    </style>
+    <marker id="arr-purple" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#8b5cf6"/>
+    </marker>
+    <marker id="arr-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#1a8cd8"/>
+    </marker>
+    <marker id="arr-teal" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#0d9488"/>
+    </marker>
+  </defs>
+
+  <!-- Header -->
+  <rect x="28" y="18" width="292" height="28" rx="14" fill="#0f766e"/>
+  <text x="174" y="36" text-anchor="middle" class="sans" font-size="11.5" font-weight="700" letter-spacing="1.0" fill="#ffffff">03 · MORE THAN JUST ONE PACKAGE</text>
+  <text x="334" y="37" class="sans" font-size="14" font-weight="600" fill="#747c90">Three independent Go modules dividing work cleanly by domain</text>
+  <rect x="1044" y="18" width="128" height="28" rx="14" fill="#8b5cf6" fill-opacity="0.12" stroke="#8b5cf6" stroke-width="1.5"/>
+  <text x="1108" y="36" text-anchor="middle" class="mono" font-size="11.5" font-weight="700" fill="#8b5cf6">concert v0.3.0</text>
+  <line x1="28" y1="60" x2="1172" y2="60" stroke="#747c90" stroke-opacity="0.25" stroke-width="1"/>
+
+  <!-- LAYER 3 (Top): concert suite -->
+  <rect x="28" y="80" width="858" height="148" rx="14" fill="#8b5cf6" fill-opacity="0.07" stroke="#8b5cf6" stroke-width="2"/>
+  <rect x="46" y="96" width="272" height="24" rx="12" fill="#7c3aed"/>
+  <text x="182" y="112" text-anchor="middle" class="sans" font-size="10.5" font-weight="700" letter-spacing="0.9" fill="#ffffff">LAYER 3 · FRONT-DOOR APPLICATIONS</text>
+  <rect x="330" y="96" width="268" height="24" rx="12" fill="#252136"/>
+  <text x="464" y="112" text-anchor="middle" class="mono" font-size="10.8" font-weight="600" fill="#ddd6fe">github.com/andreimerlescu/concert</text>
+
+  <!-- 4 binary boxes -->
+  <rect x="48" y="134" width="194" height="76" rx="10" fill="#8b5cf6" fill-opacity="0.11" stroke="#8b5cf6" stroke-width="1.5"/>
+  <text x="145" y="160" text-anchor="middle" class="mono" font-size="13" font-weight="700" fill="#8b5cf6">concert</text>
+  <text x="145" y="180" text-anchor="middle" class="sans" font-size="11" fill="#747c90">HTTP/3, TLS, static offload</text>
+  <text x="145" y="196" text-anchor="middle" class="sans" font-size="11" fill="#747c90">Multi-vhost &amp; Admin Portal</text>
+
+  <rect x="256" y="134" width="194" height="76" rx="10" fill="#1a8cd8" fill-opacity="0.11" stroke="#1a8cd8" stroke-width="1.5"/>
+  <text x="353" y="160" text-anchor="middle" class="mono" font-size="13" font-weight="700" fill="#1a8cd8">wpconcert</text>
+  <text x="353" y="180" text-anchor="middle" class="sans" font-size="11" fill="#747c90">FastCGI 1.0 &amp; micro-cache</text>
+  <text x="353" y="196" text-anchor="middle" class="sans" font-size="11" fill="#747c90">WordPress doctor &amp; init</text>
+
+  <rect x="464" y="134" width="194" height="76" rx="10" fill="#d9468f" fill-opacity="0.11" stroke="#d9468f" stroke-width="1.5"/>
+  <text x="561" y="160" text-anchor="middle" class="mono" font-size="13" font-weight="700" fill="#d9468f">econcert</text>
+  <text x="561" y="180" text-anchor="middle" class="sans" font-size="11" fill="#747c90">Edge/leaf mesh &amp; mTLS</text>
+  <text x="561" y="196" text-anchor="middle" class="sans" font-size="11" fill="#747c90">RBAC, Redis HA &amp; Fast-Lane</text>
+
+  <rect x="672" y="134" width="194" height="76" rx="10" fill="#0d9488" fill-opacity="0.11" stroke="#0d9488" stroke-width="1.5"/>
+  <text x="769" y="160" text-anchor="middle" class="mono" font-size="13" font-weight="700" fill="#0d9488">concert-bench</text>
+  <text x="769" y="180" text-anchor="middle" class="sans" font-size="11" fill="#747c90">Lemmings load crawler</text>
+  <text x="769" y="196" text-anchor="middle" class="sans" font-size="11" fill="#747c90">p95 SLA &amp; capacity.json</text>
+
+  <!-- Dependency arrows: Layer 3 -> Layer 2 (and direct sema) -->
+  <line x1="350" y1="228" x2="350" y2="274" stroke="#8b5cf6" stroke-width="2.2" marker-end="url(#arr-purple)"/>
+  <rect x="242" y="239" width="216" height="22" rx="11" fill="#252136"/>
+  <text x="350" y="254" text-anchor="middle" class="mono" font-size="10.5" font-weight="600" fill="#ddd6fe">depends on room (queue &amp; passes)</text>
+
+  <!-- Direct dependency from concert -> sema on right edge of stack -->
+  <path d="M 790 228 L 790 250 L 870 250 L 870 500 L 852 500" fill="none" stroke="#0d9488" stroke-width="1.9" stroke-dasharray="5 4" marker-end="url(#arr-teal)"/>
+  <rect x="520" y="239" width="252" height="22" rx="11" fill="#252136"/>
+  <text x="646" y="254" text-anchor="middle" class="mono" font-size="10.5" font-weight="600" fill="#99f6e4">+ direct sema (assets &amp; streams)</text>
+
+  <!-- LAYER 2 (Middle): room -->
+  <rect x="28" y="278" width="820" height="136" rx="14" fill="#1a8cd8" fill-opacity="0.07" stroke="#1a8cd8" stroke-width="2"/>
+  <rect x="46" y="294" width="250" height="24" rx="12" fill="#0369a1"/>
+  <text x="171" y="310" text-anchor="middle" class="sans" font-size="10.5" font-weight="700" letter-spacing="0.9" fill="#ffffff">LAYER 2 · WAITING ROOM ENGINE</text>
+  <rect x="308" y="294" width="298" height="24" rx="12" fill="#252136"/>
+  <text x="457" y="310" text-anchor="middle" class="mono" font-size="10.8" font-weight="600" fill="#7dd3fc">github.com/andreimerlescu/room@v1.8.0</text>
+
+  <rect x="48" y="332" width="184" height="66" rx="9" fill="#1a8cd8" fill-opacity="0.10" stroke="#1a8cd8" stroke-width="1.4"/>
+  <text x="140" y="357" text-anchor="middle" class="sans" font-size="12" font-weight="700" fill="#1a8cd8">FIFO &amp; Rank Queue</text>
+  <text x="140" y="376" text-anchor="middle" class="sans" font-size="10.8" fill="#747c90">O(log N) treap &amp; ghost store</text>
+
+  <rect x="246" y="332" width="184" height="66" rx="9" fill="#1a8cd8" fill-opacity="0.10" stroke="#1a8cd8" stroke-width="1.4"/>
+  <text x="338" y="357" text-anchor="middle" class="sans" font-size="12" font-weight="700" fill="#1a8cd8">Tickets &amp; Polling</text>
+  <text x="338" y="376" text-anchor="middle" class="sans" font-size="10.8" fill="#747c90">Parallel RLock /queue/status</text>
+
+  <rect x="444" y="332" width="184" height="66" rx="9" fill="#1a8cd8" fill-opacity="0.10" stroke="#1a8cd8" stroke-width="1.4"/>
+  <text x="536" y="357" text-anchor="middle" class="sans" font-size="12" font-weight="700" fill="#1a8cd8">Lifecycle &amp; Compaction</text>
+  <text x="536" y="376" text-anchor="middle" class="sans" font-size="10.8" fill="#747c90">Lazy min-heap · TTL updates</text>
+
+  <rect x="642" y="332" width="186" height="66" rx="9" fill="#1a8cd8" fill-opacity="0.10" stroke="#1a8cd8" stroke-width="1.4"/>
+  <text x="735" y="357" text-anchor="middle" class="sans" font-size="12" font-weight="700" fill="#1a8cd8">Stateless Ed25519</text>
+  <text x="735" y="376" text-anchor="middle" class="sans" font-size="10.8" fill="#747c90">rm1 passes · Verify-only mode</text>
+
+  <!-- Dependency arrow: Layer 2 -> Layer 1 -->
+  <line x1="438" y1="414" x2="438" y2="462" stroke="#1a8cd8" stroke-width="2.2" marker-end="url(#arr-blue)"/>
+  <rect x="318" y="427" width="240" height="22" rx="11" fill="#252136"/>
+  <text x="438" y="442" text-anchor="middle" class="mono" font-size="10.5" font-weight="600" fill="#7dd3fc">depends on sema (capacity slots)</text>
+
+  <!-- LAYER 1 (Bottom): sema -->
+  <rect x="28" y="466" width="820" height="142" rx="14" fill="#0d9488" fill-opacity="0.07" stroke="#0d9488" stroke-width="2"/>
+  <rect x="46" y="482" width="264" height="24" rx="12" fill="#0f766e"/>
+  <text x="178" y="498" text-anchor="middle" class="sans" font-size="10.5" font-weight="700" letter-spacing="0.9" fill="#ffffff">LAYER 1 · CONCURRENCY PRIMITIVE</text>
+  <rect x="322" y="482" width="298" height="24" rx="12" fill="#252136"/>
+  <text x="471" y="498" text-anchor="middle" class="mono" font-size="10.8" font-weight="600" fill="#99f6e4">github.com/andreimerlescu/sema@v1.3.0</text>
+
+  <rect x="48" y="520" width="184" height="70" rx="9" fill="#0d9488" fill-opacity="0.10" stroke="#0d9488" stroke-width="1.4"/>
+  <text x="140" y="545" text-anchor="middle" class="sans" font-size="12" font-weight="700" fill="#0d9488">Bounded Slots</text>
+  <text x="140" y="564" text-anchor="middle" class="sans" font-size="10.8" fill="#747c90">Zero-alloc fast path</text>
+  <text x="140" y="580" text-anchor="middle" class="sans" font-size="10.8" fill="#747c90">Context-aware Acquire</text>
+
+  <rect x="246" y="520" width="184" height="70" rx="9" fill="#0d9488" fill-opacity="0.10" stroke="#0d9488" stroke-width="1.4"/>
+  <text x="338" y="545" text-anchor="middle" class="sans" font-size="12" font-weight="700" fill="#0d9488">PrioritySemaphore</text>
+  <text x="338" y="564" text-anchor="middle" class="sans" font-size="10.8" fill="#747c90">4 O(1) priority tiers</text>
+  <text x="338" y="580" text-anchor="middle" class="sans" font-size="10.8" fill="#747c90">Strict FIFO within tier</text>
+
+  <rect x="444" y="520" width="184" height="70" rx="9" fill="#0d9488" fill-opacity="0.10" stroke="#0d9488" stroke-width="1.4"/>
+  <text x="536" y="545" text-anchor="middle" class="sans" font-size="12" font-weight="700" fill="#0d9488">Non-Draining SetCap</text>
+  <text x="536" y="564" text-anchor="middle" class="sans" font-size="10.8" fill="#747c90">Live resize without</text>
+  <text x="536" y="580" text-anchor="middle" class="sans" font-size="10.8" fill="#747c90">in-flight over-admission</text>
+
+  <rect x="642" y="520" width="186" height="70" rx="9" fill="#0d9488" fill-opacity="0.10" stroke="#0d9488" stroke-width="1.4"/>
+  <text x="735" y="545" text-anchor="middle" class="sans" font-size="12" font-weight="700" fill="#0d9488">Telemetry Hooks</text>
+  <text x="735" y="564" text-anchor="middle" class="sans" font-size="10.8" fill="#747c90">EWMA utilization &amp;</text>
+  <text x="735" y="580" text-anchor="middle" class="sans" font-size="10.8" fill="#747c90">lock-free wait signals</text>
+
+  <!-- Right Column: Modular Design Benefits -->
+  <rect x="906" y="80" width="266" height="528" rx="14" fill="#747c90" fill-opacity="0.06" stroke="#747c90" stroke-width="1.6"/>
+  <rect x="926" y="98" width="168" height="24" rx="12" fill="#52586b"/>
+  <text x="1010" y="114" text-anchor="middle" class="sans" font-size="10.5" font-weight="700" letter-spacing="0.9" fill="#ffffff">DOMAIN SEPARATION</text>
+
+  <rect x="926" y="140" width="226" height="130" rx="11" fill="#8b5cf6" fill-opacity="0.09" stroke="#8b5cf6" stroke-width="1.5"/>
+  <rect x="940" y="154" width="174" height="20" rx="10" fill="#7c3aed"/>
+  <text x="1027" y="168" text-anchor="middle" class="sans" font-size="10" font-weight="700" fill="#ffffff">1 · SINGLE RESPONSIBILITY</text>
+  <text x="942" y="196" class="sans" font-size="12" font-weight="600" fill="#747c90">Each module owns one</text>
+  <text x="942" y="215" class="sans" font-size="12" font-weight="600" fill="#747c90">domain: slots (sema),</text>
+  <text x="942" y="234" class="sans" font-size="12" font-weight="600" fill="#747c90">queues (room), and HTTP</text>
+  <text x="942" y="253" class="sans" font-size="12" font-weight="600" fill="#747c90">front-door routing (concert).</text>
+
+  <rect x="926" y="288" width="226" height="134" rx="11" fill="#1a8cd8" fill-opacity="0.09" stroke="#1a8cd8" stroke-width="1.5"/>
+  <rect x="940" y="302" width="178" height="20" rx="10" fill="#0369a1"/>
+  <text x="1029" y="316" text-anchor="middle" class="sans" font-size="10" font-weight="700" fill="#ffffff">2 · OPEN SOURCE BUILDING</text>
+  <text x="942" y="344" class="sans" font-size="12" font-weight="600" fill="#747c90">sema and room are stand-</text>
+  <text x="942" y="363" class="sans" font-size="12" font-weight="600" fill="#747c90">alone Go modules any app</text>
+  <text x="942" y="382" class="sans" font-size="12" font-weight="600" fill="#747c90">can import without pulling</text>
+  <text x="942" y="401" class="sans" font-size="12" font-weight="600" fill="#747c90">in the full proxy binary.</text>
+
+  <rect x="926" y="440" width="226" height="146" rx="11" fill="#0d9488" fill-opacity="0.09" stroke="#0d9488" stroke-width="1.5"/>
+  <rect x="940" y="454" width="174" height="20" rx="10" fill="#0f766e"/>
+  <text x="1027" y="468" text-anchor="middle" class="sans" font-size="10" font-weight="700" fill="#ffffff">3 · CLEAN UPGRADE PATH</text>
+  <text x="942" y="496" class="sans" font-size="12" font-weight="600" fill="#747c90">Upgrading sema or room</text>
+  <text x="942" y="515" class="sans" font-size="12" font-weight="600" fill="#747c90">improves concert, wpconcert,</text>
+  <text x="942" y="534" class="sans" font-size="12" font-weight="600" fill="#747c90">and econcert at once with</text>
+  <text x="942" y="553" class="sans" font-size="12" font-weight="600" fill="#747c90">independent race &amp; fuzz</text>
+  <text x="942" y="572" class="sans" font-size="12" font-weight="600" fill="#747c90">test suites at every layer.</text>
+</svg>

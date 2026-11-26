@@ -1,0 +1,130 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 740" width="720" height="740">
+  <defs>
+    <style>
+      .sans { font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+      .mono { font-family: 'SF Mono', 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    </style>
+    <marker id="arr-slate" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#475569"/>
+    </marker>
+    <marker id="arr-purple" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#7c3aed"/>
+    </marker>
+    <marker id="arr-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#0284c7"/>
+    </marker>
+  </defs>
+
+  <!-- TOP ZONE: BEFORE (Multi-Proxy Stack) -->
+  <rect x="16" y="16" width="688" height="190" rx="16" fill="#f8fafc" stroke="#64748b" stroke-width="2" stroke-dasharray="7 5"/>
+  <rect x="34" y="32" width="246" height="28" rx="14" fill="#475569"/>
+  <text x="157" y="51" text-anchor="middle" class="sans" font-size="12.5" font-weight="700" letter-spacing="0.8" fill="#ffffff">BEFORE · EXTRA PROXY HOP</text>
+
+  <!-- 4-step compact horizontal chain -->
+  <rect x="34" y="76" width="112" height="84" rx="12" fill="#f0f9ff" stroke="#0284c7" stroke-width="2"/>
+  <text x="90" y="112" text-anchor="middle" class="sans" font-size="15.5" font-weight="700" fill="#0f172a">Internet</text>
+  <text x="90" y="136" text-anchor="middle" class="sans" font-size="13" font-weight="500" fill="#334155">Traffic spikes</text>
+
+  <line x1="146" y1="118" x2="174" y2="118" stroke="#475569" stroke-width="2.2" marker-end="url(#arr-slate)"/>
+
+  <rect x="178" y="76" width="206" height="84" rx="12" fill="#fffbeb" stroke="#d97706" stroke-width="2"/>
+  <text x="281" y="111" text-anchor="middle" class="mono" font-size="14" font-weight="700" fill="#0f172a">nginx / Caddy</text>
+  <text x="281" y="136" text-anchor="middle" class="mono" font-size="13" font-weight="600" fill="#b45309">Apache / HAProxy</text>
+
+  <line x1="384" y1="118" x2="412" y2="118" stroke="#475569" stroke-width="2.2" marker-end="url(#arr-slate)"/>
+
+  <rect x="416" y="76" width="144" height="84" rx="12" fill="#f5f3ff" stroke="#7c3aed" stroke-width="2"/>
+  <text x="488" y="111" text-anchor="middle" class="mono" font-size="14.5" font-weight="700" fill="#0f172a">concert</text>
+  <text x="488" y="136" text-anchor="middle" class="sans" font-size="13" font-weight="500" fill="#334155">Queue only</text>
+
+  <line x1="560" y1="118" x2="588" y2="118" stroke="#475569" stroke-width="2.2" marker-end="url(#arr-slate)"/>
+
+  <rect x="592" y="76" width="94" height="84" rx="12" fill="#f0fdfa" stroke="#0d9488" stroke-width="2"/>
+  <text x="639" y="111" text-anchor="middle" class="sans" font-size="15.5" font-weight="700" fill="#0f172a">Origin</text>
+  <text x="639" y="136" text-anchor="middle" class="sans" font-size="13" font-weight="500" fill="#334155">Small host</text>
+
+  <text x="360" y="189" text-anchor="middle" class="sans" font-size="13.5" font-weight="600" fill="#475569">Extra network hop  ·  Two config layers to run and debug</text>
+
+  <!-- TRANSITION CONNECTOR -->
+  <line x1="360" y1="206" x2="360" y2="274" stroke="#7c3aed" stroke-width="3" marker-end="url(#arr-purple)"/>
+  <rect x="174" y="224" width="372" height="32" rx="16" fill="#7c3aed"/>
+  <text x="360" y="245" text-anchor="middle" class="sans" font-size="13.5" font-weight="700" fill="#ffffff">v0.3.0  ·  Direct Front Door (Zero Extra Proxy)</text>
+
+  <!-- BOTTOM ZONE: NOW (Concert v0.3.0 4-Binary Suite) -->
+  <rect x="16" y="280" width="688" height="444" rx="16" fill="#f5f3ff" stroke="#7c3aed" stroke-width="2.2"/>
+
+  <!-- Direct Entry Bar -->
+  <rect x="34" y="298" width="652" height="58" rx="12" fill="#f0f9ff" stroke="#0284c7" stroke-width="2"/>
+  <!-- Globe icon -->
+  <g transform="translate(54, 315)" fill="none" stroke="#0284c7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="11" cy="11" r="9"/>
+    <ellipse cx="11" cy="11" rx="4.2" ry="9"/>
+    <line x1="2" y1="11" x2="20" y2="11"/>
+  </g>
+  <text x="88" y="332" class="sans" font-size="17" font-weight="700" fill="#0f172a">Internet (:80 / :443)</text>
+  <rect x="278" y="313" width="390" height="28" rx="14" fill="#0f172a"/>
+  <text x="473" y="331.5" text-anchor="middle" class="mono" font-size="12.5" font-weight="700" fill="#7dd3fc">ACME TLS 1.3 · HTTP/2 &amp; HTTP/3 · Multi-Vhost</text>
+
+  <!-- Branch arrows down to 2x2 grid -->
+  <line x1="360" y1="356" x2="360" y2="372" stroke="#0284c7" stroke-width="2.2"/>
+  <line x1="193" y1="372" x2="527" y2="372" stroke="#0284c7" stroke-width="2.2"/>
+  <line x1="193" y1="372" x2="193" y2="390" stroke="#0284c7" stroke-width="2.2" marker-end="url(#arr-blue)"/>
+  <line x1="527" y1="372" x2="527" y2="390" stroke="#0284c7" stroke-width="2.2" marker-end="url(#arr-blue)"/>
+
+  <!-- Card 1: concert -->
+  <rect x="34" y="394" width="318" height="148" rx="14" fill="#ffffff" stroke="#7c3aed" stroke-width="2"/>
+  <!-- Queue bars icon -->
+  <g transform="translate(52, 412)" fill="none" stroke="#7c3aed" stroke-width="2.4" stroke-linecap="round">
+    <line x1="2" y1="16" x2="2" y2="7"/>
+    <line x1="8" y1="16" x2="8" y2="2"/>
+    <line x1="14" y1="16" x2="14" y2="5"/>
+    <line x1="20" y1="16" x2="20" y2="10"/>
+  </g>
+  <text x="84" y="427" class="mono" font-size="18" font-weight="700" fill="#0f172a">1 · concert</text>
+  <text x="52" y="458" class="sans" font-size="14.5" font-weight="600" fill="#334155">Waiting room reverse proxy</text>
+  <text x="52" y="481" class="sans" font-size="13.5" font-weight="500" fill="#475569">FIFO queue, priority &amp; static offload</text>
+  <rect x="52" y="498" width="194" height="28" rx="14" fill="#7c3aed"/>
+  <text x="149" y="517" text-anchor="middle" class="sans" font-size="12.5" font-weight="700" fill="#ffffff">Core Front Door</text>
+
+  <!-- Card 2: wpconcert -->
+  <rect x="368" y="394" width="318" height="148" rx="14" fill="#ffffff" stroke="#0284c7" stroke-width="2"/>
+  <!-- Server icon -->
+  <g transform="translate(386, 411)" fill="none" stroke="#0284c7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="1" y="2" width="20" height="7" rx="2"/>
+    <rect x="1" y="12" width="20" height="7" rx="2"/>
+    <circle cx="5.5" cy="5.5" r="0.8" fill="#0284c7"/>
+    <circle cx="5.5" cy="15.5" r="0.8" fill="#0284c7"/>
+  </g>
+  <text x="418" y="427" class="mono" font-size="18" font-weight="700" fill="#0f172a">2 · wpconcert</text>
+  <text x="386" y="458" class="sans" font-size="14.5" font-weight="600" fill="#334155">Multi-host PHP &amp; WordPress</text>
+  <text x="386" y="481" class="sans" font-size="13.5" font-weight="500" fill="#475569">Direct FastCGI &amp; cart-safe cache</text>
+  <rect x="386" y="498" width="194" height="28" rx="14" fill="#0284c7"/>
+  <text x="483" y="517" text-anchor="middle" class="sans" font-size="12.5" font-weight="700" fill="#ffffff">PHP-FPM &amp; *cgi</text>
+
+  <!-- Card 3: econcert -->
+  <rect x="34" y="558" width="318" height="148" rx="14" fill="#ffffff" stroke="#db2777" stroke-width="2"/>
+  <!-- Shield icon -->
+  <g transform="translate(52, 574)" fill="none" stroke="#db2777" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M11 2 L19 5.5 V11.5 C19 16 15.5 19.5 11 21 C6.5 19.5 3 16 3 11.5 V5.5 Z"/>
+    <path d="M8 11.5 L10.2 13.8 L14.5 9.5"/>
+  </g>
+  <text x="84" y="591" class="mono" font-size="18" font-weight="700" fill="#0f172a">3 · econcert</text>
+  <text x="52" y="622" class="sans" font-size="14.5" font-weight="600" fill="#334155">Enterprise compliant edition</text>
+  <text x="52" y="645" class="sans" font-size="13.5" font-weight="500" fill="#475569">Edge/leaf mesh, mTLS &amp; Fast-Lane</text>
+  <rect x="52" y="662" width="194" height="28" rx="14" fill="#be185d"/>
+  <text x="149" y="681" text-anchor="middle" class="sans" font-size="12.5" font-weight="700" fill="#ffffff">HA &amp; Compliance</text>
+
+  <!-- Card 4: concert-bench -->
+  <rect x="368" y="558" width="318" height="148" rx="14" fill="#ffffff" stroke="#0d9488" stroke-width="2"/>
+  <!-- Gauge icon -->
+  <g transform="translate(386, 575)" fill="none" stroke="#0d9488" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3 16 A9 9 0 1 1 19 16"/>
+    <line x1="11" y1="15" x2="15.5" y2="9"/>
+    <circle cx="11" cy="15" r="1.5" fill="#0d9488"/>
+  </g>
+  <text x="418" y="591" class="mono" font-size="18" font-weight="700" fill="#0f172a">4 · concert-bench</text>
+  <text x="386" y="622" class="sans" font-size="14.5" font-weight="600" fill="#334155">Capacity benchmark utility</text>
+  <text x="386" y="645" class="sans" font-size="13.5" font-weight="500" fill="#475569">Lemmings finds real p95 host cap</text>
+  <rect x="386" y="662" width="194" height="28" rx="14" fill="#0f766e"/>
+  <text x="483" y="681" text-anchor="middle" class="sans" font-size="12.5" font-weight="700" fill="#ffffff">Keeps Hosts Healthy</text>
+</svg>

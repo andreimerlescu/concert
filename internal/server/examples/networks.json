@@ -1,0 +1,18 @@
+{
+  "xrpl:1": {
+    "rpc": "https://s.altnet.rippletest.net:51234/",
+    "max_fee": "50000"
+  },
+  "stellar:testnet": {
+    "rpc": "https://soroban-testnet.stellar.org",
+    "horizon": "https://horizon-testnet.stellar.org",
+    "max_fee": "50000"
+  },
+  "hedera:testnet": {
+    "mirror": "https://testnet.mirrornode.hedera.com",
+    "max_fee_tinybars": "100000000"
+  },
+  "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1": {
+    "rpc": "https://api.devnet.solana.com"
+  }
+}

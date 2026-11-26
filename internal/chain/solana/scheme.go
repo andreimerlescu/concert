@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"strconv"
 	"time"
 
 	"github.com/andreimerlescu/concert/internal/chain/httpx"
@@ -135,8 +134,20 @@ func New(network, url string) *Scheme {
 }
 
 func (s *Scheme) check(ctx context.Context, req x402.Requirements) error {
-	if req.Scheme != SchemeName || req.Asset != "SOL" || req.Network != s.Network {
-		return errors.New("wrong network or scheme")
+	if req.Network != s.Network {
+		return errors.New("wrong network")
+	}
+	if req.Asset == "SOL" {
+		if req.Scheme != SchemeName && req.Scheme != ExactSchemeName {
+			return errors.New("wrong scheme for SOL")
+		}
+	} else {
+		if req.Scheme != ExactSchemeName {
+			return errors.New("SPL token payments require exact scheme")
+		}
+		if _, err := ParsePublicKey(req.Asset); err != nil {
+			return errors.New("invalid SPL mint asset")
+		}
 	}
 	n, err := s.RPC.Network(ctx)
 	if err != nil {
@@ -184,7 +195,7 @@ func (s *Scheme) Verify(ctx context.Context, p x402.Payload, req x402.Requiremen
 	if err != nil {
 		return invalid
 	}
-	t, err := Inspect(enc, req)
+	t, err := InspectPayment(enc, req)
 	if err != nil {
 		return invalid
 	}
@@ -208,7 +219,7 @@ func (s *Scheme) Settle(ctx context.Context, p x402.Payload, req x402.Requiremen
 	if err != nil {
 		return x402.SettleResponse{}, err
 	}
-	t, err := Inspect(enc, req)
+	t, err := InspectPayment(enc, req)
 	if err != nil {
 		return x402.SettleResponse{}, err
 	}
@@ -251,32 +262,10 @@ func (s *Scheme) Settle(ctx context.Context, p x402.Payload, req x402.Requiremen
 	}
 }
 
-// Prepare returns the unsigned transfer a browser wallet signs. Concert
-// never holds the payer's key.
+// Prepare returns the unsigned transfer (native SOL or SPL/Token-2022) a
+// browser wallet signs. Concert never holds the payer's key.
 func (s *Scheme) Prepare(ctx context.Context, address string, req x402.Requirements) ([]byte, error) {
-	if err := s.check(ctx, req); err != nil {
-		return nil, err
-	}
-	from, err := ParsePublicKey(address)
-	if err != nil {
-		return nil, err
-	}
-	to, err := ParsePublicKey(req.PayTo)
-	if err != nil {
-		return nil, err
-	}
-	if from == to {
-		return nil, errors.New("self-payment is not accepted")
-	}
-	lamports, err := strconv.ParseUint(req.Amount, 10, 64)
-	if err != nil {
-		return nil, err
-	}
-	bh, err := s.RPC.LatestBlockhash(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return NewTransfer(from, to, lamports, bh), nil
+	return s.PreparePayment(ctx, address, req)
 }
 
 // Finalized reports whether signature finalized successfully (reconciliation).
@@ -298,7 +287,7 @@ func (s *Scheme) Reconcile(ctx context.Context, p x402.Payload, req x402.Require
 	if err != nil {
 		return "", err
 	}
-	t, err := Inspect(enc, req)
+	t, err := InspectPayment(enc, req)
 	if err != nil {
 		return "", err
 	}
