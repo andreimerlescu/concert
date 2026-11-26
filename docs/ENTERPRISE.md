@@ -2,7 +2,7 @@
 
 > **Edition Note (`v0.3.0`+):** All enterprise features documented in this guide (RBAC/MFA/SSO, hash-chained audit logs, `-enterprise-hardened`, `concert-kv` HA shared queue & ban sync, edge/leaf mesh + mTLS, email digests, and 100% crypto-only 4-chain x402 / Direct QR / NFT Fast-Lane & non-custodial AI Agent Pass Bidding across **XRPL**, **Stellar**, **Hedera**, and **Solana**) ship in the open-source **`econcert`** binary (`go build -tags "wordpress,enterprise" ./cmd/econcert`) alongside companion daemons **`concert-kv`**, **`concert-cache`**, **`concert-watchdog`**, **`bench-concert`**, and **`concert-client`** under **Apache-2.0 with zero license keys**. Core `concert` and `wpconcert` compile without blockchain/gRPC/enterprise mesh transitive dependencies.
 >
-> See also: [Deployment Tutorials](tutorials/README.md) · [Operations & Queue Recovery Runbook](OPERATIONS.md) · [Client SDKs](../clients/) · [33-Point Production Readiness Scorecard](../todo/PRODUCTION-33.md)
+> See also: [Deployment Tutorials](tutorials/README.md) · [Operations & Queue Recovery Runbook](OPERATIONS.md) · [Client SDKs](../clients/)
 
 This guide documents Concert's enterprise security, observability, high-availability, and privacy controls and maps them to common enterprise frameworks (SOC 2 Type II, ISO/IEC 27001, PCI DSS v4.0.1, HIPAA, GDPR/CCPA, and FIPS 140-3).
 

@@ -137,7 +137,7 @@ func (s *Scheme) FindDirectPaymentSince(ctx context.Context, from, to, asset, mi
 			continue
 		}
 		if requireTag {
-			if e.DestinationTag == nil || *e.DestinationTag != destTag {
+			if gotTag, ok := e.DestinationTag.Get(); !ok || gotTag != destTag {
 				continue
 			}
 		}

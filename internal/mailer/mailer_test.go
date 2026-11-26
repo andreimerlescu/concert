@@ -26,6 +26,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/andreimerlescu/concert/internal/opt"
 )
 
 // ─── Cadence & Config Validation ─────────────────────────────────────────────
@@ -133,7 +135,7 @@ func TestSecretStore_AESGCMRotationTamperAndPrecedence(t *testing.T) {
 	}
 	p1 := "smtp-secret-value"
 	r1 := "re_live_123456789"
-	if err := st.Update(SecretsPatch{SMTPPass: &p1, ResendAPIKey: &r1}); err != nil {
+	if err := st.Update(SecretsPatch{SMTPPass: opt.Some(p1), ResendAPIKey: opt.Some(r1)}); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
 
@@ -171,7 +173,7 @@ func TestSecretStore_AESGCMRotationTamperAndPrecedence(t *testing.T) {
 
 	// Next write re-encrypts under key2; loading with key2 alone succeeds.
 	sp := "sp_live_abcdef"
-	if err := st2.Update(SecretsPatch{SendPandaAPIKey: &sp}); err != nil {
+	if err := st2.Update(SecretsPatch{SendPandaAPIKey: opt.Some(sp)}); err != nil {
 		t.Fatalf("re-encrypt Update: %v", err)
 	}
 	st3, err := NewSecretStore(dir, key2, nil, true, "", Secrets{})
@@ -206,6 +208,157 @@ func TestSecretStore_AESGCMRotationTamperAndPrecedence(t *testing.T) {
 	}
 	if _, err := os.Stat(secPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected email-secrets.json removed after Delete(all), got err=%v", err)
+	}
+}
+
+// TestSecretStore_PatchThreeStateSemantics verifies SecretsPatch three-state
+// opt.Option[string] behavior: None preserves existing credentials, Some("")
+// explicitly clears a credential (and deletes email-secrets.json once all are
+// empty), and Some(val) replaces the targeted credential.
+//
+// # Parameters
+//
+//   - t: Testing handle injected by go test.
+//
+// # Example
+//
+//	go test -v -run '^TestSecretStore_PatchThreeStateSemantics$' ./internal/mailer
+//
+// # Used By
+//
+// Invoked by the Go test runner (`go test`); no direct Go callers.
+func TestSecretStore_PatchThreeStateSemantics(t *testing.T) {
+	dir := t.TempDir()
+	key := []byte("0123456789abcdef0123456789abcdef")
+
+	st, err := NewSecretStore(dir, key, nil, true, "", Secrets{})
+	if err != nil {
+		t.Fatalf("NewSecretStore: %v", err)
+	}
+
+	// Explicit update (Some(val)) stores all three credentials.
+	if err := st.Update(SecretsPatch{
+		SMTPPass:        opt.Some("smtp-v1"),
+		ResendAPIKey:    opt.Some("resend-v1"),
+		SendPandaAPIKey: opt.Some("panda-v1"),
+	}); err != nil {
+		t.Fatalf("initial Update: %v", err)
+	}
+
+	// None leaves existing credentials unchanged; Some(newVal) replaces only its field.
+	if err := st.Update(SecretsPatch{
+		SMTPPass: opt.Some("smtp-v2"),
+	}); err != nil {
+		t.Fatalf("partial Update: %v", err)
+	}
+	got := st.Resolve()
+	if got.SMTPPass != "smtp-v2" || got.ResendAPIKey != "resend-v1" || got.SendPandaAPIKey != "panda-v1" {
+		t.Fatalf("after partial Update: got %+v, want smtp-v2 / resend-v1 / panda-v1", got)
+	}
+
+	// All-None patch is a no-op that preserves stored secrets.
+	if err := st.Update(SecretsPatch{}); err != nil {
+		t.Fatalf("empty SecretsPatch Update: %v", err)
+	}
+	got = st.Resolve()
+	if got.SMTPPass != "smtp-v2" || got.ResendAPIKey != "resend-v1" || got.SendPandaAPIKey != "panda-v1" {
+		t.Fatalf("after all-None Update: got %+v, want unchanged secrets", got)
+	}
+
+	// Some("") explicitly clears only the targeted credential without affecting others.
+	if err := st.Update(SecretsPatch{ResendAPIKey: opt.Some("")}); err != nil {
+		t.Fatalf("explicit clear ResendAPIKey: %v", err)
+	}
+	got = st.Resolve()
+	if got.SMTPPass != "smtp-v2" || got.ResendAPIKey != "" || got.SendPandaAPIKey != "panda-v1" {
+		t.Fatalf("after Some(\"\") clear: got %+v, want smtp-v2 / \"\" / panda-v1", got)
+	}
+	status := st.Status()
+	if status.SMTPPass != SecretSourceFile || status.ResendAPIKey != SecretSourceNone || status.SendPandaAPIKey != SecretSourceFile {
+		t.Fatalf("Status after partial clear = %+v", status)
+	}
+
+	// Clearing the remaining credentials via Some("") removes the vault file.
+	if err := st.Update(SecretsPatch{
+		SMTPPass:        opt.Some(""),
+		SendPandaAPIKey: opt.Some(""),
+	}); err != nil {
+		t.Fatalf("clear remaining credentials: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, SecretsFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected vault file removed when all credentials cleared, got err=%v", err)
+	}
+}
+
+// TestStatusSnapshot_OptionTimeJSON verifies that StatusSnapshot.NextEligibleAt
+// and StatusSnapshot.BackoffUntil omit absent opt.None[time.Time]() values via
+// json omitzero, serialize present opt.Some(t) values as RFC 3339 timestamps,
+// and decode explicit JSON null back to None.
+//
+// # Parameters
+//
+//   - t: Testing handle injected by go test.
+//
+// # Example
+//
+//	go test -v -run '^TestStatusSnapshot_OptionTimeJSON$' ./internal/mailer
+//
+// # Used By
+//
+// Invoked by the Go test runner (`go test`); no direct Go callers.
+func TestStatusSnapshot_OptionTimeJSON(t *testing.T) {
+	// Absent Option[time.Time] fields must be omitted under json omitzero.
+	absent := StatusSnapshot{Enabled: true, Provider: ProviderSMTP}
+	rawAbsent, err := json.Marshal(absent)
+	if err != nil {
+		t.Fatalf("json.Marshal(absent): %v", err)
+	}
+	if strings.Contains(string(rawAbsent), "next_eligible_at") || strings.Contains(string(rawAbsent), "backoff_until") {
+		t.Fatalf("expected absent timestamps omitted from JSON, got %s", rawAbsent)
+	}
+	var roundTripAbsent StatusSnapshot
+	if err := json.Unmarshal(rawAbsent, &roundTripAbsent); err != nil {
+		t.Fatalf("json.Unmarshal(absent): %v", err)
+	}
+	if !roundTripAbsent.NextEligibleAt.IsNone() || !roundTripAbsent.BackoffUntil.IsNone() {
+		t.Fatalf("expected None after unmarshal of omitted fields: next=%v backoff=%v", roundTripAbsent.NextEligibleAt, roundTripAbsent.BackoffUntil)
+	}
+
+	// Present Option[time.Time] fields marshal as RFC 3339 strings and round-trip cleanly.
+	nextTS := time.Date(2026, 11, 26, 18, 0, 0, 0, time.UTC)
+	backoffTS := time.Date(2026, 11, 26, 18, 5, 0, 0, time.UTC)
+	present := StatusSnapshot{
+		Enabled:        true,
+		Provider:       ProviderSMTP,
+		NextEligibleAt: opt.Some(nextTS),
+		BackoffUntil:   opt.Some(backoffTS),
+	}
+	rawPresent, err := json.Marshal(present)
+	if err != nil {
+		t.Fatalf("json.Marshal(present): %v", err)
+	}
+	if !strings.Contains(string(rawPresent), `"next_eligible_at":"2026-11-26T18:00:00Z"`) {
+		t.Fatalf("expected RFC 3339 next_eligible_at in %s", rawPresent)
+	}
+	if !strings.Contains(string(rawPresent), `"backoff_until":"2026-11-26T18:05:00Z"`) {
+		t.Fatalf("expected RFC 3339 backoff_until in %s", rawPresent)
+	}
+	var roundTripPresent StatusSnapshot
+	if err := json.Unmarshal(rawPresent, &roundTripPresent); err != nil {
+		t.Fatalf("json.Unmarshal(present): %v", err)
+	}
+	gotNext, okNext := roundTripPresent.NextEligibleAt.Get()
+	gotBackoff, okBackoff := roundTripPresent.BackoffUntil.Get()
+	if !okNext || !gotNext.Equal(nextTS) || !okBackoff || !gotBackoff.Equal(backoffTS) {
+		t.Fatalf("round-trip timestamps mismatch: next=(%v,%v) backoff=(%v,%v)", gotNext, okNext, gotBackoff, okBackoff)
+	}
+
+	// Explicit JSON null resets Option[time.Time] back to None.
+	if err := json.Unmarshal([]byte(`{"next_eligible_at":null,"backoff_until":null}`), &roundTripPresent); err != nil {
+		t.Fatalf("json.Unmarshal(null): %v", err)
+	}
+	if !roundTripPresent.NextEligibleAt.IsNone() || !roundTripPresent.BackoffUntil.IsNone() {
+		t.Fatalf("expected JSON null to yield None: next=%v backoff=%v", roundTripPresent.NextEligibleAt, roundTripPresent.BackoffUntil)
 	}
 }
 
@@ -884,7 +1037,7 @@ func TestService_CadencePacingRollingCapRestartAndBackoff(t *testing.T) {
 		t.Fatal("expected simulated send failure")
 	}
 	stFail := svc.Status()
-	if stFail.SentInWindow != 1 || stFail.QueuedUnique != 1 || stFail.ConsecutiveFailures != 1 || stFail.BackoffUntil == nil {
+	if stFail.SentInWindow != 1 || stFail.QueuedUnique != 1 || stFail.ConsecutiveFailures != 1 || stFail.BackoffUntil.IsNone() || stFail.NextEligibleAt.IsNone() {
 		t.Fatalf("failed send corrupted state: %+v", stFail)
 	}
 	// Immediately retrying during 1m backoff must defer.

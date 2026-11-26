@@ -100,10 +100,10 @@ type MetricsSnapshot struct {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/supervisor.go:769 (direct call)
-//   - internal/watchdog/watchdog_test.go:805 (direct call)
-//   - internal/watchdog/watchdog_test.go:834 (direct call)
-//   - internal/watchdog/watchdog_test.go:1924 (direct call)
+//   - internal/watchdog/supervisor.go:774 (direct call)
+//   - internal/watchdog/watchdog_test.go:806 (direct call)
+//   - internal/watchdog/watchdog_test.go:835 (direct call)
+//   - internal/watchdog/watchdog_test.go:2014 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func ParsePrometheusMetrics(r io.Reader) (MetricsSnapshot, error) {
@@ -471,7 +471,7 @@ type ProcStats struct {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/supervisor.go:436 (function value)
+//   - internal/watchdog/supervisor.go:441 (function value)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func InspectProcess(pid int) (ProcStats, error) {
@@ -515,8 +515,8 @@ func InspectProcess(pid int) (ProcStats, error) {
 // Generated from verified repository symbol references; do not hand-edit.
 //
 //   - internal/watchdog/metrics.go:487 (direct call)
-//   - internal/watchdog/watchdog_test.go:874 (direct call)
-//   - internal/watchdog/watchdog_test.go:885 (direct call)
+//   - internal/watchdog/watchdog_test.go:875 (direct call)
+//   - internal/watchdog/watchdog_test.go:886 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func InspectProcFS(procRoot string, pid int, pageSize int) (ProcStats, error) {

@@ -14,6 +14,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/andreimerlescu/concert/internal/opt"
 )
 
 const (
@@ -21,7 +23,7 @@ const (
 	SecretsFileName = "email-secrets.json"
 
 	secretsEnvelopeVersion = 1
-	secretsKDFDomain       = "concert/email/secrets-v1"
+	boxKDFDomain           = "concert/email/secrets-v1"
 )
 
 // Secret origin labels surfaced in the Admin Portal (never the values).
@@ -42,12 +44,15 @@ func (s Secrets) empty() bool {
 	return s.SMTPPass == "" && s.ResendAPIKey == "" && s.SendPandaAPIKey == ""
 }
 
-// SecretsPatch updates only non-nil credential fields in the encrypted vault.
-// An empty string pointer deletes that field from the vault.
+// SecretsPatch describes a partial update to credentials stored in the
+// encrypted vault using [opt.Option] three-state value semantics:
+//   - opt.None[string]() (zero value): leave the existing credential unchanged.
+//   - opt.Some(""): explicitly clear that credential from the vault.
+//   - opt.Some(val): explicitly set or replace that credential with val.
 type SecretsPatch struct {
-	SMTPPass        *string
-	ResendAPIKey    *string
-	SendPandaAPIKey *string
+	SMTPPass        opt.Option[string]
+	ResendAPIKey    opt.Option[string]
+	SendPandaAPIKey opt.Option[string]
 }
 
 // SecretStatus reports where each credential is sourced from without ever
@@ -93,10 +98,10 @@ func NewSecretStore(dataDir string, admitSecret, admitSecretPrev []byte, canPers
 		env:         envSecrets,
 	}
 	if len(admitSecret) > 0 {
-		st.primaryKey = deriveKey(admitSecret, secretsKDFDomain)
+		st.primaryKey = deriveKey(admitSecret, boxKDFDomain)
 	}
 	if len(admitSecretPrev) > 0 {
-		st.prevKey = deriveKey(admitSecretPrev, secretsKDFDomain)
+		st.prevKey = deriveKey(admitSecretPrev, boxKDFDomain)
 	}
 	if dataDir != "" {
 		st.path = filepath.Join(dataDir, SecretsFileName)
@@ -167,9 +172,53 @@ func (s *SecretStore) Status() SecretStatus {
 	}
 }
 
-// Update modifies the encrypted on-disk vault atomically. Returns an error if
-// persistence is disabled (ephemeral CONCERT_ADMIT_SECRET, empty -data-dir, or
-// read-only settings).
+// Update modifies the encrypted on-disk vault atomically according to patch.
+// Each field in patch follows three-state [opt.Option] semantics: None leaves
+// the stored value untouched, Some("") clears that credential, and Some(val)
+// stores val. If all vault credentials become empty, the encrypted vault file
+// is removed.
+//
+// # Parameters
+//
+//   - patch: Partial credential patch. Never logged or echoed in errors.
+//
+// # Returns
+//
+// nil on success, or an error if persistence is disabled (ephemeral
+// CONCERT_ADMIT_SECRET, empty -data-dir, or read-only settings) or if atomic
+// encryption/write fails. On error, in-memory vault state remains unchanged.
+//
+// # Concurrency
+//
+// Safe for concurrent use; serializes writes under s.mu.
+//
+// # Example
+//
+//	err := store.Update(mailer.SecretsPatch{
+//		SMTPPass:     opt.Some("new-smtp-password"),
+//		ResendAPIKey: opt.Some(""), // explicitly clear stored Resend key
+//	})
+//	if err != nil {
+//		return err
+//	}
+//
+// # Used By
+//
+// Generated from verified repository symbol references; do not hand-edit.
+//
+//   - internal/mailer/mailer_test.go:138 (direct call)
+//   - internal/mailer/mailer_test.go:176 (direct call)
+//   - internal/mailer/mailer_test.go:240 (direct call)
+//   - internal/mailer/mailer_test.go:249 (direct call)
+//   - internal/mailer/mailer_test.go:260 (direct call)
+//   - internal/mailer/mailer_test.go:269 (direct call)
+//   - internal/mailer/mailer_test.go:282 (direct call)
+//   - internal/mailer/secrets.go:279 (direct call)
+//   - internal/mailer/secrets.go:281 (direct call)
+//   - internal/mailer/secrets.go:283 (direct call)
+//   - internal/mailer/secrets.go:285 (direct call)
+//
+// Scope: internal/mailer (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/mailer are not exhaustive.
 func (s *SecretStore) Update(patch SecretsPatch) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -180,14 +229,14 @@ func (s *SecretStore) Update(patch SecretsPatch) error {
 		return errors.New("persisting email credentials requires a stable CONCERT_ADMIT_SECRET and writable -data-dir")
 	}
 	next := s.file
-	if patch.SMTPPass != nil {
-		next.SMTPPass = *patch.SMTPPass
+	if v, ok := patch.SMTPPass.Get(); ok {
+		next.SMTPPass = v
 	}
-	if patch.ResendAPIKey != nil {
-		next.ResendAPIKey = *patch.ResendAPIKey
+	if v, ok := patch.ResendAPIKey.Get(); ok {
+		next.ResendAPIKey = v
 	}
-	if patch.SendPandaAPIKey != nil {
-		next.SendPandaAPIKey = *patch.SendPandaAPIKey
+	if v, ok := patch.SendPandaAPIKey.Get(); ok {
+		next.SendPandaAPIKey = v
 	}
 	if err := s.saveLocked(next); err != nil {
 		return err
@@ -198,18 +247,42 @@ func (s *SecretStore) Update(patch SecretsPatch) error {
 }
 
 // Delete clears one named credential ("smtp_pass", "resend_api_key",
-// "sendpanda_api_key") or "all" from the encrypted vault.
+// "sendpanda_api_key") or "all" from the encrypted vault by applying an
+// explicit opt.Some("") patch via [SecretStore.Update].
+//
+// # Parameters
+//
+//   - field: Credential field name ("smtp_pass", "resend_api_key",
+//     "sendpanda_api_key") or "all".
+//
+// # Returns
+//
+// nil on success, or an error if field is unknown or vault persistence fails.
+//
+// # Example
+//
+//	if err := store.Delete("resend_api_key"); err != nil {
+//		return err
+//	}
+//
+// # Used By
+//
+// Generated from verified repository symbol references; do not hand-edit.
+//
+//   - internal/mailer/mailer_test.go:206 (direct call)
+//
+// Scope: internal/mailer (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/mailer are not exhaustive.
 func (s *SecretStore) Delete(field string) error {
-	empty := ""
+	clear := opt.Some("")
 	switch field {
 	case "smtp_pass":
-		return s.Update(SecretsPatch{SMTPPass: &empty})
+		return s.Update(SecretsPatch{SMTPPass: clear})
 	case "resend_api_key":
-		return s.Update(SecretsPatch{ResendAPIKey: &empty})
+		return s.Update(SecretsPatch{ResendAPIKey: clear})
 	case "sendpanda_api_key":
-		return s.Update(SecretsPatch{SendPandaAPIKey: &empty})
+		return s.Update(SecretsPatch{SendPandaAPIKey: clear})
 	case "all":
-		return s.Update(SecretsPatch{SMTPPass: &empty, ResendAPIKey: &empty, SendPandaAPIKey: &empty})
+		return s.Update(SecretsPatch{SMTPPass: clear, ResendAPIKey: clear, SendPandaAPIKey: clear})
 	default:
 		return fmt.Errorf("unknown secret field %q", field)
 	}
@@ -240,9 +313,9 @@ func (s *SecretStore) loadLocked() error {
 		return fmt.Errorf("decode %s ciphertext: %w", SecretsFileName, err)
 	}
 
-	plaintext, err := decryptAESGCM(s.primaryKey, nonce, ct, []byte(secretsKDFDomain))
+	plaintext, err := decryptAESGCM(s.primaryKey, nonce, ct, []byte(boxKDFDomain))
 	if err != nil && len(s.prevKey) == 32 {
-		plaintext, err = decryptAESGCM(s.prevKey, nonce, ct, []byte(secretsKDFDomain))
+		plaintext, err = decryptAESGCM(s.prevKey, nonce, ct, []byte(boxKDFDomain))
 	}
 	if err != nil {
 		return fmt.Errorf("decrypt %s: authentication failed (wrong CONCERT_ADMIT_SECRET or tampered file)", SecretsFileName)
@@ -266,7 +339,7 @@ func (s *SecretStore) saveLocked(sec Secrets) error {
 	if err != nil {
 		return err
 	}
-	nonce, ct, err := encryptAESGCM(s.primaryKey, plaintext, []byte(secretsKDFDomain))
+	nonce, ct, err := encryptAESGCM(s.primaryKey, plaintext, []byte(boxKDFDomain))
 	if err != nil {
 		return err
 	}

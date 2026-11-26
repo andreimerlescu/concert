@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/andreimerlescu/concert/internal/opt"
 )
 
 // historyPortal starts concert with the portal behind a trusted proxy, so
@@ -433,4 +435,146 @@ func TestHistoryLog_RotatesAndReplaysInOrder(t *testing.T) {
 			t.Fatalf("replay out of order: %v", got)
 		}
 	}
+}
+
+func TestOptionTimeWireSemantics_HistoryAndPersist(t *testing.T) {
+	ts := time.Date(2026, 11, 26, 17, 30, 0, 123456000, time.UTC)
+
+	t.Run("banWindowView emits explicit JSON null when absent and RFC3339 when present", func(t *testing.T) {
+		absent := banWindowView{ID: 1, Target: "203.0.113.1", Permanent: true, Active: true}
+		raw, err := json.Marshal(absent)
+		if err != nil {
+			t.Fatalf("marshal absent banWindowView: %v", err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("unmarshal absent banWindowView map: %v", err)
+		}
+		for _, key := range []string{"began", "until", "ended", "first_hit", "last_hit"} {
+			v, exists := m[key]
+			if !exists {
+				t.Errorf("banWindowView JSON missing key %q (must emit null, not omit): %s", key, raw)
+			}
+			if v != nil {
+				t.Errorf("banWindowView[%q] = %v, want nil", key, v)
+			}
+		}
+
+		present := banWindowView{
+			ID:       2,
+			Target:   "203.0.113.2",
+			Began:    optTime(ts),
+			Until:    optTime(ts.Add(time.Hour)),
+			Ended:    optTime(ts.Add(30 * time.Minute)),
+			FirstHit: optTime(ts.Add(time.Minute)),
+			LastHit:  optTime(ts.Add(2 * time.Minute)),
+		}
+		rawPresent, err := json.Marshal(present)
+		if err != nil {
+			t.Fatalf("marshal present banWindowView: %v", err)
+		}
+		var decoded banWindowView
+		if err := json.Unmarshal(rawPresent, &decoded); err != nil {
+			t.Fatalf("unmarshal present banWindowView: %v", err)
+		}
+		if got, ok := decoded.Began.Get(); !ok || !got.Equal(ts) {
+			t.Errorf("decoded.Began = (%v, %v), want (%v, true)", got, ok, ts)
+		}
+		if got, ok := decoded.Until.Get(); !ok || !got.Equal(ts.Add(time.Hour)) {
+			t.Errorf("decoded.Until = (%v, %v), want (%v, true)", got, ok, ts.Add(time.Hour))
+		}
+		if got, ok := decoded.Ended.Get(); !ok || !got.Equal(ts.Add(30*time.Minute)) {
+			t.Errorf("decoded.Ended = (%v, %v), want (%v, true)", got, ok, ts.Add(30*time.Minute))
+		}
+		if got, ok := decoded.FirstHit.Get(); !ok || !got.Equal(ts.Add(time.Minute)) {
+			t.Errorf("decoded.FirstHit = (%v, %v), want (%v, true)", got, ok, ts.Add(time.Minute))
+		}
+		if got, ok := decoded.LastHit.Get(); !ok || !got.Equal(ts.Add(2*time.Minute)) {
+			t.Errorf("decoded.LastHit = (%v, %v), want (%v, true)", got, ok, ts.Add(2*time.Minute))
+		}
+		if !optTime(time.Time{}).IsNone() {
+			t.Error("optTime(zero) should return None")
+		}
+	})
+
+	t.Run("historyEvent omits absent times with omitzero and round-trips present times", func(t *testing.T) {
+		evAbsent := historyEvent{T: evBan, At: ts, Ban: 1, Permanent: true}
+		rawAbsent, err := json.Marshal(evAbsent)
+		if err != nil {
+			t.Fatalf("marshal absent historyEvent: %v", err)
+		}
+		for _, forbidden := range []string{`"begin"`, `"until"`, `"first"`} {
+			if strings.Contains(string(rawAbsent), forbidden) {
+				t.Errorf("historyEvent with None times emitted %s: %s", forbidden, rawAbsent)
+			}
+		}
+
+		evPresent := historyEvent{
+			T:     evBan,
+			At:    ts,
+			Ban:   2,
+			Begin: opt.Some(ts),
+			Until: opt.Some(ts.Add(time.Hour)),
+			First: opt.Some(ts.Add(time.Minute)),
+		}
+		rawPresent, err := json.Marshal(evPresent)
+		if err != nil {
+			t.Fatalf("marshal present historyEvent: %v", err)
+		}
+		var dec historyEvent
+		if err := json.Unmarshal(rawPresent, &dec); err != nil {
+			t.Fatalf("unmarshal present historyEvent: %v", err)
+		}
+		if g, ok := dec.Begin.Get(); !ok || !g.Equal(ts) {
+			t.Errorf("dec.Begin = (%v, %v), want (%v, true)", g, ok, ts)
+		}
+		if g, ok := dec.Until.Get(); !ok || !g.Equal(ts.Add(time.Hour)) {
+			t.Errorf("dec.Until = (%v, %v), want (%v, true)", g, ok, ts.Add(time.Hour))
+		}
+		if g, ok := dec.First.Get(); !ok || !g.Equal(ts.Add(time.Minute)) {
+			t.Errorf("dec.First = (%v, %v), want (%v, true)", g, ok, ts.Add(time.Minute))
+		}
+	})
+
+	t.Run("savedBan omits until for permanent bans and preserves until for temporary bans", func(t *testing.T) {
+		perm := savedBanOf("203.0.113.10", banForever, 3)
+		rawPerm, err := json.Marshal(perm)
+		if err != nil {
+			t.Fatalf("marshal permanent savedBan: %v", err)
+		}
+		if strings.Contains(string(rawPerm), `"until"`) {
+			t.Errorf("permanent savedBan emitted until field: %s", rawPerm)
+		}
+		var decPerm savedBan
+		if err := json.Unmarshal(rawPerm, &decPerm); err != nil {
+			t.Fatalf("unmarshal permanent savedBan: %v", err)
+		}
+		if until, ok := decPerm.until(); !ok || until != banForever {
+			t.Errorf("decPerm.until() = (%d, %v), want (%d, true)", until, ok, banForever)
+		}
+
+		temp := savedBanOf("203.0.113.11", ts.UnixNano(), 2)
+		rawTemp, err := json.Marshal(temp)
+		if err != nil {
+			t.Fatalf("marshal temporary savedBan: %v", err)
+		}
+		if !strings.Contains(string(rawTemp), `"until"`) {
+			t.Errorf("temporary savedBan missing until field: %s", rawTemp)
+		}
+		var decTemp savedBan
+		if err := json.Unmarshal(rawTemp, &decTemp); err != nil {
+			t.Fatalf("unmarshal temporary savedBan: %v", err)
+		}
+		if until, ok := decTemp.until(); !ok || until != ts.UnixNano() {
+			t.Errorf("decTemp.until() = (%d, %v), want (%d, true)", until, ok, ts.UnixNano())
+		}
+
+		var nullUntil savedBan
+		if err := json.Unmarshal([]byte(`{"client":"203.0.113.12","until":null,"offenses":1}`), &nullUntil); err != nil {
+			t.Fatalf("unmarshal null-until savedBan: %v", err)
+		}
+		if until, ok := nullUntil.until(); ok || until != 0 {
+			t.Errorf("nullUntil.until() = (%d, %v), want (0, false)", until, ok)
+		}
+	})
 }

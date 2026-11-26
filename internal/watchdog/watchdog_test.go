@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/andreimerlescu/concert/internal/opt"
 	"github.com/andreimerlescu/concert/internal/watchdog"
 )
 
@@ -50,13 +51,13 @@ type fakeClock struct {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/watchdog_test.go:1058 (direct call)
-//   - internal/watchdog/watchdog_test.go:1153 (direct call)
-//   - internal/watchdog/watchdog_test.go:1227 (direct call)
-//   - internal/watchdog/watchdog_test.go:1308 (direct call)
-//   - internal/watchdog/watchdog_test.go:1453 (direct call)
-//   - internal/watchdog/watchdog_test.go:1553 (direct call)
-//   - internal/watchdog/watchdog_test.go:1789 (direct call)
+//   - internal/watchdog/watchdog_test.go:1059 (direct call)
+//   - internal/watchdog/watchdog_test.go:1243 (direct call)
+//   - internal/watchdog/watchdog_test.go:1317 (direct call)
+//   - internal/watchdog/watchdog_test.go:1398 (direct call)
+//   - internal/watchdog/watchdog_test.go:1543 (direct call)
+//   - internal/watchdog/watchdog_test.go:1643 (direct call)
+//   - internal/watchdog/watchdog_test.go:1879 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func newFakeClock(start time.Time) *fakeClock {
@@ -81,13 +82,13 @@ func newFakeClock(start time.Time) *fakeClock {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/watchdog_test.go:1073 (function value)
-//   - internal/watchdog/watchdog_test.go:1169 (function value)
-//   - internal/watchdog/watchdog_test.go:1244 (function value)
-//   - internal/watchdog/watchdog_test.go:1342 (function value)
-//   - internal/watchdog/watchdog_test.go:1467 (function value)
-//   - internal/watchdog/watchdog_test.go:1568 (function value)
-//   - internal/watchdog/watchdog_test.go:1814 (function value)
+//   - internal/watchdog/watchdog_test.go:1074 (function value)
+//   - internal/watchdog/watchdog_test.go:1259 (function value)
+//   - internal/watchdog/watchdog_test.go:1334 (function value)
+//   - internal/watchdog/watchdog_test.go:1432 (function value)
+//   - internal/watchdog/watchdog_test.go:1557 (function value)
+//   - internal/watchdog/watchdog_test.go:1658 (function value)
+//   - internal/watchdog/watchdog_test.go:1904 (function value)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (c *fakeClock) Now() time.Time {
@@ -110,24 +111,24 @@ func (c *fakeClock) Now() time.Time {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/watchdog_test.go:1074 (direct call)
-//   - internal/watchdog/watchdog_test.go:1099 (direct call)
-//   - internal/watchdog/watchdog_test.go:1170 (direct call)
-//   - internal/watchdog/watchdog_test.go:1191 (direct call)
-//   - internal/watchdog/watchdog_test.go:1210 (direct call)
-//   - internal/watchdog/watchdog_test.go:1245 (direct call)
-//   - internal/watchdog/watchdog_test.go:1257 (direct call)
-//   - internal/watchdog/watchdog_test.go:1264 (direct call)
-//   - internal/watchdog/watchdog_test.go:1274 (direct call)
+//   - internal/watchdog/watchdog_test.go:1075 (direct call)
+//   - internal/watchdog/watchdog_test.go:1100 (direct call)
+//   - internal/watchdog/watchdog_test.go:1260 (direct call)
+//   - internal/watchdog/watchdog_test.go:1281 (direct call)
+//   - internal/watchdog/watchdog_test.go:1300 (direct call)
+//   - internal/watchdog/watchdog_test.go:1335 (direct call)
 //   - internal/watchdog/watchdog_test.go:1347 (direct call)
 //   - internal/watchdog/watchdog_test.go:1354 (direct call)
-//   - internal/watchdog/watchdog_test.go:1468 (direct call)
-//   - internal/watchdog/watchdog_test.go:1486 (direct call)
-//   - internal/watchdog/watchdog_test.go:1494 (direct call)
-//   - internal/watchdog/watchdog_test.go:1569 (direct call)
-//   - internal/watchdog/watchdog_test.go:1592 (direct call)
-//   - internal/watchdog/watchdog_test.go:1819 (direct call)
-//   - internal/watchdog/watchdog_test.go:1841 (direct call)
+//   - internal/watchdog/watchdog_test.go:1364 (direct call)
+//   - internal/watchdog/watchdog_test.go:1437 (direct call)
+//   - internal/watchdog/watchdog_test.go:1444 (direct call)
+//   - internal/watchdog/watchdog_test.go:1558 (direct call)
+//   - internal/watchdog/watchdog_test.go:1576 (direct call)
+//   - internal/watchdog/watchdog_test.go:1584 (direct call)
+//   - internal/watchdog/watchdog_test.go:1659 (direct call)
+//   - internal/watchdog/watchdog_test.go:1682 (direct call)
+//   - internal/watchdog/watchdog_test.go:1909 (direct call)
+//   - internal/watchdog/watchdog_test.go:1931 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (c *fakeClock) Advance(d time.Duration) {
@@ -172,7 +173,7 @@ type fakeProcess struct {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/watchdog_test.go:465 (direct call)
+//   - internal/watchdog/watchdog_test.go:466 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func newFakeProcess(pid int, ignoreTerm bool) *fakeProcess {
@@ -319,9 +320,9 @@ func (p *fakeProcess) Wait() error {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/watchdog_test.go:243 (direct call)
-//   - internal/watchdog/watchdog_test.go:278 (direct call)
-//   - internal/watchdog/watchdog_test.go:1842 (direct call)
+//   - internal/watchdog/watchdog_test.go:244 (direct call)
+//   - internal/watchdog/watchdog_test.go:279 (direct call)
+//   - internal/watchdog/watchdog_test.go:1932 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (p *fakeProcess) finish(err error) {
@@ -348,8 +349,8 @@ func (p *fakeProcess) finish(err error) {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/watchdog_test.go:1391 (direct call)
-//   - internal/watchdog/watchdog_test.go:1400 (direct call)
+//   - internal/watchdog/watchdog_test.go:1481 (direct call)
+//   - internal/watchdog/watchdog_test.go:1490 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (p *fakeProcess) wasKilled() bool {
@@ -376,10 +377,10 @@ func (p *fakeProcess) wasKilled() bool {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/watchdog_test.go:1388 (direct call)
-//   - internal/watchdog/watchdog_test.go:1389 (direct call)
-//   - internal/watchdog/watchdog_test.go:1397 (direct call)
-//   - internal/watchdog/watchdog_test.go:1398 (direct call)
+//   - internal/watchdog/watchdog_test.go:1478 (direct call)
+//   - internal/watchdog/watchdog_test.go:1479 (direct call)
+//   - internal/watchdog/watchdog_test.go:1487 (direct call)
+//   - internal/watchdog/watchdog_test.go:1488 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (p *fakeProcess) signals() []os.Signal {
@@ -417,8 +418,8 @@ type fakeProcessManager struct {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/watchdog_test.go:1311 (direct call)
-//   - internal/watchdog/watchdog_test.go:1790 (direct call)
+//   - internal/watchdog/watchdog_test.go:1401 (direct call)
+//   - internal/watchdog/watchdog_test.go:1880 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func newFakeProcessManager(ignoreTerms ...bool) *fakeProcessManager {
@@ -490,8 +491,8 @@ func (m *fakeProcessManager) Start(name string, args []string) (watchdog.Managed
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/watchdog_test.go:1382 (direct call)
-//   - internal/watchdog/watchdog_test.go:1863 (direct call)
+//   - internal/watchdog/watchdog_test.go:1472 (direct call)
+//   - internal/watchdog/watchdog_test.go:1953 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (m *fakeProcessManager) count() int {
@@ -518,8 +519,8 @@ func (m *fakeProcessManager) count() int {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/watchdog_test.go:1387 (direct call)
-//   - internal/watchdog/watchdog_test.go:1396 (direct call)
+//   - internal/watchdog/watchdog_test.go:1477 (direct call)
+//   - internal/watchdog/watchdog_test.go:1486 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (m *fakeProcessManager) procAt(i int) *fakeProcess {
@@ -566,14 +567,14 @@ type fakeConcertServer struct {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/watchdog_test.go:1039 (direct call)
-//   - internal/watchdog/watchdog_test.go:1148 (direct call)
-//   - internal/watchdog/watchdog_test.go:1225 (direct call)
-//   - internal/watchdog/watchdog_test.go:1305 (direct call)
-//   - internal/watchdog/watchdog_test.go:1452 (direct call)
-//   - internal/watchdog/watchdog_test.go:1551 (direct call)
-//   - internal/watchdog/watchdog_test.go:1678 (direct call)
-//   - internal/watchdog/watchdog_test.go:1787 (direct call)
+//   - internal/watchdog/watchdog_test.go:1040 (direct call)
+//   - internal/watchdog/watchdog_test.go:1238 (direct call)
+//   - internal/watchdog/watchdog_test.go:1315 (direct call)
+//   - internal/watchdog/watchdog_test.go:1395 (direct call)
+//   - internal/watchdog/watchdog_test.go:1542 (direct call)
+//   - internal/watchdog/watchdog_test.go:1641 (direct call)
+//   - internal/watchdog/watchdog_test.go:1768 (direct call)
+//   - internal/watchdog/watchdog_test.go:1877 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func newFakeConcertServer(t *testing.T, opToken string) *fakeConcertServer {
@@ -674,16 +675,16 @@ func newFakeConcertServer(t *testing.T, opToken string) *fakeConcertServer {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/watchdog_test.go:1087 (direct call)
-//   - internal/watchdog/watchdog_test.go:1181 (direct call)
-//   - internal/watchdog/watchdog_test.go:1255 (direct call)
-//   - internal/watchdog/watchdog_test.go:1306 (direct call)
-//   - internal/watchdog/watchdog_test.go:1479 (direct call)
-//   - internal/watchdog/watchdog_test.go:1487 (direct call)
-//   - internal/watchdog/watchdog_test.go:1495 (direct call)
-//   - internal/watchdog/watchdog_test.go:1552 (direct call)
-//   - internal/watchdog/watchdog_test.go:1679 (direct call)
-//   - internal/watchdog/watchdog_test.go:1788 (direct call)
+//   - internal/watchdog/watchdog_test.go:1088 (direct call)
+//   - internal/watchdog/watchdog_test.go:1271 (direct call)
+//   - internal/watchdog/watchdog_test.go:1345 (direct call)
+//   - internal/watchdog/watchdog_test.go:1396 (direct call)
+//   - internal/watchdog/watchdog_test.go:1569 (direct call)
+//   - internal/watchdog/watchdog_test.go:1577 (direct call)
+//   - internal/watchdog/watchdog_test.go:1585 (direct call)
+//   - internal/watchdog/watchdog_test.go:1642 (direct call)
+//   - internal/watchdog/watchdog_test.go:1769 (direct call)
+//   - internal/watchdog/watchdog_test.go:1878 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (fc *fakeConcertServer) setState(healthStatus, readyStatus int, readyBody, metricsBody string) {
@@ -718,17 +719,17 @@ func (fc *fakeConcertServer) setState(healthStatus, readyStatus int, readyBody, 
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/watchdog_test.go:587 (direct call)
-//   - internal/watchdog/watchdog_test.go:648 (direct call)
-//   - internal/watchdog/watchdog_test.go:1088 (direct call)
-//   - internal/watchdog/watchdog_test.go:1181 (direct call)
-//   - internal/watchdog/watchdog_test.go:1255 (direct call)
-//   - internal/watchdog/watchdog_test.go:1479 (direct call)
-//   - internal/watchdog/watchdog_test.go:1487 (direct call)
-//   - internal/watchdog/watchdog_test.go:1495 (direct call)
-//   - internal/watchdog/watchdog_test.go:1552 (direct call)
-//   - internal/watchdog/watchdog_test.go:1679 (direct call)
-//   - internal/watchdog/watchdog_test.go:1788 (direct call)
+//   - internal/watchdog/watchdog_test.go:588 (direct call)
+//   - internal/watchdog/watchdog_test.go:649 (direct call)
+//   - internal/watchdog/watchdog_test.go:1089 (direct call)
+//   - internal/watchdog/watchdog_test.go:1271 (direct call)
+//   - internal/watchdog/watchdog_test.go:1345 (direct call)
+//   - internal/watchdog/watchdog_test.go:1569 (direct call)
+//   - internal/watchdog/watchdog_test.go:1577 (direct call)
+//   - internal/watchdog/watchdog_test.go:1585 (direct call)
+//   - internal/watchdog/watchdog_test.go:1642 (direct call)
+//   - internal/watchdog/watchdog_test.go:1769 (direct call)
+//   - internal/watchdog/watchdog_test.go:1878 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func healthyMetricsText(ok2xx, err5xx, rej503, upstreamHealthy, liveQueue, occupancy int) string {
@@ -1117,8 +1118,97 @@ func TestOriginDownNeverRestartsConcert(t *testing.T) {
 	if webhookAuth != "Bearer "+whTok {
 		t.Errorf("webhook Authorization header mismatch: got %q", webhookAuth)
 	}
-	if alerts[0].UpstreamHealthy == nil || *alerts[0].UpstreamHealthy != 0 {
-		t.Errorf("alert upstream_healthy = %v, want 0", alerts[0].UpstreamHealthy)
+	if got, ok := alerts[0].UpstreamHealthy.Get(); !ok || got != 0 {
+		t.Errorf("alert upstream_healthy = %v, want Some(0)", alerts[0].UpstreamHealthy)
+	}
+}
+
+// TestAlertEvent_UpstreamHealthyJSON verifies that AlertEvent.UpstreamHealthy
+// preserves the JSON wire distinction between unobserved (opt.None -> omitted)
+// and observed zero healthy backends (opt.Some(0) -> `"upstream_healthy":0`).
+//
+// # Parameters
+//
+//   - t: Active test context (invoked by `go test ./internal/watchdog`).
+//
+// # Example
+//
+//	go test -v -run '^TestAlertEvent_UpstreamHealthyJSON$' ./internal/watchdog
+//
+// # Used By
+//
+// Generated from verified repository symbol references; do not hand-edit.
+//
+// Invoked by the Go test runner (`go test`); no direct Go callers.
+//
+// Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
+func TestAlertEvent_UpstreamHealthyJSON(t *testing.T) {
+	base := watchdog.AlertEvent{
+		Timestamp: time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC),
+		Severity:  "warning",
+		Action:    watchdog.ActionAlertOnly,
+		Reason:    watchdog.ReasonOriginDown,
+		Message:   "upstream check",
+	}
+
+	// Unobserved (None) must omit "upstream_healthy".
+	rawNone, err := json.Marshal(base)
+	if err != nil {
+		t.Fatalf("json.Marshal(None): %v", err)
+	}
+	if strings.Contains(string(rawNone), "upstream_healthy") {
+		t.Fatalf("expected upstream_healthy omitted for None, got %s", rawNone)
+	}
+	var decNone watchdog.AlertEvent
+	if err := json.Unmarshal(rawNone, &decNone); err != nil {
+		t.Fatalf("json.Unmarshal(None): %v", err)
+	}
+	if !decNone.UpstreamHealthy.IsNone() {
+		t.Fatalf("expected None after unmarshaling omitted field, got %v", decNone.UpstreamHealthy)
+	}
+
+	// Observed 0 healthy backends (Some(0)) must emit "upstream_healthy":0.
+	evZero := base
+	evZero.UpstreamHealthy = opt.Some(0)
+	rawZero, err := json.Marshal(evZero)
+	if err != nil {
+		t.Fatalf("json.Marshal(Some(0)): %v", err)
+	}
+	if !strings.Contains(string(rawZero), `"upstream_healthy":0`) {
+		t.Fatalf(`expected "upstream_healthy":0 in JSON, got %s`, rawZero)
+	}
+	var decZero watchdog.AlertEvent
+	if err := json.Unmarshal(rawZero, &decZero); err != nil {
+		t.Fatalf("json.Unmarshal(Some(0)): %v", err)
+	}
+	if got, ok := decZero.UpstreamHealthy.Get(); !ok || got != 0 {
+		t.Fatalf("unmarshaled Some(0) = (%d, %v), want (0, true)", got, ok)
+	}
+
+	// Observed positive backend count (Some(3)) must emit "upstream_healthy":3.
+	evThree := base
+	evThree.UpstreamHealthy = opt.Some(3)
+	rawThree, err := json.Marshal(evThree)
+	if err != nil {
+		t.Fatalf("json.Marshal(Some(3)): %v", err)
+	}
+	if !strings.Contains(string(rawThree), `"upstream_healthy":3`) {
+		t.Fatalf(`expected "upstream_healthy":3 in JSON, got %s`, rawThree)
+	}
+	var decThree watchdog.AlertEvent
+	if err := json.Unmarshal(rawThree, &decThree); err != nil {
+		t.Fatalf("json.Unmarshal(Some(3)): %v", err)
+	}
+	if got, ok := decThree.UpstreamHealthy.Get(); !ok || got != 3 {
+		t.Fatalf("unmarshaled Some(3) = (%d, %v), want (3, true)", got, ok)
+	}
+
+	// Explicit JSON null decodes to None.
+	if err := json.Unmarshal([]byte(`{"upstream_healthy":null}`), &decThree); err != nil {
+		t.Fatalf("json.Unmarshal(null): %v", err)
+	}
+	if !decThree.UpstreamHealthy.IsNone() {
+		t.Fatalf("expected JSON null to yield None, got %v", decThree.UpstreamHealthy)
 	}
 }
 

@@ -11,6 +11,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/andreimerlescu/concert/internal/configfile"
+	"github.com/andreimerlescu/concert/internal/opt"
 )
 
 func TestVhost_MultiSiteIsolationReloadAndPortalSwitcher(t *testing.T) {
@@ -182,4 +185,88 @@ beta.example.test {
 			t.Fatalf("multi-site metrics missing %q", want)
 		}
 	}
+}
+
+func TestBuildSiteConfig_OptionOverridesAndZeroValues(t *testing.T) {
+	base := testConfig("http://127.0.0.1:9000")
+	base.portal.secureCookie = true
+	base.statsAuth = true
+	base.roomLeaseFraction = 0.75
+	base.clearQueueOnStart = true
+	base.upstreamCBFailures = 5
+	base.fastlaneLockDestinations = true
+	base.staticFallback = true
+	base.compress = true
+	base.maxQueue = 250
+	base.secureCookie = true
+	base.preserveHost = true
+	base.abuseEnabled = true
+
+	t.Run("None options preserve base defaults", func(t *testing.T) {
+		got, err := buildSiteConfig(base, configfile.GlobalConfig{}, configfile.SiteConfig{
+			Hosts: []string{"none.example.test"},
+		})
+		if err != nil {
+			t.Fatalf("buildSiteConfig: %v", err)
+		}
+		if !got.portal.secureCookie || !got.statsAuth || got.roomLeaseFraction != 0.75 ||
+			!got.clearQueueOnStart || got.upstreamCBFailures != 5 || !got.fastlaneLockDestinations ||
+			!got.staticFallback || !got.compress || got.maxQueue != 250 ||
+			!got.secureCookie || !got.preserveHost || !got.abuseEnabled {
+			t.Fatalf("None options overwrote base defaults: %+v", got)
+		}
+	})
+
+	t.Run("explicit false and zero Option values override defaults and global values", func(t *testing.T) {
+		gf := configfile.GlobalConfig{
+			PortalSecureCookie:       opt.Some(false),
+			StatsAuth:                opt.Some(false),
+			RoomLeaseFraction:        opt.Some(0.25),
+			ClearQueueOnStart:        opt.Some(false),
+			UpstreamCBFailures:       opt.Some(0),
+			FastlaneLockDestinations: opt.Some(false),
+		}
+		sc := configfile.SiteConfig{
+			Hosts:                    []string{"override.example.test"},
+			StaticFallback:           opt.Some(false),
+			Compress:                 opt.Some(false),
+			MaxQueue:                 opt.Some(int64(0)),
+			SecureCookie:             opt.Some(false),
+			PreserveHost:             opt.Some(false),
+			Abuse:                    opt.Some(false),
+			RoomLeaseFraction:        opt.Some(0.0),
+			ClearQueueOnStart:        opt.Some(true),
+			UpstreamCBFailures:       opt.Some(3),
+			FastlaneLockDestinations: opt.Some(true),
+		}
+		got, err := buildSiteConfig(base, gf, sc)
+		if err != nil {
+			t.Fatalf("buildSiteConfig: %v", err)
+		}
+		if got.portal.secureCookie {
+			t.Error("portal.secureCookie = true, want false from global Option")
+		}
+		if got.statsAuth {
+			t.Error("statsAuth = true, want false from global Option")
+		}
+		if got.staticFallback || got.compress || got.secureCookie || got.preserveHost || got.abuseEnabled {
+			t.Errorf("site false bool Options not applied: staticFallback=%v compress=%v secureCookie=%v preserveHost=%v abuse=%v",
+				got.staticFallback, got.compress, got.secureCookie, got.preserveHost, got.abuseEnabled)
+		}
+		if got.maxQueue != 0 {
+			t.Errorf("maxQueue = %d, want 0 from site Option", got.maxQueue)
+		}
+		if got.roomLeaseFraction != 0.0 {
+			t.Errorf("roomLeaseFraction = %v, want 0.0 from site Option overriding global 0.25", got.roomLeaseFraction)
+		}
+		if !got.clearQueueOnStart {
+			t.Error("clearQueueOnStart = false, want true from site Option overriding global false")
+		}
+		if got.upstreamCBFailures != 3 {
+			t.Errorf("upstreamCBFailures = %d, want 3 from site Option overriding global 0", got.upstreamCBFailures)
+		}
+		if !got.fastlaneLockDestinations {
+			t.Error("fastlaneLockDestinations = false, want true from site Option overriding global false")
+		}
+	})
 }

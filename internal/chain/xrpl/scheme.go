@@ -304,7 +304,7 @@ func (s *Scheme) verifyTx(ctx context.Context, p x402.Payload, r x402.Requiremen
 	if !t.VerifySignature() {
 		return nil, "", "invalid_exact_xrpl_payload_signature"
 	}
-	if t.TransactionType == nil || *t.TransactionType != 0 {
+	if txType, ok := t.TransactionType.Get(); !ok || txType != 0 {
 		return nil, "", "invalid_exact_xrpl_payload_transaction_type"
 	}
 	if _, ok := t.Accounts["Account"]; !ok {

@@ -17,6 +17,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/andreimerlescu/concert/internal/opt"
 )
 
 const (
@@ -141,6 +143,13 @@ func (g TokenGate) AllowsEntry() bool {
 	return u == "entry" || u == "both"
 }
 
+// Config holds Fast-Lane x402 payment, NFT collection, token-gate, direct
+// wallet verification, and sliding pass cookie configuration.
+//
+// PassSliding and DirectPayEnabled use value-type [opt.Option] fields tagged
+// with `omitzero`: an absent or JSON `null` value defaults to true via
+// [Config.IsSliding] and [Config.IsDirectPayEnabled], while opt.Some(false)
+// explicitly disables the feature and is preserved when marshaling JSON.
 type Config struct {
 	Enabled                bool              `json:"enabled"`
 	Origin                 string            `json:"origin"`
@@ -153,9 +162,9 @@ type Config struct {
 	PassSeconds            int               `json:"pass_seconds"`
 	PassIdleSeconds        int               `json:"pass_idle_seconds,omitempty"`
 	PassMaxSeconds         int               `json:"pass_max_seconds,omitempty"`
-	PassSliding            *bool             `json:"pass_sliding,omitempty"`
+	PassSliding            opt.Option[bool]  `json:"pass_sliding,omitzero"`
 	NFTPassSeconds         int               `json:"nft_pass_seconds"`
-	DirectPayEnabled       *bool             `json:"direct_pay_enabled,omitempty"`
+	DirectPayEnabled       opt.Option[bool]  `json:"direct_pay_enabled,omitzero"`
 	DirectChallengeSeconds int               `json:"direct_challenge_seconds,omitempty"`
 	VerifyAddresses        map[string]string `json:"verify_addresses,omitempty"`
 	MaxRecords             int               `json:"max_records"`
@@ -168,18 +177,79 @@ type Config struct {
 	TokenGates             []TokenGate       `json:"token_gates,omitempty"`
 }
 
+// IsSliding reports whether active navigation extends the Fast-Lane pass idle
+// window up to PassMaxSeconds. When PassSliding is absent (None), sliding
+// passes default to enabled (true).
+//
+// # Parameters
+//
+// None. Operates on the value receiver c without mutating it.
+//
+// # Returns
+//
+// true when PassSliding is absent or Some(true); false only for Some(false).
+//
+// # Example
+//
+//	cfg := fastlane.Config{PassSliding: opt.Some(false)}
+//	fmt.Println(cfg.IsSliding()) // false
+//
+// # Used By
+//
+// Generated from verified repository symbol references; do not hand-edit.
+//
+//   - internal/fastlane/mainnet_readiness_test.go:302 (direct call)
+//   - internal/fastlane/mainnet_readiness_test.go:317 (direct call)
+//   - internal/fastlane/mainnet_readiness_test.go:329 (direct call)
+//   - internal/fastlane/pass.go:155 (direct call)
+//   - internal/fastlane/pass.go:263 (direct call)
+//   - internal/fastlane/pass.go:272 (direct call)
+//   - internal/fastlane/pass.go:317 (direct call)
+//   - internal/fastlane/pass.go:351 (direct call)
+//   - internal/fastlane/service.go:447 (direct call)
+//   - internal/fastlane/service.go:839 (direct call)
+//
+// Scope: current module (github.com/andreimerlescu/concert), including tests;
+// build configuration: darwin/arm64, default tags.
+// Interface, reflection, callback, and external callers are not exhaustive.
 func (c Config) IsSliding() bool {
-	if c.PassSliding == nil {
-		return true
-	}
-	return *c.PassSliding
+	return c.PassSliding.UnwrapOr(true)
 }
 
+// IsDirectPayEnabled reports whether the direct on-ledger wallet challenge
+// flow (POST /_concert/direct/challenge) is enabled. When DirectPayEnabled is
+// absent (None), direct pay defaults to enabled (true).
+//
+// # Parameters
+//
+// None. Operates on the value receiver c without mutating it.
+//
+// # Returns
+//
+// true when DirectPayEnabled is absent or Some(true); false only for
+// Some(false).
+//
+// # Example
+//
+//	cfg := fastlane.Config{DirectPayEnabled: opt.Some(false)}
+//	fmt.Println(cfg.IsDirectPayEnabled()) // false
+//
+// # Used By
+//
+// Generated from verified repository symbol references; do not hand-edit.
+//
+//   - internal/fastlane/direct.go:226 (direct call)
+//   - internal/fastlane/mainnet_readiness_test.go:302 (direct call)
+//   - internal/fastlane/mainnet_readiness_test.go:317 (direct call)
+//   - internal/fastlane/mainnet_readiness_test.go:329 (direct call)
+//   - internal/fastlane/service.go:449 (direct call)
+//   - internal/fastlane/service.go:841 (direct call)
+//
+// Scope: current module (github.com/andreimerlescu/concert), including tests;
+// build configuration: darwin/arm64, default tags.
+// Interface, reflection, callback, and external callers are not exhaustive.
 func (c Config) IsDirectPayEnabled() bool {
-	if c.DirectPayEnabled == nil {
-		return true
-	}
-	return *c.DirectPayEnabled
+	return c.DirectPayEnabled.UnwrapOr(true)
 }
 
 // EffectivePolicyMode returns the normalized compliance screening mode.

@@ -12,6 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/andreimerlescu/concert/internal/opt"
 )
 
 // The history log.
@@ -75,14 +77,14 @@ type historyEvent struct {
 	Ban uint64 `json:"ban,omitempty"`
 
 	// ban
-	Target    string     `json:"target,omitempty"`
-	Scope     string     `json:"scope,omitempty"`
-	Range     bool       `json:"range,omitempty"`
-	Begin     *time.Time `json:"begin,omitempty"`
-	Until     *time.Time `json:"until,omitempty"`
-	Permanent bool       `json:"permanent,omitempty"`
-	Changes   int        `json:"changes,omitempty"`
-	Source    string     `json:"source,omitempty"`
+	Target    string                `json:"target,omitempty"`
+	Scope     string                `json:"scope,omitempty"`
+	Range     bool                  `json:"range,omitempty"`
+	Begin     opt.Option[time.Time] `json:"begin,omitzero"`
+	Until     opt.Option[time.Time] `json:"until,omitzero"`
+	Permanent bool                  `json:"permanent,omitempty"`
+	Changes   int                   `json:"changes,omitempty"`
+	Source    string                `json:"source,omitempty"`
 
 	// lift
 	By string `json:"by,omitempty"`
@@ -91,10 +93,10 @@ type historyEvent struct {
 	Trigger *logTrigger `json:"trigger,omitempty"`
 
 	// agg
-	First      *time.Time       `json:"first,omitempty"`
-	Count      int64            `json:"count,omitempty"`
-	Paths      map[string]int64 `json:"paths,omitempty"`
-	OtherPaths int64            `json:"other_paths,omitempty"`
+	First      opt.Option[time.Time] `json:"first,omitzero"`
+	Count      int64                 `json:"count,omitempty"`
+	Paths      map[string]int64      `json:"paths,omitempty"`
+	OtherPaths int64                 `json:"other_paths,omitempty"`
 }
 
 // logInfo is what ess said about a request's address when it was recorded.

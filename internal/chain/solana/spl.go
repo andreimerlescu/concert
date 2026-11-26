@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/andreimerlescu/concert/internal/chain/httpx"
+	"github.com/andreimerlescu/concert/internal/opt"
 	"github.com/andreimerlescu/concert/internal/x402"
 )
 
@@ -703,10 +704,10 @@ func (s *Scheme) FindDirectPayment(ctx context.Context, from, to, asset, minAtom
 		watchAddr = ata.String()
 	}
 	var sigs []struct {
-		Signature string `json:"signature"`
-		Err       any    `json:"err"`
-		Memo      string `json:"memo"`
-		BlockTime *int64 `json:"blockTime"`
+		Signature string            `json:"signature"`
+		Err       any               `json:"err"`
+		Memo      string            `json:"memo"`
+		BlockTime opt.Option[int64] `json:"blockTime"` // RPC returns null when block time is unavailable
 	}
 	if err := s.RPC.call(ctx, "getSignaturesForAddress", []any{watchAddr, map[string]any{"limit": 30, "commitment": "finalized"}}, &sigs); err != nil {
 		return "", "", err
@@ -715,14 +716,14 @@ func (s *Scheme) FindDirectPayment(ctx context.Context, from, to, asset, minAtom
 		if entry.Err != nil {
 			continue
 		}
-		if !since.IsZero() && entry.BlockTime != nil && *entry.BlockTime < since.Add(-30*time.Second).Unix() {
+		if bt, ok := entry.BlockTime.Get(); !since.IsZero() && ok && bt < since.Add(-30*time.Second).Unix() {
 			continue
 		}
 		if memoText != "" && entry.Memo != "" && !strings.Contains(entry.Memo, memoText) {
 			continue
 		}
 		var tx struct {
-			BlockTime *int64 `json:"blockTime"`
+			BlockTime opt.Option[int64] `json:"blockTime"`
 			Meta      *struct {
 				Err              any     `json:"err"`
 				PreBalances      []int64 `json:"preBalances"`

@@ -2,7 +2,7 @@
 
 This runbook covers production configuration baselines, host-protection guardrails, capacity calibration, live waiting-room recovery, active cache purging, scheduled drops, and monitoring/alerting for the complete Concert Suite (`concert`, `wpconcert`, `econcert`, `concert-kv`, `concert-cache`, `concert-watchdog`, `bench-concert`, and `concert-client`).
 
-> **Related guides:** [6 Production Deployment Tutorials](tutorials/README.md) · [Enterprise Hardening Guide](ENTERPRISE.md) · [Official Client SDKs](../clients/) · [33-Point Production Readiness Scorecard](../todo/PRODUCTION-33.md)
+> **Related guides:** [6 Production Deployment Tutorials](tutorials/README.md) · [Enterprise Hardening Guide](ENTERPRISE.md) · [Official Client SDKs](../clients/)
 
 ---
 

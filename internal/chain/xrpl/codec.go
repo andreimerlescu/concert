@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/andreimerlescu/concert/internal/opt"
 )
 
 // XRPL serialized type codes (ripple-binary-codec definitions).
@@ -97,12 +99,14 @@ type field struct {
 }
 
 // Tx is a decoded transaction with the fields the scheme inspects.
+// TransactionType uses [opt.Option] so an explicit Payment type (Some(0)) is
+// distinct from an omitted TransactionType field (None).
 type Tx struct {
 	blob    []byte
 	fields  []field
 	Unknown []string
 
-	TransactionType *uint16
+	TransactionType opt.Option[uint16]
 	UInt32          map[string]uint32
 	InvoiceID       []byte
 	Amounts         map[string]Amount
@@ -623,8 +627,7 @@ func Decode(blobHex string) (*Tx, error) {
 		t.Present[name] = true
 		switch id.typ {
 		case tUInt16:
-			v := binary.BigEndian.Uint16(val)
-			t.TransactionType = &v
+			t.TransactionType = opt.Some(binary.BigEndian.Uint16(val))
 		case tUInt32:
 			t.UInt32[name] = binary.BigEndian.Uint32(val)
 		case tHash256:

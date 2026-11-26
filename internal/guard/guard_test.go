@@ -880,7 +880,7 @@ func TestChallengeGate_TurnstileVerification(t *testing.T) {
 		switch mode.Load() {
 		case 0:
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"success":true,"hostname":"toktail.app","action":"queue"}`))
+			_, _ = w.Write([]byte(`{"success":true,"hostname":"counthis.app","action":"queue"}`))
 		case 1:
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"success":false,"error-codes":["invalid-input-response"]}`))
@@ -915,7 +915,7 @@ func TestChallengeGate_TurnstileVerification(t *testing.T) {
 
 	// Success case.
 	res, err := gate.VerifyTurnstile(t.Context(), "valid-token", ip)
-	if err != nil || !res.Success || res.Hostname != "toktail.app" {
+	if err != nil || !res.Success || res.Hostname != "counthis.app" {
 		t.Fatalf("VerifyTurnstile(ok) = (%+v, %v), want success", res, err)
 	}
 

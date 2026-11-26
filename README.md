@@ -8,7 +8,7 @@
 [![GitHub Stars](https://img.shields.io/github/stars/andreimerlescu/concert?style=social)](https://github.com/andreimerlescu/concert/stargazers)
 ![Unique](https://counthis.app/github?repository=andreimerlescu/concert&label=Unique) ![Visitors](https://counthis.app/g/qyjy5vwjtjgbjfzy)
 
-![Concert — FIFO Waiting Room Reverse Proxy](/concert.jpg)
+![Concert — FIFO Waiting Room Reverse Proxy](concert.jpg)
 
 A FIFO waiting room reverse proxy. Put Concert in front of any HTTP origin, such as a PHP site, a WordPress install, or a legacy app that falls over under load. When traffic exceeds what the origin can handle, visitors wait in an orderly queue with a live position instead of getting 502s and timeouts. Admitted visitors load their page's assets through a separate tier that queued and denied visitors can't reach, and clients that misbehave are blocked for an escalating cooldown.
 
@@ -73,7 +73,7 @@ Every binary in the Concert Suite is **100% open-source under Apache-2.0** (zero
 
 - **6 Human + AI-Agent Deployment Tutorials:** [`docs/tutorials/`](docs/tutorials/README.md) — Single-host Linux VPS + watchdog ([01](docs/tutorials/01-single-host-vps.md)), WordPress/WooCommerce + `concert-cache` ([02](docs/tutorials/02-wordpress-woocommerce-stack.md)), High-Traffic 100k Edge/Leaf Mesh ([03](docs/tutorials/03-high-traffic-100k-mesh.md)), Kubernetes Production + Prometheus/Grafana/OTLP/ChatOps ([04](docs/tutorials/04-kubernetes-production.md)), Wildcard DNS-01 TLS + Multi-Tenant Drops ([05](docs/tutorials/05-wildcard-private-dns01.md)), and Crypto API Routing + AI Agent Pass Bidding + Waiting Room Studio ([06](docs/tutorials/06-crypto-api-agent-bidding.md)).
 - **Official Client SDKs (`clients/`):** Zero-dependency integrations for [WordPress (`clients/wordpress`)](clients/wordpress/), [PHP (`clients/php`)](clients/php/), [Go (`clients/go`)](clients/go/), [Node.js / TypeScript (`clients/node`)](clients/node/), [Python (`clients/python`)](clients/python/), and [Ruby (`clients/ruby`)](clients/ruby/).
-- **33-Point Production Readiness Scorecard:** [`todo/PRODUCTION-33.md`](todo/PRODUCTION-33.md) — Deterministic pass/fail audit checklist before launch.
+- **Operations & Enterprise Hardening:** [`docs/OPERATIONS.md`](docs/OPERATIONS.md) and [`docs/ENTERPRISE.md`](docs/ENTERPRISE.md) — Production baselines, live queue recovery, compliance controls, and observability runbooks.
 
 ## Install
 
@@ -780,7 +780,7 @@ It writes `capacity.json`, which a leaf uses as its host capacity. With `-bench-
 
 **A pass limits concurrency, not request rate.** A pass holder can have at most its per-user cap of asset requests in flight, but fast assets finish quickly, so a single pass can still generate many requests per second. The global semaphore bounds the total load on the host regardless. Volumetric attacks from many addresses belong at a CDN or WAF in front of Concert; the abuse registry handles individual misbehaving clients.
 
-**Skip the line is not wired end to end.** `-rate`, `-surge`, `-skip-url`, and `-pass` enable the pricing card on the waiting room page. But promoting a paid visitor requires calling room's in-process API after payment, and Concert does not yet expose an endpoint your payment flow can call. Leave `-rate` at `0` in production for now. The portal's "move to the front" works without pricing.
+**Skip-the-line promotion and crypto Fast-Lane.** Core `concert` exposes `-rate`, `-surge`, `-skip-url`, and the operator promotion webhook `POST /_room/promote` (alongside the Admin Portal's "move to front"). Full end-to-end 4-chain crypto-only Fast-Lane (`XRPL`, `Stellar`, `Hedera`, `Solana`), NFT VIP bypass, and non-custodial AI Agent Pass Bidding (`/_concert/bids`) ship in `econcert` — see [Tutorial 06](docs/tutorials/06-crypto-api-agent-bidding.md).
 
 **IPv8 is a draft.** The IPv8 forms follow an individual Internet-Draft, not an IETF standard, and are derived from IPtoASN's IPv4-to-ASN mapping.
 
@@ -788,8 +788,8 @@ It writes `capacity.json`, which a leaf uses as its host capacity. With `-bench-
 
     make all                    # vet, clean, test, race tests, benchmarks, Linux build & checksums
     make build                  # static Linux (amd64, arm64) binaries in bin/
-    make dist                   # Linux release tarballs (incl. FIPS), CycloneDX SBOMs & SHA256SUMS.txt in dist/
-    make docker                 # distroless container images: concert, wpconcert, econcert (see deploy/docker/)
+    make dist                   # Linux release tarballs (incl. FIPS), 6 CycloneDX SBOMs & SHA256SUMS.txt in dist/
+    make docker                 # distroless images: concert, wpconcert, econcert, concert-kv, concert-cache, concert-watchdog
     make docker-buildx          # multi-arch Linux (amd64, arm64) container images via Buildx
     go test -race -count=1 ./...
 
@@ -810,6 +810,11 @@ The test suite runs the real waiting room, asset tier, abuse registry, portal an
 - the capacity benchmark against a fake shop with a known limit, its crawl coverage, link extraction and failure classification
 
 The tests never read your `NADDR_DATA`; they build small databases of their own.
+
+## Security & Contributing
+
+- **Security Policy:** See [SECURITY.md](SECURITY.md) for private vulnerability disclosure via GitHub Security Advisories and release verification baselines.
+- **Contributing:** See [CONTRIBUTING.md](CONTRIBUTING.md) for engineering standards, repository rules, and verification commands.
 
 ## License
 

@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/andreimerlescu/concert/internal/opt"
 )
 
 type directChallenge struct {
@@ -226,12 +228,12 @@ func (s *Service) makeDirectChallenge(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 	var in struct {
-		Kind       string `json:"kind"` // "proof" or "payment"
-		Address    string `json:"address"`
-		RuleID     string `json:"rule_id"`
-		RuleKind   string `json:"rule_kind"` // "nft" or "token"
-		TokenID    string `json:"token_id"`
-		OfferIndex *int   `json:"offer_index"`
+		Kind       string          `json:"kind"` // "proof" or "payment"
+		Address    string          `json:"address"`
+		RuleID     string          `json:"rule_id"`
+		RuleKind   string          `json:"rule_kind"` // "nft" or "token"
+		TokenID    string          `json:"token_id"`
+		OfferIndex opt.Option[int] `json:"offer_index"` // distinguishes omitted/null from explicit 0
 	}
 	if decode(r, &in) != nil {
 		failure(w, 400, "invalid_direct_challenge_request")
@@ -316,13 +318,14 @@ func (s *Service) makeDirectChallenge(w http.ResponseWriter, r *http.Request, id
 		ch.Asset, ch.AssetSymbol, ch.Amount, ch.Display = proofDustForNetwork(ch.Network)
 	} else {
 		// Direct paid pass challenge.
-		if in.OfferIndex == nil || *in.OfferIndex < 0 || *in.OfferIndex >= len(cfg.Offers) {
+		offerIdx, ok := in.OfferIndex.Get()
+		if !ok || offerIdx < 0 || offerIdx >= len(cfg.Offers) {
 			failure(w, 400, "invalid_offer_index")
 			return
 		}
-		offer := cfg.Offers[*in.OfferIndex]
+		offer := cfg.Offers[offerIdx]
 		req := offer.Requirements
-		ch.OfferIndex = *in.OfferIndex
+		ch.OfferIndex = offerIdx
 		ch.Network = req.Network
 		ch.PayTo = req.PayTo
 		ch.Asset = req.Asset

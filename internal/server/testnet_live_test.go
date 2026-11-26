@@ -23,6 +23,7 @@ import (
 	"github.com/andreimerlescu/concert/internal/chain/stellar"
 	"github.com/andreimerlescu/concert/internal/chain/xrpl"
 	"github.com/andreimerlescu/concert/internal/fastlane"
+	"github.com/andreimerlescu/concert/internal/opt"
 	"github.com/andreimerlescu/concert/internal/x402"
 	hiero "github.com/hiero-ledger/hiero-sdk-go/v2/sdk"
 	"github.com/stellar/go-stellar-sdk/keypair"
@@ -166,8 +167,6 @@ func TestLiveTestnet_XRPL(t *testing.T) {
 		MaxTimeoutSeconds: 60,
 		Extra:             map[string]any{"areFeesSponsored": false},
 	}
-	slideOn := true
-	directOn := true
 	fc := fastlane.Config{
 		Enabled:          true,
 		Origin:           "http://127.0.0.1:8080",
@@ -179,9 +178,9 @@ func TestLiveTestnet_XRPL(t *testing.T) {
 		PassSeconds:      300,
 		PassIdleSeconds:  180,
 		PassMaxSeconds:   1800,
-		PassSliding:      &slideOn,
+		PassSliding:      opt.Some(true),
 		NFTPassSeconds:   300,
-		DirectPayEnabled: &directOn,
+		DirectPayEnabled: opt.Some(true),
 		Offers: []fastlane.Offer{{
 			Label:         "0.1 XRP Testnet Pass",
 			DisplayAmount: "0.1",
@@ -352,8 +351,6 @@ func TestLiveTestnet_Stellar(t *testing.T) {
 		MaxTimeoutSeconds: 60,
 		Extra:             map[string]any{"areFeesSponsored": false},
 	}
-	slideOn := true
-	directOn := true
 	fc := fastlane.Config{
 		Enabled:          true,
 		Origin:           "http://127.0.0.1:8080",
@@ -365,9 +362,9 @@ func TestLiveTestnet_Stellar(t *testing.T) {
 		PassSeconds:      300,
 		PassIdleSeconds:  180,
 		PassMaxSeconds:   1800,
-		PassSliding:      &slideOn,
+		PassSliding:      opt.Some(true),
 		NFTPassSeconds:   300,
-		DirectPayEnabled: &directOn,
+		DirectPayEnabled: opt.Some(true),
 		Offers: []fastlane.Offer{{
 			Label:         "0.1 XLM Testnet Pass (Zero Hot Keys)",
 			DisplayAmount: "0.1",

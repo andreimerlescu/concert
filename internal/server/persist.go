@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"github.com/andreimerlescu/concert/internal/opt"
 )
 
 // Ban persistence. Bans, including permanent ones, are written to bans.json
@@ -40,33 +42,91 @@ type banSnapshot struct {
 }
 
 // savedBan is one client (address, or IPv6 /64) or range. Until is the end
-// of the current or most recent ban; it is omitted for permanent bans.
+// of the current or most recent ban; it is None and omitted via omitzero for
+// permanent bans.
 type savedBan struct {
-	Client    string     `json:"client"`
-	Until     *time.Time `json:"until,omitempty"`
-	Permanent bool       `json:"permanent,omitempty"`
-	Offenses  int        `json:"offenses"`
+	Client    string                `json:"client"`
+	Until     opt.Option[time.Time] `json:"until,omitzero"`
+	Permanent bool                  `json:"permanent,omitempty"`
+	Offenses  int                   `json:"offenses"`
 }
 
+// savedBanOf constructs a serializable [savedBan] record from registry state.
+// A permanent ban (until == banForever) sets Permanent and leaves Until as
+// [opt.None] so bans.json omits the "until" field via omitzero.
+//
+// # Parameters
+//
+//   - client: Display address or CIDR string for the banned target.
+//   - until: Expiry timestamp in Unix nanoseconds, or banForever for permanent.
+//   - offenses: Recorded offense count persisted for escalating cooldowns.
+//
+// # Returns
+//
+// A value-type savedBan ready for JSON persistence.
+//
+// # Example
+//
+//	sb := savedBanOf("203.0.113.10", banForever, 2)
+//
+// # Used By
+//
+// Generated from verified AST symbol references; do not hand-edit.
+//
+//   - internal/server/history_test.go:540 (direct call)
+//   - internal/server/history_test.go:556 (direct call)
+//   - internal/server/persist.go:141 (direct call)
+//   - internal/server/persist.go:149 (direct call)
+//
+// Scope: internal/server (including tests and all build tags).
 func savedBanOf(client string, until int64, offenses int) savedBan {
 	sb := savedBan{Client: client, Offenses: offenses}
 	if until == banForever {
 		sb.Permanent = true
 	} else {
-		t := time.Unix(0, until).UTC()
-		sb.Until = &t
+		sb.Until = opt.Some(time.Unix(0, until).UTC())
 	}
 	return sb
 }
 
+// until returns the ban expiry in Unix nanoseconds (or banForever for a
+// permanent ban) and whether sb carries a valid expiry.
+//
+// # Parameters
+//
+// None. Operates on the value receiver sb.
+//
+// # Returns
+//
+// (banForever, true) when Permanent is true, (u.UnixNano(), true) when Until
+// is present, or (0, false) when neither Permanent nor Until is set.
+//
+// # Example
+//
+//	if exp, ok := sb.until(); ok {
+//		_ = exp
+//	}
+//
+// # Used By
+//
+// Generated from verified AST symbol references; do not hand-edit.
+//
+//   - internal/server/history_test.go:552 (direct call)
+//   - internal/server/history_test.go:568 (direct call)
+//   - internal/server/history_test.go:576 (direct call)
+//   - internal/server/persist.go:174 (direct call)
+//   - internal/server/persist.go:193 (direct call)
+//
+// Scope: internal/server (including tests and all build tags).
 func (sb savedBan) until() (int64, bool) {
 	if sb.Permanent {
 		return banForever, true
 	}
-	if sb.Until == nil {
+	u, ok := sb.Until.Get()
+	if !ok {
 		return 0, false
 	}
-	return sb.Until.UnixNano(), true
+	return u.UnixNano(), true
 }
 
 // snapshot captures every client with ban history and every active range.

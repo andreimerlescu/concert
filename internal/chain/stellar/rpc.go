@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/andreimerlescu/concert/internal/chain/httpx"
+	"github.com/andreimerlescu/concert/internal/opt"
 	"github.com/stellar/go-stellar-sdk/strkey"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
@@ -119,12 +120,16 @@ func (c RPC) Transaction(ctx context.Context, hash string) (TxStatus, error) {
 // Horizon is the subset of Horizon REST the scheme uses.
 type Horizon struct{ URL string }
 
+// HorizonBalance represents one balance entry returned by Horizon's account
+// endpoint. IsAuthorized is an [opt.Option] because Horizon omits or sends null
+// for native balances and assets without explicit authorization flags; only
+// Some(false) marks an unauthorized trustline.
 type HorizonBalance struct {
-	Balance      string `json:"balance"`
-	AssetType    string `json:"asset_type"`
-	AssetCode    string `json:"asset_code"`
-	AssetIssuer  string `json:"asset_issuer"`
-	IsAuthorized *bool  `json:"is_authorized"`
+	Balance      string           `json:"balance"`
+	AssetType    string           `json:"asset_type"`
+	AssetCode    string           `json:"asset_code"`
+	AssetIssuer  string           `json:"asset_issuer"`
+	IsAuthorized opt.Option[bool] `json:"is_authorized"`
 }
 
 type HorizonAccount struct {

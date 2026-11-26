@@ -116,16 +116,16 @@ type PolicyConfig struct {
 //
 //   - cmd/concert-watchdog/main.go:154 (direct call)
 //   - internal/watchdog/policy.go:234 (direct call)
-//   - internal/watchdog/watchdog_test.go:1072 (direct call)
-//   - internal/watchdog/watchdog_test.go:1156 (direct call)
-//   - internal/watchdog/watchdog_test.go:1230 (direct call)
-//   - internal/watchdog/watchdog_test.go:1316 (direct call)
-//   - internal/watchdog/watchdog_test.go:1456 (direct call)
-//   - internal/watchdog/watchdog_test.go:1556 (direct call)
-//   - internal/watchdog/watchdog_test.go:1627 (direct call)
-//   - internal/watchdog/watchdog_test.go:1696 (direct call)
-//   - internal/watchdog/watchdog_test.go:1792 (direct call)
-//   - internal/watchdog/watchdog_test.go:1952 (direct call)
+//   - internal/watchdog/watchdog_test.go:1073 (direct call)
+//   - internal/watchdog/watchdog_test.go:1246 (direct call)
+//   - internal/watchdog/watchdog_test.go:1320 (direct call)
+//   - internal/watchdog/watchdog_test.go:1406 (direct call)
+//   - internal/watchdog/watchdog_test.go:1546 (direct call)
+//   - internal/watchdog/watchdog_test.go:1646 (direct call)
+//   - internal/watchdog/watchdog_test.go:1717 (direct call)
+//   - internal/watchdog/watchdog_test.go:1786 (direct call)
+//   - internal/watchdog/watchdog_test.go:1882 (direct call)
+//   - internal/watchdog/watchdog_test.go:2042 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func DefaultPolicyConfig() PolicyConfig {
@@ -225,9 +225,9 @@ type Policy struct {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/supervisor.go:415 (direct call)
-//   - internal/watchdog/watchdog_test.go:1627 (direct call)
-//   - internal/watchdog/watchdog_test.go:1952 (direct call)
+//   - internal/watchdog/supervisor.go:420 (direct call)
+//   - internal/watchdog/watchdog_test.go:1717 (direct call)
+//   - internal/watchdog/watchdog_test.go:2042 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func NewPolicy(cfg PolicyConfig) (*Policy, error) {
@@ -335,9 +335,9 @@ func NewPolicy(cfg PolicyConfig) (*Policy, error) {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/supervisor.go:679 (direct call)
-//   - internal/watchdog/watchdog_test.go:1633 (direct call)
-//   - internal/watchdog/watchdog_test.go:1956 (direct call)
+//   - internal/watchdog/supervisor.go:684 (direct call)
+//   - internal/watchdog/watchdog_test.go:1723 (direct call)
+//   - internal/watchdog/watchdog_test.go:2046 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (p *Policy) Evaluate(obs Observation) Decision {
@@ -554,8 +554,8 @@ func (p *Policy) Evaluate(obs Observation) Decision {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/supervisor.go:1224 (direct call)
-//   - internal/watchdog/supervisor.go:1278 (direct call)
+//   - internal/watchdog/supervisor.go:1228 (direct call)
+//   - internal/watchdog/supervisor.go:1282 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (p *Policy) RecordCrash(at time.Time) Decision {
@@ -625,7 +625,7 @@ func (p *Policy) RecordCrash(at time.Time) Decision {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/supervisor.go:1275 (direct call)
+//   - internal/watchdog/supervisor.go:1279 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (p *Policy) RestartsInWindow(now time.Time) int {
@@ -864,7 +864,7 @@ func counterDelta(cur, prev float64) float64 {
 // Generated from verified repository symbol references; do not hand-edit.
 //
 //   - internal/watchdog/policy.go:388 (direct call)
-//   - internal/watchdog/supervisor.go:921 (direct call)
+//   - internal/watchdog/supervisor.go:926 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func effectiveRSS(obs Observation) (uint64, bool) {
@@ -897,7 +897,7 @@ func effectiveRSS(obs Observation) (uint64, bool) {
 // Generated from verified repository symbol references; do not hand-edit.
 //
 //   - internal/watchdog/policy.go:389 (direct call)
-//   - internal/watchdog/supervisor.go:922 (direct call)
+//   - internal/watchdog/supervisor.go:927 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func effectiveOpenFDs(obs Observation) (int, bool) {

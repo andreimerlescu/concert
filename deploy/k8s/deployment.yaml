@@ -1,6 +1,6 @@
 # Hardened Enterprise Edition (econcert) Kubernetes Deployment.
 # Uses econcert-only controls: CONCERT_HARDENED, CONCERT_ADMIN_TOKENS_FILE,
-# CONCERT_PORTAL_USERS_FILE, and optional Redis HA / x402 Fast-Lane.
+# CONCERT_PORTAL_USERS_FILE, and optional concert-kv HA / x402 Fast-Lane.
 # For the Apache-2.0 Core Edition (concert), see deploy/k8s/concert-deployment.yaml.
 apiVersion: apps/v1
 kind: Deployment

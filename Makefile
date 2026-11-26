@@ -53,6 +53,9 @@ sbom:
 	python3 scripts/generate-sbom.py --pkg ./cmd/concert --name concert -o $(BIN_DIR)/concert-sbom.cdx.json
 	python3 scripts/generate-sbom.py --pkg ./cmd/wpconcert --tags wordpress --name wpconcert -o $(BIN_DIR)/wpconcert-sbom.cdx.json
 	python3 scripts/generate-sbom.py --pkg ./cmd/econcert --tags "wordpress,enterprise" --name econcert -o $(BIN_DIR)/econcert-sbom.cdx.json
+	python3 scripts/generate-sbom.py --pkg ./cmd/concert-kv --name concert-kv -o $(BIN_DIR)/concert-kv-sbom.cdx.json
+	python3 scripts/generate-sbom.py --pkg ./cmd/concert-cache --name concert-cache -o $(BIN_DIR)/concert-cache-sbom.cdx.json
+	python3 scripts/generate-sbom.py --pkg ./cmd/concert-watchdog --name concert-watchdog -o $(BIN_DIR)/concert-watchdog-sbom.cdx.json
 
 clean:
 	go clean ./...
@@ -105,10 +108,13 @@ dist: build build-fips sbom
 	@cp $(BIN_DIR)/concert-sbom.cdx.json $(DIST_DIR)/concert-$(VERSION)-sbom.cdx.json
 	@cp $(BIN_DIR)/wpconcert-sbom.cdx.json $(DIST_DIR)/wpconcert-$(VERSION)-sbom.cdx.json
 	@cp $(BIN_DIR)/econcert-sbom.cdx.json $(DIST_DIR)/econcert-$(VERSION)-sbom.cdx.json
+	@cp $(BIN_DIR)/concert-kv-sbom.cdx.json $(DIST_DIR)/concert-kv-$(VERSION)-sbom.cdx.json
+	@cp $(BIN_DIR)/concert-cache-sbom.cdx.json $(DIST_DIR)/concert-cache-$(VERSION)-sbom.cdx.json
+	@cp $(BIN_DIR)/concert-watchdog-sbom.cdx.json $(DIST_DIR)/concert-watchdog-$(VERSION)-sbom.cdx.json
 	@cd $(DIST_DIR) && shasum -a 256 *.tar.gz *.cdx.json > SHA256SUMS.txt
 	@echo "Packaged Linux $(VERSION) release artifacts in $(DIST_DIR)/"
 
-# Build local distroless container images for all editions.
+# Build local distroless container images for all editions and companion daemons.
 docker:
 	docker build -f Dockerfile --build-arg VERSION=$(VERSION) \
 		-t $(call img,concert):$(VERSION) -t $(call img,concert):latest .
@@ -116,6 +122,12 @@ docker:
 		-t $(call img,wpconcert):$(VERSION) -t $(call img,wpconcert):latest .
 	docker build -f Dockerfile.econcert --build-arg VERSION=$(VERSION) \
 		-t $(call img,econcert):$(VERSION) -t $(call img,econcert):latest .
+	docker build -f Dockerfile.kv --build-arg VERSION=$(VERSION) \
+		-t $(call img,concert-kv):$(VERSION) -t $(call img,concert-kv):latest .
+	docker build -f Dockerfile.cache --build-arg VERSION=$(VERSION) \
+		-t $(call img,concert-cache):$(VERSION) -t $(call img,concert-cache):latest .
+	docker build -f Dockerfile.watchdog --build-arg VERSION=$(VERSION) \
+		-t $(call img,concert-watchdog):$(VERSION) -t $(call img,concert-watchdog):latest .
 
 # Build multi-arch Linux (amd64 + arm64) distroless images via Docker Buildx.
 # Pass IMAGE_PREFIX=ghcr.io/andreimerlescu DOCKER_PUSH=true to publish manifests.
@@ -128,6 +140,15 @@ docker-buildx:
 		$(if $(filter true,$(DOCKER_PUSH)),--push,) .
 	docker buildx build --platform $(DOCKER_PLATFORMS) -f Dockerfile.econcert --build-arg VERSION=$(VERSION) \
 		-t $(call img,econcert):$(VERSION) -t $(call img,econcert):latest \
+		$(if $(filter true,$(DOCKER_PUSH)),--push,) .
+	docker buildx build --platform $(DOCKER_PLATFORMS) -f Dockerfile.kv --build-arg VERSION=$(VERSION) \
+		-t $(call img,concert-kv):$(VERSION) -t $(call img,concert-kv):latest \
+		$(if $(filter true,$(DOCKER_PUSH)),--push,) .
+	docker buildx build --platform $(DOCKER_PLATFORMS) -f Dockerfile.cache --build-arg VERSION=$(VERSION) \
+		-t $(call img,concert-cache):$(VERSION) -t $(call img,concert-cache):latest \
+		$(if $(filter true,$(DOCKER_PUSH)),--push,) .
+	docker buildx build --platform $(DOCKER_PLATFORMS) -f Dockerfile.watchdog --build-arg VERSION=$(VERSION) \
+		-t $(call img,concert-watchdog):$(VERSION) -t $(call img,concert-watchdog):latest \
 		$(if $(filter true,$(DOCKER_PUSH)),--push,) .
 
 $(PLATFORMS):

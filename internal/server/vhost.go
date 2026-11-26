@@ -343,6 +343,38 @@ func parseDurationOrOff(raw string) (time.Duration, error) {
 	return time.ParseDuration(s)
 }
 
+// buildSiteConfig merges global and per-site Concertfile directives onto base
+// to construct an isolated runtime config for one virtual host. Present
+// [opt.Option] fields override lower-precedence defaults even when holding
+// zero or false values, while absent options leave inherited values intact.
+//
+// # Parameters
+//
+//   - base: Baseline server config copied by value and customized per site.
+//   - gf: Declarative global directives applied before per-site overrides.
+//   - sc: Declarative site directives; sc.Hosts must be non-empty.
+//
+// # Returns
+//
+// The merged per-site config, or a non-nil error if any duration directive or
+// edition preset fails to parse or apply.
+//
+// # Example
+//
+//	siteCfg, err := buildSiteConfig(baseCfg, file.Global, site)
+//	if err != nil {
+//		return err
+//	}
+//
+// # Used By
+//
+// Generated from verified AST symbol references; do not hand-edit.
+//
+//   - internal/server/vhost.go:240 (direct call)
+//   - internal/server/vhost_test.go:206 (direct call)
+//   - internal/server/vhost_test.go:242 (direct call)
+//
+// Scope: internal/server (including tests and all build tags).
 func buildSiteConfig(base config, gf configfile.GlobalConfig, sc configfile.SiteConfig) (config, error) {
 	cfg := base
 	cfg.configFile = ""
@@ -384,8 +416,8 @@ func buildSiteConfig(base config, gf configfile.GlobalConfig, sc configfile.Site
 		cfg.portal.tlsCert = gf.PortalTLSCert
 		cfg.portal.tlsKey = gf.PortalTLSKey
 	}
-	if gf.PortalSecureCookie != nil {
-		cfg.portal.secureCookie = *gf.PortalSecureCookie
+	if v, ok := gf.PortalSecureCookie.Get(); ok {
+		cfg.portal.secureCookie = v
 	}
 	if gf.TrustedProxies != "" {
 		cfg.trustedProxies = gf.TrustedProxies
@@ -396,8 +428,8 @@ func buildSiteConfig(base config, gf configfile.GlobalConfig, sc configfile.Site
 	if gf.LogLevel != "" {
 		cfg.logLevel = gf.LogLevel
 	}
-	if gf.StatsAuth != nil {
-		cfg.statsAuth = *gf.StatsAuth
+	if v, ok := gf.StatsAuth.Get(); ok {
+		cfg.statsAuth = v
 	}
 	if gf.RoomVerifyKeys != "" {
 		cfg.roomVerifyKeys = gf.RoomVerifyKeys
@@ -409,8 +441,8 @@ func buildSiteConfig(base config, gf configfile.GlobalConfig, sc configfile.Site
 		}
 		cfg.roomSignedMaxTTL = d
 	}
-	if gf.RoomLeaseFraction != nil {
-		cfg.roomLeaseFraction = *gf.RoomLeaseFraction
+	if v, ok := gf.RoomLeaseFraction.Get(); ok {
+		cfg.roomLeaseFraction = v
 	}
 	if gf.TokenTTL != "" {
 		d, err := parseDurationOrOff(gf.TokenTTL)
@@ -457,8 +489,8 @@ func buildSiteConfig(base config, gf configfile.GlobalConfig, sc configfile.Site
 			cfg.busyHTMLFile = gf.BusyHTML
 		}
 	}
-	if gf.ClearQueueOnStart != nil {
-		cfg.clearQueueOnStart = *gf.ClearQueueOnStart
+	if v, ok := gf.ClearQueueOnStart.Get(); ok {
+		cfg.clearQueueOnStart = v
 	}
 	if gf.BodyReadIdleTimeout != "" {
 		d, err := parseDurationOrOff(gf.BodyReadIdleTimeout)
@@ -488,8 +520,8 @@ func buildSiteConfig(base config, gf configfile.GlobalConfig, sc configfile.Site
 		}
 		cfg.upstreamBodyIdleTimeout = d
 	}
-	if gf.UpstreamCBFailures != nil {
-		cfg.upstreamCBFailures = *gf.UpstreamCBFailures
+	if v, ok := gf.UpstreamCBFailures.Get(); ok {
+		cfg.upstreamCBFailures = v
 	}
 	if gf.UpstreamCBCooldown != "" {
 		d, err := parseDurationOrOff(gf.UpstreamCBCooldown)
@@ -520,8 +552,8 @@ func buildSiteConfig(base config, gf configfile.GlobalConfig, sc configfile.Site
 	if gf.FastlaneConfig != "" {
 		cfg.fastlaneFile = gf.FastlaneConfig
 	}
-	if gf.FastlaneLockDestinations != nil {
-		cfg.fastlaneLockDestinations = *gf.FastlaneLockDestinations
+	if v, ok := gf.FastlaneLockDestinations.Get(); ok {
+		cfg.fastlaneLockDestinations = v
 	}
 	if gf.DataDir != "" {
 		cfg.dataDir = filepath.Join(gf.DataDir, "sites", sanitizeHostDir(sc.Hosts[0]))
@@ -554,11 +586,11 @@ func buildSiteConfig(base config, gf configfile.GlobalConfig, sc configfile.Site
 	if sc.StaticCacheControl != "" {
 		cfg.staticCacheControl = sc.StaticCacheControl
 	}
-	if sc.StaticFallback != nil {
-		cfg.staticFallback = *sc.StaticFallback
+	if v, ok := sc.StaticFallback.Get(); ok {
+		cfg.staticFallback = v
 	}
-	if sc.Compress != nil {
-		cfg.compress = *sc.Compress
+	if v, ok := sc.Compress.Get(); ok {
+		cfg.compress = v
 	}
 	if sc.Assets != "" {
 		cfg.assets = sc.Assets
@@ -575,8 +607,8 @@ func buildSiteConfig(base config, gf configfile.GlobalConfig, sc configfile.Site
 	if sc.Cap > 0 {
 		cfg.capacity = sc.Cap
 	}
-	if sc.MaxQueue != nil {
-		cfg.maxQueue = *sc.MaxQueue
+	if v, ok := sc.MaxQueue.Get(); ok {
+		cfg.maxQueue = v
 	}
 	if sc.PriorityCap > 0 {
 		cfg.priorityCap = sc.PriorityCap
@@ -584,11 +616,11 @@ func buildSiteConfig(base config, gf configfile.GlobalConfig, sc configfile.Site
 	if sc.PriorityLaneRank > 0 {
 		cfg.priorityLaneRank = sc.PriorityLaneRank
 	}
-	if sc.SecureCookie != nil {
-		cfg.secureCookie = *sc.SecureCookie
+	if v, ok := sc.SecureCookie.Get(); ok {
+		cfg.secureCookie = v
 	}
-	if sc.PreserveHost != nil {
-		cfg.preserveHost = *sc.PreserveHost
+	if v, ok := sc.PreserveHost.Get(); ok {
+		cfg.preserveHost = v
 	}
 	if sc.FCGIIndex != "" {
 		cfg.fcgiIndex = sc.FCGIIndex
@@ -606,8 +638,8 @@ func buildSiteConfig(base config, gf configfile.GlobalConfig, sc configfile.Site
 	if sc.MicroCacheMaxMB > 0 {
 		cfg.microCacheMaxMB = sc.MicroCacheMaxMB
 	}
-	if sc.Abuse != nil {
-		cfg.abuseEnabled = *sc.Abuse
+	if v, ok := sc.Abuse.Get(); ok {
+		cfg.abuseEnabled = v
 	}
 	if sc.AbuseStrikes > 0 {
 		cfg.abuseStrikes = sc.AbuseStrikes
@@ -635,8 +667,8 @@ func buildSiteConfig(base config, gf configfile.GlobalConfig, sc configfile.Site
 		}
 		cfg.roomSignedMaxTTL = d
 	}
-	if sc.RoomLeaseFraction != nil {
-		cfg.roomLeaseFraction = *sc.RoomLeaseFraction
+	if v, ok := sc.RoomLeaseFraction.Get(); ok {
+		cfg.roomLeaseFraction = v
 	}
 	if sc.TokenTTL != "" {
 		d, err := parseDurationOrOff(sc.TokenTTL)
@@ -683,8 +715,8 @@ func buildSiteConfig(base config, gf configfile.GlobalConfig, sc configfile.Site
 			cfg.busyHTMLFile = sc.BusyHTML
 		}
 	}
-	if sc.ClearQueueOnStart != nil {
-		cfg.clearQueueOnStart = *sc.ClearQueueOnStart
+	if v, ok := sc.ClearQueueOnStart.Get(); ok {
+		cfg.clearQueueOnStart = v
 	}
 	if sc.BodyReadIdleTimeout != "" {
 		d, err := parseDurationOrOff(sc.BodyReadIdleTimeout)
@@ -714,8 +746,8 @@ func buildSiteConfig(base config, gf configfile.GlobalConfig, sc configfile.Site
 		}
 		cfg.upstreamBodyIdleTimeout = d
 	}
-	if sc.UpstreamCBFailures != nil {
-		cfg.upstreamCBFailures = *sc.UpstreamCBFailures
+	if v, ok := sc.UpstreamCBFailures.Get(); ok {
+		cfg.upstreamCBFailures = v
 	}
 	if sc.UpstreamCBCooldown != "" {
 		d, err := parseDurationOrOff(sc.UpstreamCBCooldown)
@@ -744,8 +776,8 @@ func buildSiteConfig(base config, gf configfile.GlobalConfig, sc configfile.Site
 	if sc.NetworksConfig != "" {
 		cfg.networksFile = sc.NetworksConfig
 	}
-	if sc.FastlaneLockDestinations != nil {
-		cfg.fastlaneLockDestinations = *sc.FastlaneLockDestinations
+	if v, ok := sc.FastlaneLockDestinations.Get(); ok {
+		cfg.fastlaneLockDestinations = v
 	}
 	if len(sc.Routes) > 0 {
 		cfg.siteRoutes = append([]configfile.RouteConfig(nil), sc.Routes...)

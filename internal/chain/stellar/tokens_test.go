@@ -110,3 +110,67 @@ func TestStellar_PayerPaidClassicAndTrustline(t *testing.T) {
 		t.Fatalf("FindDirectPayment: hash=%q from=%q err=%v", hash, from, err)
 	}
 }
+
+func TestStellar_TokenBalance_IsAuthorizedOption(t *testing.T) {
+	holder, _ := keypair.Random()
+	issuer, _ := keypair.Random()
+	asset := "USDC:" + issuer.Address()
+
+	cases := []struct {
+		name    string
+		entry   map[string]any
+		wantBal string
+	}{
+		{
+			name:    "explicit false blocks balance",
+			entry:   map[string]any{"asset_type": "credit_alphanum4", "asset_code": "USDC", "asset_issuer": issuer.Address(), "balance": "15.0000000", "is_authorized": false},
+			wantBal: "0",
+		},
+		{
+			name:    "explicit null allows balance",
+			entry:   map[string]any{"asset_type": "credit_alphanum4", "asset_code": "USDC", "asset_issuer": issuer.Address(), "balance": "15.0000000", "is_authorized": nil},
+			wantBal: "150000000",
+		},
+		{
+			name:    "omitted allows balance",
+			entry:   map[string]any{"asset_type": "credit_alphanum4", "asset_code": "USDC", "asset_issuer": issuer.Address(), "balance": "15.0000000"},
+			wantBal: "150000000",
+		},
+		{
+			name:    "explicit true allows balance",
+			entry:   map[string]any{"asset_type": "credit_alphanum4", "asset_code": "USDC", "asset_issuer": issuer.Address(), "balance": "15.0000000", "is_authorized": true},
+			wantBal: "150000000",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/":
+					_ = json.NewEncoder(w).Encode(map[string]any{"network_passphrase": network.TestNetworkPassphrase})
+				case "/accounts/" + holder.Address():
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"sequence": "100",
+						"balances": []map[string]any{tc.entry},
+					})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+
+			s, err := NewUnsponsored(Testnet, "", srv.URL, 0)
+			if err != nil {
+				t.Fatalf("NewUnsponsored: %v", err)
+			}
+			bal, err := s.TokenBalance(context.Background(), holder.Address(), asset)
+			if err != nil {
+				t.Fatalf("TokenBalance: %v", err)
+			}
+			if bal.String() != tc.wantBal {
+				t.Fatalf("TokenBalance = %s, want %s", bal.String(), tc.wantBal)
+			}
+		})
+	}
+}

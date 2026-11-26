@@ -61,12 +61,12 @@ type Secret struct {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :95 (direct call)
-//   - :425 (direct call)
+//   - internal/telemetry/telemetry_test.go:96 (direct call)
+//   - internal/telemetry/telemetry_test.go:426 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func NewSecret(raw string) Secret {
 	return Secret{v: raw}
 }
@@ -91,17 +91,15 @@ func NewSecret(raw string) Secret {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :190 (direct call)
-//   - :342 (direct call)
-//   - :342 (function value)
-//   - :456 (direct call)
-//   - :473 (direct call)
-//   - :857 (direct call)
-//   - :857 (function value)
+//   - internal/telemetry/otlp.go:341 (direct call)
+//   - internal/telemetry/otlp.go:848 (direct call)
+//   - internal/telemetry/telemetry_test.go:191 (direct call)
+//   - internal/telemetry/telemetry_test.go:457 (direct call)
+//   - internal/telemetry/telemetry_test.go:474 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (s Secret) Reveal() string {
 	return s.v
 }
@@ -123,14 +121,12 @@ func (s Secret) Reveal() string {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :342 (direct call)
-//   - :342 (function value)
-//   - :855 (direct call)
-//   - :855 (function value)
+//   - internal/telemetry/otlp.go:341 (direct call)
+//   - internal/telemetry/otlp.go:846 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (s Secret) IsZero() bool {
 	return s.v == ""
 }
@@ -155,11 +151,12 @@ func (s Secret) IsZero() bool {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-// No statically resolvable in-repo references found in the stated scope.
+// No statically resolvable in-repo references found in the stated scope
+// (may be satisfied via interface dispatch or external callers).
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (s Secret) Equal(candidate string) bool {
 	if s.v == "" || candidate == "" {
 		return false
@@ -187,11 +184,11 @@ func (s Secret) Equal(candidate string) bool {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :430 (direct call)
+//   - internal/telemetry/telemetry_test.go:431 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (Secret) String() string { return RedactedPlaceholder }
 
 // GoString implements fmt.GoStringer and always returns a redacted marker.
@@ -210,11 +207,11 @@ func (Secret) String() string { return RedactedPlaceholder }
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :431 (direct call)
+//   - internal/telemetry/telemetry_test.go:432 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (Secret) GoString() string { return "telemetry.Secret{" + RedactedPlaceholder + "}" }
 
 // Format implements fmt.Formatter so every fmt verb prints RedactedPlaceholder.
@@ -230,11 +227,12 @@ func (Secret) GoString() string { return "telemetry.Secret{" + RedactedPlacehold
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-// No statically resolvable in-repo references found in the stated scope.
+// No statically resolvable in-repo references found in the stated scope
+// (may be satisfied via interface dispatch or external callers).
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (Secret) Format(f fmt.State, _ rune) {
 	_, _ = io.WriteString(f, RedactedPlaceholder)
 }
@@ -258,11 +256,11 @@ func (Secret) Format(f fmt.State, _ rune) {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :446 (direct call)
+//   - internal/telemetry/telemetry_test.go:447 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (Secret) MarshalText() ([]byte, error) { return []byte(RedactedPlaceholder), nil }
 
 // MarshalJSON implements json.Marshaler and always emits a JSON string
@@ -284,11 +282,12 @@ func (Secret) MarshalText() ([]byte, error) { return []byte(RedactedPlaceholder)
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-// No statically resolvable in-repo references found in the stated scope.
+// No statically resolvable in-repo references found in the stated scope
+// (may be satisfied via interface dispatch or external callers).
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (Secret) MarshalJSON() ([]byte, error) { return json.Marshal(RedactedPlaceholder) }
 
 // LogValue implements slog.LogValuer so structured logs always record
@@ -308,11 +307,12 @@ func (Secret) MarshalJSON() ([]byte, error) { return json.Marshal(RedactedPlaceh
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-// No statically resolvable in-repo references found in the stated scope.
+// No statically resolvable in-repo references found in the stated scope
+// (may be satisfied via interface dispatch or external callers).
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (Secret) LogValue() slog.Value { return slog.StringValue(RedactedPlaceholder) }
 
 var (
@@ -348,12 +348,12 @@ var (
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :455 (direct call)
-//   - :467 (direct call)
+//   - internal/telemetry/telemetry_test.go:456 (direct call)
+//   - internal/telemetry/telemetry_test.go:468 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func SecretFromFile(path string) (Secret, error) {
 	if path == "" {
 		return Secret{}, ErrSecretNotSet
@@ -405,11 +405,11 @@ func SecretFromFile(path string) (Secret, error) {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :473 (direct call)
+//   - internal/telemetry/telemetry_test.go:474 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func SecretFromEnv(name string) (Secret, error) {
 	raw, ok := os.LookupEnv(name)
 	if !ok {
@@ -436,14 +436,12 @@ func SecretFromEnv(name string) (Secret, error) {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :384 (direct call)
-//   - :384 (function value)
-//   - :418 (direct call)
-//   - :418 (function value)
+//   - internal/telemetry/secret.go:384 (direct call)
+//   - internal/telemetry/secret.go:418 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func validateSecret(raw, src string) (Secret, error) {
 	if raw == "" {
 		return Secret{}, fmt.Errorf("secret from %s: %w", src, ErrSecretEmpty)
@@ -473,12 +471,11 @@ func validateSecret(raw, src string) (Secret, error) {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :451 (direct call)
-//   - :451 (function value)
+//   - internal/telemetry/secret.go:449 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func looksLikePlaceholder(s string) bool {
 	switch strings.ToLower(s) {
 	case "changeme", "change-me", "replace-me", "your-api-key", "your_api_key",

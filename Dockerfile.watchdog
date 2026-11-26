@@ -1,0 +1,45 @@
+# syntax=docker/dockerfile:1
+
+ARG GO_VERSION=1.27
+ARG GOFIPS140=off
+ARG VERSION=v0.3.0
+
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-bookworm AS builder
+
+WORKDIR /src
+ENV GOTOOLCHAIN=auto
+
+COPY go.mod go.sum ./
+RUN go mod download && go mod verify
+
+COPY VERSION LICENSE version.go ./
+COPY cmd/concert-watchdog ./cmd/concert-watchdog
+COPY internal ./internal
+
+ARG TARGETOS
+ARG TARGETARCH
+ARG GOFIPS140
+
+RUN CGO_ENABLED=0 \
+    GOOS=${TARGETOS:-linux} \
+    GOARCH=${TARGETARCH:-amd64} \
+    GOFIPS140=${GOFIPS140} \
+    go build -trimpath -buildvcs=false -ldflags="-s -w" -o /out/concert-watchdog ./cmd/concert-watchdog && \
+    mkdir -p /rootfs/run/concert
+
+# Minimal, non-root, distroless runtime image (no shell, no package manager).
+FROM gcr.io/distroless/static-debian12:nonroot
+
+ARG VERSION=v0.3.0
+
+LABEL org.opencontainers.image.title="concert-watchdog" \
+      org.opencontainers.image.description="External Health, Resource, and Recovery Supervisor for Concert Proxies" \
+      org.opencontainers.image.source="https://github.com/andreimerlescu/concert" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.version="${VERSION}"
+
+COPY --from=builder /out/concert-watchdog /usr/local/bin/concert-watchdog
+COPY --from=builder --chown=65532:65532 /rootfs/run/concert /run/concert
+
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/concert-watchdog"]

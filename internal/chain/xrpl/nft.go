@@ -95,7 +95,7 @@ func (s *Scheme) Reconcile(ctx context.Context, p x402.Payload, r x402.Requireme
 	}
 	amt := t.Amounts["Amount"]
 	flags, _ := t.U32("Flags")
-	if t.TransactionType == nil || *t.TransactionType != 0 || EncodeAccountID(t.Accounts["Account"]) != payer ||
+	if txType, ok := t.TransactionType.Get(); !ok || txType != 0 || EncodeAccountID(t.Accounts["Account"]) != payer ||
 		t.Accounts["Destination"] != dest || flags&tfPartialPayment != 0 {
 		return "", errors.New("payment terms mismatch")
 	}

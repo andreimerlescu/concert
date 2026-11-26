@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/andreimerlescu/concert/internal/fastlane"
+	"github.com/andreimerlescu/concert/internal/opt"
 )
 
 func mockMainnetGateway() http.Handler {
@@ -68,11 +69,10 @@ func TestFastLanePortal_LiveConfigEditAndPayToGuards(t *testing.T) {
 	payToInitial := "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe"
 	payToUpdated := "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
 
-	slideOn := true
 	fc := fastlane.Config{
 		Enabled: true, Origin: "http://127.0.0.1:8080", TestMode: true, Merchant: "Live Portal Test",
 		TermsURL: "http://127.0.0.1:8080/terms", PrivacyURL: "http://127.0.0.1:8080/privacy", RefundURL: "http://127.0.0.1:8080/refunds",
-		PassSeconds: 300, PassIdleSeconds: 180, PassMaxSeconds: 1800, PassSliding: &slideOn,
+		PassSeconds: 300, PassIdleSeconds: 180, PassMaxSeconds: 1800, PassSliding: opt.Some(true),
 		Offers: []fastlane.Offer{{
 			Label:         "XRP Pass",
 			AssetSymbol:   "XRP",
@@ -272,11 +272,10 @@ func TestFastLaneOnlineArchiveAndRevoke(t *testing.T) {
 	}
 
 	req := fastlane.Requirements{Scheme: "exact", Network: "xrpl:1", Amount: "100", Asset: "XRP", PayTo: "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe", MaxTimeoutSeconds: 60, Extra: map[string]any{"areFeesSponsored": false}}
-	slideOn := true
 	fc := fastlane.Config{
 		Enabled: true, Origin: "http://127.0.0.1:8080", TestMode: true, Merchant: "Archive Revoke Test",
 		TermsURL: "http://127.0.0.1:8080/terms", PrivacyURL: "http://127.0.0.1:8080/privacy", RefundURL: "http://127.0.0.1:8080/refunds",
-		PassSeconds: 300, PassIdleSeconds: 180, PassMaxSeconds: 1800, PassSliding: &slideOn,
+		PassSeconds: 300, PassIdleSeconds: 180, PassMaxSeconds: 1800, PassSliding: opt.Some(true),
 		Offers: []fastlane.Offer{{Label: "XRP", Requirements: req}},
 	}
 	if err := os.WriteFile(cfg.fastlaneFile, mustMarshal(t, fc), 0o600); err != nil {
@@ -377,12 +376,11 @@ func TestFastLaneSlidingPassAndSlowUpstream(t *testing.T) {
 	cfg.priorityCap = 2
 	cfg.fastlaneFile = filepath.Join(dir, "fastlane.json")
 
-	slideOn := true
 	req := fastlane.Requirements{Scheme: "exact", Network: "xrpl:1", Amount: "100", Asset: "XRP", PayTo: "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe", MaxTimeoutSeconds: 60, Extra: map[string]any{"areFeesSponsored": false}}
 	fc := fastlane.Config{
 		Enabled: true, Origin: "http://127.0.0.1:8080", TestMode: true, Merchant: "Sliding Test",
 		TermsURL: "http://127.0.0.1:8080/terms", PrivacyURL: "http://127.0.0.1:8080/privacy", RefundURL: "http://127.0.0.1:8080/refunds",
-		PassSeconds: 60, PassIdleSeconds: 60, PassMaxSeconds: 600, PassSliding: &slideOn,
+		PassSeconds: 60, PassIdleSeconds: 60, PassMaxSeconds: 600, PassSliding: opt.Some(true),
 		Offers: []fastlane.Offer{{Label: "XRP", Requirements: req}},
 	}
 	if err := os.WriteFile(cfg.fastlaneFile, mustMarshal(t, fc), 0o600); err != nil {

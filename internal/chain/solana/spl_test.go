@@ -204,3 +204,67 @@ func TestSolana_AutoScanNFT_TokenBalance_DirectPayment(t *testing.T) {
 		t.Fatalf("FindDirectPayment SOL: sig=%q payer=%q err=%v", sig, payer, err)
 	}
 }
+
+func TestSolana_FindDirectPayment_BlockTimeOption(t *testing.T) {
+	ownerPub, _, _ := ed25519.GenerateKey(nil)
+	destPub, _, _ := ed25519.GenerateKey(nil)
+	var owner, dest PublicKey
+	copy(owner[:], ownerPub)
+	copy(dest[:], destPub)
+
+	now := time.Now().UTC()
+	staleUnix := now.Add(-5 * time.Minute).Unix()
+
+	// Test both null blockTime (allowed when RPC omits timestamp) and stale blockTime (skipped).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID     any               `json:"id"`
+			Method string            `json:"method"`
+			Params []json.RawMessage `json:"params"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		var res any
+		switch req.Method {
+		case "getGenesisHash":
+			res = devnetGenesis
+		case "getSignaturesForAddress":
+			res = []map[string]any{
+				{"signature": "sigStale", "err": nil, "memo": "concert:bt1", "blockTime": staleUnix},
+				{"signature": "sigNullBT", "err": nil, "memo": "concert:bt1", "blockTime": nil},
+			}
+		case "getTransaction":
+			var sig string
+			_ = json.Unmarshal(req.Params[0], &sig)
+			if sig == "sigStale" {
+				t.Errorf("stale signature with blockTime < since-30s should have been skipped before getTransaction")
+			}
+			res = map[string]any{
+				"blockTime": nil,
+				"meta": map[string]any{
+					"err":          nil,
+					"preBalances":  []int64{1000000, 500000},
+					"postBalances": []int64{994999, 500001},
+				},
+				"transaction": map[string]any{
+					"message": map[string]any{
+						"accountKeys": []map[string]any{
+							{"pubkey": owner.String(), "signer": true},
+							{"pubkey": dest.String(), "signer": false},
+						},
+						"instructions": []map[string]any{
+							{"program": "spl-memo", "programId": memoProgram.String(), "parsed": "concert:bt1"},
+						},
+					},
+				},
+			}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": res})
+	}))
+	defer srv.Close()
+
+	s := New(Devnet, srv.URL)
+	sig, payer, err := s.FindDirectPayment(context.Background(), owner.String(), dest.String(), "SOL", "1", "concert:bt1", now)
+	if err != nil || sig != "sigNullBT" || payer != owner.String() {
+		t.Fatalf("FindDirectPayment(null blockTime after stale): sig=%q payer=%q err=%v", sig, payer, err)
+	}
+}

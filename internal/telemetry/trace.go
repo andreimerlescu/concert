@@ -65,14 +65,12 @@ type TraceID [16]byte
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :224 (direct call)
-//   - :224 (function value)
-//   - :993 (direct call)
-//   - :993 (function value)
+//   - internal/telemetry/trace.go:210 (direct call)
+//   - internal/telemetry/trace.go:981 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (id TraceID) IsValid() bool {
 	for _, b := range id {
 		if b != 0 {
@@ -98,15 +96,13 @@ func (id TraceID) IsValid() bool {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :241 (direct call)
-//   - :378 (direct call)
-//   - :378 (function value)
-//   - :976 (direct call)
-//   - :976 (function value)
+//   - internal/telemetry/otlp.go:967 (direct call)
+//   - internal/telemetry/telemetry_test.go:242 (direct call)
+//   - internal/telemetry/trace.go:363 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (id TraceID) String() string {
 	return hex.EncodeToString(id[:])
 }
@@ -131,16 +127,13 @@ type SpanID [8]byte
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :224 (direct call)
-//   - :224 (function value)
-//   - :988 (direct call)
-//   - :988 (function value)
-//   - :1023 (direct call)
-//   - :1023 (function value)
+//   - internal/telemetry/otlp.go:979 (direct call)
+//   - internal/telemetry/trace.go:210 (direct call)
+//   - internal/telemetry/trace.go:1010 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (id SpanID) IsValid() bool {
 	for _, b := range id {
 		if b != 0 {
@@ -166,17 +159,14 @@ func (id SpanID) IsValid() bool {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :241 (direct call)
-//   - :378 (direct call)
-//   - :378 (function value)
-//   - :977 (direct call)
-//   - :977 (function value)
-//   - :989 (direct call)
-//   - :989 (function value)
+//   - internal/telemetry/otlp.go:968 (direct call)
+//   - internal/telemetry/otlp.go:980 (direct call)
+//   - internal/telemetry/telemetry_test.go:242 (direct call)
+//   - internal/telemetry/trace.go:363 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (id SpanID) String() string {
 	return hex.EncodeToString(id[:])
 }
@@ -207,19 +197,15 @@ type SpanContext struct {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :45 (direct call)
-//   - :342 (direct call)
-//   - :342 (function value)
-//   - :375 (direct call)
-//   - :375 (function value)
-//   - :546 (direct call)
-//   - :546 (function value)
-//   - :549 (direct call)
-//   - :549 (function value)
+//   - internal/telemetry/telemetry_test.go:46 (direct call)
+//   - internal/telemetry/trace.go:328 (direct call)
+//   - internal/telemetry/trace.go:360 (direct call)
+//   - internal/telemetry/trace.go:526 (direct call)
+//   - internal/telemetry/trace.go:529 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (sc SpanContext) IsValid() bool {
 	return sc.TraceID.IsValid() && sc.SpanID.IsValid()
 }
@@ -242,18 +228,17 @@ func (sc SpanContext) IsValid() bool {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :45 (direct call)
-//   - :58 (direct call)
-//   - :365 (direct call)
-//   - :373 (direct call)
-//   - :396 (direct call)
-//   - :560 (direct call)
-//   - :964 (direct call)
-//   - :964 (function value)
+//   - internal/telemetry/telemetry_test.go:46 (direct call)
+//   - internal/telemetry/telemetry_test.go:59 (direct call)
+//   - internal/telemetry/telemetry_test.go:366 (direct call)
+//   - internal/telemetry/telemetry_test.go:374 (direct call)
+//   - internal/telemetry/telemetry_test.go:397 (direct call)
+//   - internal/telemetry/telemetry_test.go:561 (direct call)
+//   - internal/telemetry/trace.go:953 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (sc SpanContext) IsSampled() bool {
 	return sc.TraceFlags&FlagSampled != 0
 }
@@ -284,16 +269,17 @@ func (sc SpanContext) IsSampled() bool {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :41 (direct call)
-//   - :54 (direct call)
-//   - :73 (direct call)
-//   - :142 (direct call)
-//   - :371 (direct call)
-//   - :556 (direct call)
+//   - internal/telemetry/telemetry_test.go:42 (direct call)
+//   - internal/telemetry/telemetry_test.go:55 (direct call)
+//   - internal/telemetry/telemetry_test.go:74 (direct call)
+//   - internal/telemetry/telemetry_test.go:143 (direct call)
+//   - internal/telemetry/telemetry_test.go:372 (direct call)
+//   - internal/telemetry/telemetry_test.go:557 (direct call)
+//   - internal/telemetry/telemetry_test.go:586 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func ParseTraceparent(header string) (SpanContext, error) {
 	s := strings.TrimSpace(header)
 	if len(s) < 55 {
@@ -363,14 +349,13 @@ func ParseTraceparent(header string) (SpanContext, error) {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :48 (direct call)
-//   - :561 (direct call)
-//   - :773 (direct call)
-//   - :773 (function value)
+//   - internal/telemetry/telemetry_test.go:49 (direct call)
+//   - internal/telemetry/telemetry_test.go:562 (direct call)
+//   - internal/telemetry/trace.go:762 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func FormatTraceparent(sc SpanContext) string {
 	if !sc.IsValid() {
 		return ""
@@ -395,14 +380,12 @@ func FormatTraceparent(sc SpanContext) string {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :307 (direct call)
-//   - :307 (function value)
-//   - :324 (direct call)
-//   - :324 (function value)
+//   - internal/telemetry/trace.go:293 (direct call)
+//   - internal/telemetry/trace.go:310 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func isLowerHex(s string) bool {
 	for i := range len(s) {
 		c := s[i]
@@ -433,12 +416,11 @@ type remoteSpanContextKey struct{}
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :452 (direct call)
-//   - :452 (function value)
+//   - internal/telemetry/otlp.go:451 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func ContextWithSpan(ctx context.Context, span *Span) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
@@ -464,14 +446,13 @@ func ContextWithSpan(ctx context.Context, span *Span) context.Context {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :154 (direct call)
-//   - :161 (direct call)
-//   - :546 (direct call)
-//   - :546 (function value)
+//   - internal/telemetry/telemetry_test.go:155 (direct call)
+//   - internal/telemetry/telemetry_test.go:162 (direct call)
+//   - internal/telemetry/trace.go:526 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func SpanFromContext(ctx context.Context) *Span {
 	if ctx == nil {
 		return nil
@@ -501,12 +482,12 @@ func SpanFromContext(ctx context.Context) *Span {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :146 (direct call)
-//   - :372 (direct call)
+//   - internal/telemetry/telemetry_test.go:147 (direct call)
+//   - internal/telemetry/telemetry_test.go:373 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func ContextWithRemoteSpanContext(ctx context.Context, sc SpanContext) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
@@ -533,12 +514,11 @@ func ContextWithRemoteSpanContext(ctx context.Context, sc SpanContext) context.C
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :429 (direct call)
-//   - :429 (function value)
+//   - internal/telemetry/otlp.go:428 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func SpanContextFromContext(ctx context.Context) (SpanContext, bool) {
 	if ctx == nil {
 		return SpanContext{}, false
@@ -589,17 +569,17 @@ type Attribute struct {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :148 (direct call)
-//   - :351 (direct call)
-//   - :351 (function value)
-//   - :353 (direct call)
-//   - :353 (function value)
-//   - :901 (direct call)
-//   - :901 (function value)
+//   - internal/telemetry/otlp.go:350 (direct call)
+//   - internal/telemetry/otlp.go:352 (direct call)
+//   - internal/telemetry/telemetry_test.go:149 (direct call)
+//   - internal/telemetry/telemetry_test.go:594 (direct call)
+//   - internal/telemetry/telemetry_test.go:605 (direct call)
+//   - internal/telemetry/telemetry_test.go:606 (direct call)
+//   - internal/telemetry/trace.go:890 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func StringAttr(key, val string) Attribute {
 	return Attribute{Key: key, Kind: AttrString, StrVal: val}
 }
@@ -621,12 +601,14 @@ func StringAttr(key, val string) Attribute {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :149 (direct call)
-//   - :529 (direct call)
+//   - internal/telemetry/telemetry_test.go:150 (direct call)
+//   - internal/telemetry/telemetry_test.go:530 (direct call)
+//   - internal/telemetry/telemetry_test.go:607 (direct call)
+//   - internal/telemetry/telemetry_test.go:608 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func IntAttr(key string, val int64) Attribute {
 	return Attribute{Key: key, Kind: AttrInt, IntVal: val}
 }
@@ -648,11 +630,15 @@ func IntAttr(key string, val int64) Attribute {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :150 (direct call)
+//   - internal/telemetry/telemetry_test.go:151 (direct call)
+//   - internal/telemetry/telemetry_test.go:609 (direct call)
+//   - internal/telemetry/telemetry_test.go:610 (direct call)
+//   - internal/telemetry/telemetry_test.go:611 (direct call)
+//   - internal/telemetry/telemetry_test.go:612 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func Float64Attr(key string, val float64) Attribute {
 	return Attribute{Key: key, Kind: AttrFloat64, FltVal: val}
 }
@@ -674,11 +660,13 @@ func Float64Attr(key string, val float64) Attribute {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :151 (direct call)
+//   - internal/telemetry/telemetry_test.go:152 (direct call)
+//   - internal/telemetry/telemetry_test.go:613 (direct call)
+//   - internal/telemetry/telemetry_test.go:614 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func BoolAttr(key string, val bool) Attribute {
 	return Attribute{Key: key, Kind: AttrBool, BolVal: val}
 }
@@ -731,13 +719,13 @@ type Span struct {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :365 (direct call)
-//   - :373 (direct call)
-//   - :396 (direct call)
+//   - internal/telemetry/telemetry_test.go:366 (direct call)
+//   - internal/telemetry/telemetry_test.go:374 (direct call)
+//   - internal/telemetry/telemetry_test.go:397 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (s *Span) SpanContext() SpanContext {
 	if s == nil {
 		return SpanContext{}
@@ -761,11 +749,12 @@ func (s *Span) SpanContext() SpanContext {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-// No statically resolvable in-repo references found in the stated scope.
+// No statically resolvable in-repo references found in the stated scope
+// (may be satisfied via interface dispatch or external callers).
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (s *Span) Traceparent() string {
 	if s == nil {
 		return ""
@@ -786,11 +775,11 @@ func (s *Span) Traceparent() string {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :529 (direct call)
+//   - internal/telemetry/telemetry_test.go:530 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (s *Span) SetAttributes(attrs ...Attribute) {
 	if s == nil || len(attrs) == 0 {
 		return
@@ -816,12 +805,12 @@ func (s *Span) SetAttributes(attrs ...Attribute) {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :153 (direct call)
-//   - :159 (direct call)
+//   - internal/telemetry/telemetry_test.go:154 (direct call)
+//   - internal/telemetry/telemetry_test.go:160 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (s *Span) SetKind(kind SpanKind) {
 	if s == nil {
 		return
@@ -848,11 +837,11 @@ func (s *Span) SetKind(kind SpanKind) {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :165 (direct call)
+//   - internal/telemetry/telemetry_test.go:166 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (s *Span) SetStatus(code StatusCode, description string) {
 	if s == nil {
 		return
@@ -881,11 +870,11 @@ func (s *Span) SetStatus(code StatusCode, description string) {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :160 (direct call)
+//   - internal/telemetry/telemetry_test.go:161 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (s *Span) RecordError(err error) {
 	if s == nil || err == nil {
 		return
@@ -917,19 +906,19 @@ func (s *Span) RecordError(err error) {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :164 (direct call)
-//   - :166 (direct call)
-//   - :168 (direct call)
-//   - :311 (direct call)
-//   - :318 (direct call)
-//   - :368 (direct call)
-//   - :376 (direct call)
-//   - :399 (direct call)
-//   - :530 (direct call)
+//   - internal/telemetry/telemetry_test.go:165 (direct call)
+//   - internal/telemetry/telemetry_test.go:167 (direct call)
+//   - internal/telemetry/telemetry_test.go:169 (direct call)
+//   - internal/telemetry/telemetry_test.go:312 (direct call)
+//   - internal/telemetry/telemetry_test.go:319 (direct call)
+//   - internal/telemetry/telemetry_test.go:369 (direct call)
+//   - internal/telemetry/telemetry_test.go:377 (direct call)
+//   - internal/telemetry/telemetry_test.go:400 (direct call)
+//   - internal/telemetry/telemetry_test.go:531 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (s *Span) End() {
 	if s == nil {
 		return
@@ -982,12 +971,11 @@ func (s *Span) End() {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :434 (direct call)
-//   - :434 (function value)
+//   - internal/telemetry/otlp.go:433 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func newTraceID() TraceID {
 	var id TraceID
 	for !id.IsValid() {
@@ -1012,12 +1000,11 @@ func newTraceID() TraceID {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :439 (direct call)
-//   - :439 (function value)
+//   - internal/telemetry/otlp.go:438 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func newSpanID() SpanID {
 	var id SpanID
 	for !id.IsValid() {
@@ -1044,12 +1031,11 @@ func newSpanID() SpanID {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :435 (direct call)
-//   - :435 (function value)
+//   - internal/telemetry/otlp.go:434 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func shouldSampleTrace(tid TraceID, rate float64) bool {
 	if rate <= 0 || math.IsNaN(rate) {
 		return false

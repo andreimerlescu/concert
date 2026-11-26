@@ -3,9 +3,12 @@ package xrpl
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/andreimerlescu/concert/internal/opt"
 	"github.com/andreimerlescu/concert/internal/x402"
 )
 
@@ -123,7 +126,7 @@ func TestXRPL_TrustlineAndDirectPayment(t *testing.T) {
 				TxType:         "Payment",
 				Account:        holder,
 				Destination:    dest,
-				DestinationTag: &tag,
+				DestinationTag: opt.Some(tag),
 				Memos:          []string{"concert:tag-proof-1"},
 				DeliveredDrops: "1",
 			},
@@ -134,7 +137,7 @@ func TestXRPL_TrustlineAndDirectPayment(t *testing.T) {
 				TxType:            "Payment",
 				Account:           holder,
 				Destination:       dest,
-				DestinationTag:    &tag,
+				DestinationTag:    opt.Some(tag),
 				Memos:             []string{"concert:rlusd-pay-1"},
 				DeliveredCurrency: "524C555344000000000000000000000000000000",
 				DeliveredIssuer:   issuer,
@@ -170,5 +173,152 @@ func TestXRPL_TrustlineAndDirectPayment(t *testing.T) {
 	hash, payer, err = s.FindDirectPaymentSince(context.Background(), holder, dest, "RLUSD:"+issuer, "0.99", tag, true, "concert:rlusd-pay-1", 400, now)
 	if err != nil || hash != "DEADBEEF02" || payer != holder {
 		t.Fatalf("FindDirectPaymentSince(recent RLUSD): hash=%q payer=%q err=%v", hash, payer, err)
+	}
+}
+
+func TestXRPL_OptionFields_DestinationTagNetworkIDAndTxType(t *testing.T) {
+	holder := "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe"
+	dest := "rQLTGGRoGbQZLK2ErVKio1pxViAR8fvMBT"
+
+	// 1. RPC.NetworkID: omitted and null default to 0; explicit non-zero value preserved.
+	netCases := []struct {
+		name string
+		info map[string]any
+		want uint32
+	}{
+		{name: "omitted network_id", info: map[string]any{}, want: 0},
+		{name: "null network_id", info: map[string]any{"network_id": nil}, want: 0},
+		{name: "explicit network_id", info: map[string]any{"network_id": 2}, want: 2},
+	}
+	for _, tc := range netCases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"result": map[string]any{"status": "success", "info": tc.info},
+				})
+			}))
+			defer srv.Close()
+			got, err := (RPC{URL: srv.URL}).NetworkID(context.Background())
+			if err != nil || got != tc.want {
+				t.Fatalf("NetworkID() = (%d, %v), want (%d, nil)", got, err, tc.want)
+			}
+		})
+	}
+
+	// 2. RPC.AccountTx: decodes DestinationTag=0 as Some(0), omitted/null as None, across tx & tx_json.
+	txSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"result": map[string]any{
+				"status": "success",
+				"transactions": []map[string]any{
+					{
+						"validated": true,
+						"tx": map[string]any{
+							"hash":            "H_OMITTED",
+							"TransactionType": "Payment",
+							"Account":         holder,
+							"Destination":     dest,
+						},
+						"meta": map[string]any{"TransactionResult": "tesSUCCESS", "delivered_amount": "1"},
+					},
+					{
+						"validated": true,
+						"tx": map[string]any{
+							"hash":            "H_ZERO_TX",
+							"TransactionType": "Payment",
+							"Account":         holder,
+							"Destination":     dest,
+							"DestinationTag":  0,
+						},
+						"meta": map[string]any{"TransactionResult": "tesSUCCESS", "delivered_amount": "1"},
+					},
+					{
+						"validated": true,
+						"hash":      "H_NULL_TXJSON",
+						"tx_json": map[string]any{
+							"TransactionType": "Payment",
+							"Account":         holder,
+							"Destination":     dest,
+							"DestinationTag":  nil,
+						},
+						"meta": map[string]any{"TransactionResult": "tesSUCCESS", "delivered_amount": "1"},
+					},
+					{
+						"validated": true,
+						"hash":      "H_TAG_TXJSON",
+						"tx_json": map[string]any{
+							"TransactionType": "Payment",
+							"Account":         holder,
+							"Destination":     dest,
+							"DestinationTag":  42,
+						},
+						"meta": map[string]any{"TransactionResult": "tesSUCCESS", "delivered_amount": "1"},
+					},
+				},
+			},
+		})
+	}))
+	defer txSrv.Close()
+
+	entries, err := (RPC{URL: txSrv.URL}).AccountTx(context.Background(), dest, 0, 10)
+	if err != nil {
+		t.Fatalf("AccountTx: %v", err)
+	}
+	if len(entries) != 4 {
+		t.Fatalf("AccountTx len = %d, want 4", len(entries))
+	}
+	if entries[0].DestinationTag.IsSome() {
+		t.Errorf("H_OMITTED: got %v, want None", entries[0].DestinationTag)
+	}
+	if !opt.Equal(entries[1].DestinationTag, opt.Some(uint32(0))) {
+		t.Errorf("H_ZERO_TX: got %v, want Some(0)", entries[1].DestinationTag)
+	}
+	if entries[2].DestinationTag.IsSome() {
+		t.Errorf("H_NULL_TXJSON: got %v, want None", entries[2].DestinationTag)
+	}
+	if !opt.Equal(entries[3].DestinationTag, opt.Some(uint32(42))) {
+		t.Errorf("H_TAG_TXJSON: got %v, want Some(42)", entries[3].DestinationTag)
+	}
+
+	// 3. FindDirectPayment with requireTag=true and destTag=0 must reject None and accept Some(0).
+	l := &fakeTokenLedger{
+		fakeLedger: fakeLedger{networkID: 1, current: 500},
+		txs:        []AccountTxEntry{entries[0]},
+	}
+	s := &Scheme{Network: "xrpl:1", Ledger: l, MaxFeeDrops: 50000, pending: map[string]time.Time{}}
+	if _, _, err := s.FindDirectPayment(context.Background(), holder, dest, "XRP", "1", 0, true, "", 0); err == nil {
+		t.Fatal("FindDirectPayment(requireTag=true, destTag=0) must reject absent DestinationTag (None)")
+	}
+	l.txs = []AccountTxEntry{entries[0], entries[1]}
+	hash, payer, err := s.FindDirectPayment(context.Background(), holder, dest, "XRP", "1", 0, true, "", 0)
+	if err != nil || hash != "H_ZERO_TX" || payer != holder {
+		t.Fatalf("FindDirectPayment(requireTag=true, destTag=0) = (%q, %q, %v), want (H_ZERO_TX, %q, nil)", hash, payer, err, holder)
+	}
+
+	// 4. Decode sets TransactionType to Some(0) for Payment; absence remains None.
+	payerKey, err := KeyFromSeed("sEdTM1uX8pu2do5XvTnutH6HsouMaM2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.info = AccountInfo{Sequence: 7, Balance: "50000000"}
+	req := x402.Requirements{
+		Scheme:            "exact",
+		Network:           "xrpl:1",
+		Amount:            "1000",
+		Asset:             "XRP",
+		PayTo:             dest,
+		MaxTimeoutSeconds: 60,
+		Extra:             map[string]any{"areFeesSponsored": false},
+	}
+	blob, err := NewPaymentBlob(context.Background(), l, payerKey, req)
+	if err != nil {
+		t.Fatalf("NewPaymentBlob: %v", err)
+	}
+	decoded, err := Decode(blob)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if !opt.Equal(decoded.TransactionType, opt.Some(uint16(0))) {
+		t.Fatalf("decoded.TransactionType = %v, want Some(0)", decoded.TransactionType)
 	}
 }

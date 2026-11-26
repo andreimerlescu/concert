@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/andreimerlescu/concert/internal/opt"
 	"github.com/gin-gonic/gin"
 )
 
@@ -90,11 +91,39 @@ func unixMS(t time.Time) int64 {
 	return t.UnixMilli()
 }
 
-func ptrMS(t *time.Time) int64 {
-	if t == nil {
+// optTimeMS formats an optional timestamp as Unix milliseconds for portal
+// fragment data-ms attributes, returning 0 when t is absent or wraps a zero
+// [time.Time].
+//
+// # Parameters
+//
+//   - t: Optional timestamp to convert.
+//
+// # Returns
+//
+// Unix milliseconds when t holds a non-zero instant, otherwise 0.
+//
+// # Example
+//
+//	ms := optTimeMS(opt.Some(time.Now()))
+//
+// # Used By
+//
+// Generated from verified AST symbol references; do not hand-edit.
+//
+//   - internal/server/fragments.go:322 (direct call)
+//   - internal/server/fragments.go:323 (direct call)
+//   - internal/server/fragments.go:324 (direct call)
+//   - internal/server/fragments.go:325 (direct call)
+//   - internal/server/fragments.go:326 (direct call)
+//
+// Scope: internal/server (including tests and all build tags).
+func optTimeMS(t opt.Option[time.Time]) int64 {
+	v, ok := t.Get()
+	if !ok {
 		return 0
 	}
-	return unixMS(*t)
+	return unixMS(v)
 }
 
 func statusBadgeClass(code int) string {
@@ -290,11 +319,11 @@ func (v historyEntryView) RowClass() string {
 	return ""
 }
 
-func (v banWindowView) BeganMS() int64    { return ptrMS(v.Began) }
-func (v banWindowView) UntilMS() int64    { return ptrMS(v.Until) }
-func (v banWindowView) EndedMS() int64    { return ptrMS(v.Ended) }
-func (v banWindowView) FirstHitMS() int64 { return ptrMS(v.FirstHit) }
-func (v banWindowView) LastHitMS() int64  { return ptrMS(v.LastHit) }
+func (v banWindowView) BeganMS() int64    { return optTimeMS(v.Began) }
+func (v banWindowView) UntilMS() int64    { return optTimeMS(v.Until) }
+func (v banWindowView) EndedMS() int64    { return optTimeMS(v.Ended) }
+func (v banWindowView) FirstHitMS() int64 { return optTimeMS(v.FirstHit) }
+func (v banWindowView) LastHitMS() int64  { return optTimeMS(v.LastHit) }
 
 func (v banWindowView) RowClass() string {
 	switch {

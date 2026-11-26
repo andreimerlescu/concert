@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/andreimerlescu/concert/internal/chain/httpx"
+	"github.com/andreimerlescu/concert/internal/opt"
 )
 
 // rippleEpochOffset is the number of seconds between Unix epoch (1970-01-01)
@@ -45,6 +46,8 @@ type TrustLine struct {
 }
 
 // AccountTxEntry is a validated payment entry returned by account_tx.
+// DestinationTag uses [opt.Option] so an explicit tag of 0 (Some(0)) is
+// distinct from an omitted destination tag (None).
 type AccountTxEntry struct {
 	Hash              string
 	Validated         bool
@@ -54,7 +57,7 @@ type AccountTxEntry struct {
 	TxType            string
 	Account           string
 	Destination       string
-	DestinationTag    *uint32
+	DestinationTag    opt.Option[uint32]
 	Flags             uint32
 	Memos             []string // decoded UTF-8 MemoData strings
 	DeliveredDrops    string
@@ -120,16 +123,14 @@ func (c RPC) call(ctx context.Context, method string, params map[string]any, out
 func (c RPC) NetworkID(ctx context.Context) (uint32, error) {
 	var out struct {
 		Info struct {
-			NetworkID *uint32 `json:"network_id"`
+			NetworkID opt.Option[uint32] `json:"network_id"`
 		} `json:"info"`
 	}
 	if err := c.call(ctx, "server_info", map[string]any{}, &out); err != nil {
 		return 0, err
 	}
-	if out.Info.NetworkID == nil {
-		return 0, nil // Mainnet servers may omit it
-	}
-	return *out.Info.NetworkID, nil
+	// Mainnet rippled servers may omit network_id; absent defaults to 0.
+	return out.Info.NetworkID.UnwrapOr(0), nil
 }
 
 func (c RPC) LedgerIndex(ctx context.Context) (uint32, error) {
@@ -286,14 +287,14 @@ func (c RPC) AccountTx(ctx context.Context, account string, ledgerIndexMin uint3
 		Transactions []struct {
 			Validated bool `json:"validated"`
 			Tx        *struct {
-				Hash           string  `json:"hash"`
-				LedgerIndex    uint32  `json:"ledger_index"`
-				Date           uint32  `json:"date"`
-				TxType         string  `json:"TransactionType"`
-				Account        string  `json:"Account"`
-				Destination    string  `json:"Destination"`
-				DestinationTag *uint32 `json:"DestinationTag"`
-				Flags          uint32  `json:"Flags"`
+				Hash           string             `json:"hash"`
+				LedgerIndex    uint32             `json:"ledger_index"`
+				Date           uint32             `json:"date"`
+				TxType         string             `json:"TransactionType"`
+				Account        string             `json:"Account"`
+				Destination    string             `json:"Destination"`
+				DestinationTag opt.Option[uint32] `json:"DestinationTag"`
+				Flags          uint32             `json:"Flags"`
 				Memos          []struct {
 					Memo struct {
 						MemoData string `json:"MemoData"`
@@ -301,13 +302,13 @@ func (c RPC) AccountTx(ctx context.Context, account string, ledgerIndexMin uint3
 				} `json:"Memos"`
 			} `json:"tx"`
 			TxJSON *struct {
-				LedgerIndex    uint32  `json:"ledger_index"`
-				Date           uint32  `json:"date"`
-				TxType         string  `json:"TransactionType"`
-				Account        string  `json:"Account"`
-				Destination    string  `json:"Destination"`
-				DestinationTag *uint32 `json:"DestinationTag"`
-				Flags          uint32  `json:"Flags"`
+				LedgerIndex    uint32             `json:"ledger_index"`
+				Date           uint32             `json:"date"`
+				TxType         string             `json:"TransactionType"`
+				Account        string             `json:"Account"`
+				Destination    string             `json:"Destination"`
+				DestinationTag opt.Option[uint32] `json:"DestinationTag"`
+				Flags          uint32             `json:"Flags"`
 				Memos          []struct {
 					Memo struct {
 						MemoData string `json:"MemoData"`

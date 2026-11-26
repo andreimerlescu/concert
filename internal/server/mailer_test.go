@@ -93,7 +93,7 @@ func TestEmailPortal_RBACCSRFSecretsAndAudit(t *testing.T) {
 	}
 
 	// Admin saves Resend config + write-only encrypted secret + "4 emails every 90 minutes" cadence.
-	secretKey := "re_live_super_secret_token_987654"
+	secretKey := "dummy-resend-api-key-987654"
 	savePayload := `{
 		"provider":"resend",
 		"from_name":"Concert Ops",
@@ -371,7 +371,9 @@ func TestEmailEndToEnd_SendPandaEventsUnsubscribeAndDSARErase(t *testing.T) {
 	}
 
 	// Tampered token returns 400.
-	badResp, err := http.Post(front.URL+mailer.UnsubscribeMainPath+"?token=bad.token", "application/x-www-form-urlencoded", strings.NewReader("List-Unsubscribe=One-Click"))
+	badQuery := url.Values{}
+	badQuery.Set("token", "bad.token")
+	badResp, err := http.Post(front.URL+mailer.UnsubscribeMainPath+"?"+badQuery.Encode(), "application/x-www-form-urlencoded", strings.NewReader("List-Unsubscribe=One-Click"))
 	if err != nil {
 		t.Fatalf("POST bad unsubscribe: %v", err)
 	}
@@ -409,4 +411,103 @@ func TestEmailEndToEnd_SendPandaEventsUnsubscribeAndDSARErase(t *testing.T) {
 		t.Fatalf("expected anonymized IP 203.0.113.0 in queued events, got %+v", a.mailer.Status().Pending)
 	}
 	_ = time.Now()
+}
+
+func TestEmailConfigSaveReq_OptionPatchSemantics(t *testing.T) {
+	t.Run("unmarshal distinguishes omitted and null from explicit zero values", func(t *testing.T) {
+		raw := `{
+			"provider": null,
+			"smtp_host": "",
+			"smtp_port": 0,
+			"cadence_max": 5,
+			"secrets": {
+				"smtp_pass": "",
+				"resend_api_key": "re_test_key",
+				"sendpanda_api_key": null
+			}
+		}`
+		var req emailConfigSaveReq
+		if err := json.Unmarshal([]byte(raw), &req); err != nil {
+			t.Fatalf("unmarshal emailConfigSaveReq: %v", err)
+		}
+		if !req.Provider.IsNone() {
+			t.Errorf("Provider = %v, want None for JSON null", req.Provider)
+		}
+		if !req.FromAddr.IsNone() {
+			t.Errorf("FromAddr = %v, want None for omitted field", req.FromAddr)
+		}
+		if v, ok := req.SMTPHost.Get(); !ok || v != "" {
+			t.Errorf("SMTPHost = (%q, %v), want (\"\", true)", v, ok)
+		}
+		if v, ok := req.SMTPPort.Get(); !ok || v != 0 {
+			t.Errorf("SMTPPort = (%d, %v), want (0, true)", v, ok)
+		}
+		if v, ok := req.CadenceMax.Get(); !ok || v != 5 {
+			t.Errorf("CadenceMax = (%d, %v), want (5, true)", v, ok)
+		}
+		if req.Secrets == nil {
+			t.Fatal("Secrets = nil, want non-nil")
+		}
+		if v, ok := req.Secrets.SMTPPass.Get(); !ok || v != "" {
+			t.Errorf("Secrets.SMTPPass = (%q, %v), want (\"\", true)", v, ok)
+		}
+		if v, ok := req.Secrets.ResendAPIKey.Get(); !ok || v != "re_test_key" {
+			t.Errorf("Secrets.ResendAPIKey = (%q, %v), want (\"re_test_key\", true)", v, ok)
+		}
+		if !req.Secrets.SendPandaAPIKey.IsNone() {
+			t.Errorf("Secrets.SendPandaAPIKey = %v, want None for JSON null", req.Secrets.SendPandaAPIKey)
+		}
+	})
+
+	t.Run("partial portal patch preserves omitted settings and secrets", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg := portalTestConfig("http://127.0.0.1:1")
+		cfg.dataDir = dir
+		cfg.admitSecret = []byte("0123456789abcdef0123456789abcdef")
+		cfg.admitSecretGenerated = false
+		_, p, _ := newTestPortal(t, cfg, nil)
+		ck, csrf := portalLogin(t, p)
+
+		initPayload := `{
+			"provider": "resend",
+			"from_name": "Initial Ops",
+			"from_addr": "alerts@example.com",
+			"to_addrs": "admin@example.com",
+			"cadence_max": 3,
+			"cadence_window": 30,
+			"cadence_unit": "minutes",
+			"secrets": {"resend_api_key": "dummy-initial-resend-key-001"}
+		}`
+		if rec := portalDo(p, http.MethodPost, "/api/email/config", initPayload, ck, csrf, false); rec.Code != http.StatusOK {
+			t.Fatalf("initial save: %d %s", rec.Code, rec.Body.String())
+		}
+
+		// Patch only from_name and send empty/null secret fields: existing provider, cadence, and resend_api_key must remain intact.
+		patchPayload := `{
+			"provider": null,
+			"from_name": "Updated Ops",
+			"secrets": {"smtp_pass": "", "resend_api_key": null}
+		}`
+		rec := portalDo(p, http.MethodPost, "/api/email/config", patchPayload, ck, csrf, false)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("partial patch: %d %s", rec.Code, rec.Body.String())
+		}
+		body := rec.Body.String()
+		for _, want := range []string{
+			`"provider":"resend"`,
+			`"from_name":"Updated Ops"`,
+			`"cadence_max":3`,
+			`"resend_api_key":"encrypted_file"`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("partial patch response missing %s: %s", want, body)
+			}
+		}
+
+		// Sending only empty/null fields must return 400 (nothing to update).
+		emptyRec := portalDo(p, http.MethodPost, "/api/email/config", `{"provider":null,"secrets":{"smtp_pass":""}}`, ck, csrf, false)
+		if emptyRec.Code != http.StatusBadRequest {
+			t.Fatalf("empty patch status = %d, want 400 (%s)", emptyRec.Code, emptyRec.Body.String())
+		}
+	})
 }

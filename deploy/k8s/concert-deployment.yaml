@@ -1,6 +1,6 @@
 # Core Edition (concert, Apache-2.0) Kubernetes Deployment.
 # Uses only Core Edition environment variables (zero enterprise-only flags).
-# For RBAC/MFA, Redis HA, edge/leaf mesh, and x402 Fast-Lane, see deployment.yaml (econcert).
+# For RBAC/MFA, concert-kv HA, edge/leaf mesh, and x402 Fast-Lane, see deployment.yaml (econcert).
 apiVersion: apps/v1
 kind: Deployment
 metadata:

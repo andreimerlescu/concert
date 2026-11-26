@@ -85,11 +85,11 @@ type Secret struct {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/watchdog_test.go:912 (direct call)
-//   - internal/watchdog/watchdog_test.go:1067 (direct call)
+//   - internal/watchdog/watchdog_test.go:913 (direct call)
 //   - internal/watchdog/watchdog_test.go:1068 (direct call)
-//   - internal/watchdog/watchdog_test.go:1165 (direct call)
-//   - internal/watchdog/watchdog_test.go:1240 (direct call)
+//   - internal/watchdog/watchdog_test.go:1069 (direct call)
+//   - internal/watchdog/watchdog_test.go:1255 (direct call)
+//   - internal/watchdog/watchdog_test.go:1330 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func NewSecret(raw string) Secret {
@@ -118,11 +118,11 @@ func NewSecret(raw string) Secret {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/supervisor.go:825 (direct call)
-//   - internal/watchdog/supervisor.go:881 (direct call)
-//   - internal/watchdog/supervisor.go:971 (direct call)
-//   - internal/watchdog/watchdog_test.go:948 (direct call)
-//   - internal/watchdog/watchdog_test.go:959 (direct call)
+//   - internal/watchdog/supervisor.go:830 (direct call)
+//   - internal/watchdog/supervisor.go:886 (direct call)
+//   - internal/watchdog/supervisor.go:975 (direct call)
+//   - internal/watchdog/watchdog_test.go:949 (direct call)
+//   - internal/watchdog/watchdog_test.go:960 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (s Secret) Reveal() string {
@@ -148,9 +148,9 @@ func (s Secret) Reveal() string {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/supervisor.go:824 (direct call)
-//   - internal/watchdog/supervisor.go:880 (direct call)
-//   - internal/watchdog/supervisor.go:970 (direct call)
+//   - internal/watchdog/supervisor.go:829 (direct call)
+//   - internal/watchdog/supervisor.go:885 (direct call)
+//   - internal/watchdog/supervisor.go:974 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (s Secret) IsZero() bool {
@@ -175,7 +175,7 @@ func (s Secret) IsZero() bool {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/watchdog_test.go:930 (direct call)
+//   - internal/watchdog/watchdog_test.go:931 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (Secret) String() string {
@@ -201,7 +201,7 @@ func (Secret) String() string {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/watchdog_test.go:931 (direct call)
+//   - internal/watchdog/watchdog_test.go:932 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (Secret) GoString() string {
@@ -256,7 +256,7 @@ func (Secret) Format(f fmt.State, verb rune) {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/watchdog_test.go:924 (direct call)
+//   - internal/watchdog/watchdog_test.go:925 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (Secret) MarshalText() ([]byte, error) {
@@ -357,9 +357,9 @@ var (
 // Generated from verified repository symbol references; do not hand-edit.
 //
 //   - internal/watchdog/secret.go:469 (direct call)
-//   - internal/watchdog/watchdog_test.go:958 (direct call)
-//   - internal/watchdog/watchdog_test.go:968 (direct call)
-//   - internal/watchdog/watchdog_test.go:977 (direct call)
+//   - internal/watchdog/watchdog_test.go:959 (direct call)
+//   - internal/watchdog/watchdog_test.go:969 (direct call)
+//   - internal/watchdog/watchdog_test.go:978 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func LoadSecretFromFile(path string) (Secret, error) {
@@ -576,10 +576,10 @@ func looksLikePlaceholder(s string) bool {
 // Generated from verified repository symbol references; do not hand-edit.
 //
 //   - internal/watchdog/secret.go:638 (direct call)
-//   - internal/watchdog/supervisor.go:372 (direct call)
-//   - internal/watchdog/supervisor.go:376 (direct call)
-//   - internal/watchdog/supervisor.go:380 (direct call)
-//   - internal/watchdog/supervisor.go:384 (direct call)
+//   - internal/watchdog/supervisor.go:377 (direct call)
+//   - internal/watchdog/supervisor.go:381 (direct call)
+//   - internal/watchdog/supervisor.go:385 (direct call)
+//   - internal/watchdog/supervisor.go:389 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func ValidateProbeURL(raw string) (*url.URL, error) {
@@ -627,11 +627,11 @@ func ValidateProbeURL(raw string) (*url.URL, error) {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/supervisor.go:389 (direct call)
-//   - internal/watchdog/watchdog_test.go:982 (direct call)
-//   - internal/watchdog/watchdog_test.go:985 (direct call)
-//   - internal/watchdog/watchdog_test.go:988 (direct call)
-//   - internal/watchdog/watchdog_test.go:997 (direct call)
+//   - internal/watchdog/supervisor.go:394 (direct call)
+//   - internal/watchdog/watchdog_test.go:983 (direct call)
+//   - internal/watchdog/watchdog_test.go:986 (direct call)
+//   - internal/watchdog/watchdog_test.go:989 (direct call)
+//   - internal/watchdog/watchdog_test.go:998 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func ValidateWebhookURL(raw string) (*url.URL, error) {
@@ -706,20 +706,20 @@ func isLoopbackHost(host string) bool {
 //   - cmd/concert-watchdog/main.go:194 (direct call)
 //   - cmd/concert-watchdog/main.go:238 (direct call)
 //   - internal/watchdog/secret.go:598 (direct call)
-//   - internal/watchdog/supervisor.go:821 (direct call)
-//   - internal/watchdog/supervisor.go:830 (direct call)
-//   - internal/watchdog/supervisor.go:836 (direct call)
-//   - internal/watchdog/supervisor.go:839 (direct call)
-//   - internal/watchdog/supervisor.go:842 (direct call)
-//   - internal/watchdog/supervisor.go:878 (direct call)
-//   - internal/watchdog/supervisor.go:885 (direct call)
-//   - internal/watchdog/supervisor.go:891 (direct call)
-//   - internal/watchdog/supervisor.go:894 (direct call)
-//   - internal/watchdog/supervisor.go:966 (direct call)
-//   - internal/watchdog/supervisor.go:975 (direct call)
-//   - internal/watchdog/supervisor.go:981 (direct call)
-//   - internal/watchdog/supervisor.go:1459 (direct call)
-//   - internal/watchdog/watchdog_test.go:1011 (direct call)
+//   - internal/watchdog/supervisor.go:826 (direct call)
+//   - internal/watchdog/supervisor.go:835 (direct call)
+//   - internal/watchdog/supervisor.go:841 (direct call)
+//   - internal/watchdog/supervisor.go:844 (direct call)
+//   - internal/watchdog/supervisor.go:847 (direct call)
+//   - internal/watchdog/supervisor.go:883 (direct call)
+//   - internal/watchdog/supervisor.go:890 (direct call)
+//   - internal/watchdog/supervisor.go:896 (direct call)
+//   - internal/watchdog/supervisor.go:899 (direct call)
+//   - internal/watchdog/supervisor.go:970 (direct call)
+//   - internal/watchdog/supervisor.go:979 (direct call)
+//   - internal/watchdog/supervisor.go:985 (direct call)
+//   - internal/watchdog/supervisor.go:1463 (direct call)
+//   - internal/watchdog/watchdog_test.go:1012 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func RedactURL(raw string) string {

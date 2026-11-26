@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/andreimerlescu/concert/internal/opt"
 	"github.com/gin-gonic/gin"
 )
 
@@ -269,10 +270,10 @@ func (w *banWindow) count(ip netip.Addr, path string, at time.Time, n int64) {
 func (w *banWindow) event() *historyEvent {
 	ev := &historyEvent{
 		T: evBan, At: time.Now().UTC(), Ban: w.id, Target: w.target, Scope: w.scope.String(),
-		Range: w.rangeBan, Begin: timePtr(w.begin), Permanent: w.permanent, Changes: w.changes, Source: w.source,
+		Range: w.rangeBan, Begin: optTime(w.begin), Permanent: w.permanent, Changes: w.changes, Source: w.source,
 	}
 	if !w.permanent {
-		ev.Until = timePtr(w.until)
+		ev.Until = optTime(w.until)
 	}
 	return ev
 }
@@ -785,7 +786,7 @@ func (h *history) flushAgg() {
 	h.aggMu.Unlock()
 	for k, v := range batch {
 		h.log.emit(&historyEvent{
-			T: evAgg, At: v.last.UTC(), First: timePtr(v.first), Ban: k.id, IP: k.ip.String(),
+			T: evAgg, At: v.last.UTC(), First: optTime(v.first), Ban: k.id, IP: k.ip.String(),
 			Count: v.n, Paths: v.paths, OtherPaths: v.other,
 		})
 	}
@@ -1116,8 +1117,8 @@ func (h *history) applyAgg(ev *historyEvent) {
 			w.otherPaths += rest
 			countBounded(w.clients, ip, historyWindowClients, &w.otherClients, rest)
 		}
-		if ev.First != nil && (w.firstHit.IsZero() || ev.First.Before(w.firstHit)) {
-			w.firstHit = *ev.First
+		if first, ok := ev.First.Get(); ok && (w.firstHit.IsZero() || first.Before(w.firstHit)) {
+			w.firstHit = first
 		}
 	}
 	h.mu.Unlock()
@@ -1133,11 +1134,7 @@ func (h *history) applyBan(ev *historyEvent) {
 	defer h.mu.Unlock()
 	w := h.byID[ev.Ban]
 	if w == nil {
-		var begin time.Time
-		if ev.Begin != nil {
-			begin = *ev.Begin
-		}
-		w = newBanWindow(ev.Ban, scope, begin)
+		w = newBanWindow(ev.Ban, scope, ev.Begin.UnwrapOr(time.Time{}))
 		h.addWindowLocked(w)
 	}
 	if ev.Target != "" {
@@ -1146,8 +1143,8 @@ func (h *history) applyBan(ev *historyEvent) {
 	w.rangeBan = ev.Range
 	if ev.Permanent {
 		w.permanent, w.until = true, time.Time{}
-	} else if ev.Until != nil {
-		w.permanent, w.until = false, *ev.Until
+	} else if until, ok := ev.Until.Get(); ok {
+		w.permanent, w.until = false, until
 	}
 	w.changes = ev.Changes
 	w.source = ev.Source
@@ -1256,38 +1253,75 @@ type banTriggerView struct {
 	At     time.Time `json:"at"`
 }
 
+// banWindowView is the JSON and portal template representation of a [banWindow].
+// Optional timestamps (Began, Until, Ended, FirstHit, LastHit) intentionally
+// omit `,omitzero` so absent values marshal as explicit JSON null for API wire
+// compatibility.
 type banWindowView struct {
-	ID               uint64          `json:"id"`
-	Target           string          `json:"target"`
-	Range            bool            `json:"range"`
-	Permanent        bool            `json:"permanent"`
-	Active           bool            `json:"active"`
-	Began            *time.Time      `json:"began"`
-	Until            *time.Time      `json:"until"`
-	Ended            *time.Time      `json:"ended"`
-	EndReason        string          `json:"end_reason"`
-	LiftedBy         string          `json:"lifted_by,omitempty"`
-	RemainingSeconds int             `json:"remaining_seconds"`
-	Changes          int             `json:"changes"`
-	Source           string          `json:"source,omitempty"`
-	Trigger          *banTriggerView `json:"trigger"`
-	Requests         int64           `json:"requests"`
-	FirstHit         *time.Time      `json:"first_hit"`
-	LastHit          *time.Time      `json:"last_hit"`
-	Paths            []namedCount    `json:"paths"`
-	DistinctPaths    int             `json:"distinct_paths"`
-	OtherPaths       int64           `json:"other_paths"`
-	Clients          []namedCount    `json:"clients"`
-	DistinctClients  int             `json:"distinct_clients"`
-	OtherClients     int64           `json:"other_clients"`
+	ID               uint64                `json:"id"`
+	Target           string                `json:"target"`
+	Range            bool                  `json:"range"`
+	Permanent        bool                  `json:"permanent"`
+	Active           bool                  `json:"active"`
+	Began            opt.Option[time.Time] `json:"began"`
+	Until            opt.Option[time.Time] `json:"until"`
+	Ended            opt.Option[time.Time] `json:"ended"`
+	EndReason        string                `json:"end_reason"`
+	LiftedBy         string                `json:"lifted_by,omitempty"`
+	RemainingSeconds int                   `json:"remaining_seconds"`
+	Changes          int                   `json:"changes"`
+	Source           string                `json:"source,omitempty"`
+	Trigger          *banTriggerView       `json:"trigger"`
+	Requests         int64                 `json:"requests"`
+	FirstHit         opt.Option[time.Time] `json:"first_hit"`
+	LastHit          opt.Option[time.Time] `json:"last_hit"`
+	Paths            []namedCount          `json:"paths"`
+	DistinctPaths    int                   `json:"distinct_paths"`
+	OtherPaths       int64                 `json:"other_paths"`
+	Clients          []namedCount          `json:"clients"`
+	DistinctClients  int                   `json:"distinct_clients"`
+	OtherClients     int64                 `json:"other_clients"`
 }
 
-func timePtr(t time.Time) *time.Time {
+// optTime converts t to an [opt.Option] normalized to UTC, returning
+// [opt.None] when t is the zero [time.Time].
+//
+// # Parameters
+//
+//   - t: Timestamp to wrap; a zero instant is treated as absent.
+//
+// # Returns
+//
+// [opt.None] when t.IsZero(), otherwise [opt.Some](t.UTC()).
+//
+// # Example
+//
+//	began := optTime(time.Now())
+//
+// # Used By
+//
+// Generated from verified AST symbol references; do not hand-edit.
+//
+//   - internal/server/history.go:273 (direct call)
+//   - internal/server/history.go:276 (direct call)
+//   - internal/server/history.go:789 (direct call)
+//   - internal/server/history.go:1349 (direct call)
+//   - internal/server/history.go:1351 (direct call)
+//   - internal/server/history.go:1356 (direct call)
+//   - internal/server/history.go:1359 (direct call)
+//   - internal/server/history_test.go:466 (direct call)
+//   - internal/server/history_test.go:467 (direct call)
+//   - internal/server/history_test.go:468 (direct call)
+//   - internal/server/history_test.go:469 (direct call)
+//   - internal/server/history_test.go:470 (direct call)
+//   - internal/server/history_test.go:495 (direct call)
+//
+// Scope: internal/server (including tests and all build tags).
+func optTime(t time.Time) opt.Option[time.Time] {
 	if t.IsZero() {
-		return nil
+		return opt.None[time.Time]()
 	}
-	u := t.UTC()
-	return &u
+	return opt.Some(t.UTC())
 }
 
 func topCounts[K comparable](m map[K]int64, limit int, name func(K) string) []namedCount {
@@ -1312,17 +1346,17 @@ func topCounts[K comparable](m map[K]int64, limit int, name func(K) string) []na
 func (w *banWindow) view(now time.Time, limit int) banWindowView {
 	v := banWindowView{
 		ID: w.id, Target: w.target, Range: w.rangeBan, Permanent: w.permanent,
-		Active: w.active(now), Began: timePtr(w.begin), Changes: w.changes,
+		Active: w.active(now), Began: optTime(w.begin), Changes: w.changes,
 		Source: w.source, LiftedBy: w.liftedBy, Requests: w.requests,
-		FirstHit: timePtr(w.firstHit), LastHit: timePtr(w.lastHit),
+		FirstHit: optTime(w.firstHit), LastHit: optTime(w.lastHit),
 		DistinctPaths: len(w.paths), OtherPaths: w.otherPaths,
 		DistinctClients: len(w.clients), OtherClients: w.otherClients,
 	}
 	if !w.permanent {
-		v.Until = timePtr(w.until)
+		v.Until = optTime(w.until)
 	}
 	if ended, reason := w.ended(now); !ended.IsZero() {
-		v.Ended, v.EndReason = timePtr(ended), reason
+		v.Ended, v.EndReason = optTime(ended), reason
 	} else if !w.permanent {
 		v.RemainingSeconds = int((w.until.Sub(now) + time.Second - 1) / time.Second)
 	}

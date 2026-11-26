@@ -1,10 +1,13 @@
-# Enterprise Active-Active Edge -> Leaf Mesh + Redis HA topology (econcert).
+# Enterprise Active-Active Edge -> Leaf Mesh + concert-kv HA topology (econcert).
 # Two active-active edges share CONCERT_ADMIT_SECRET, CONCERT_HOP_SECRET, and
-# Redis for cross-edge ban sync, fast-lane pass cookies, and live revocation,
+# concert-kv for cross-edge ban sync, fast-lane pass cookies, and live revocation,
 # dispatching admitted traffic across two capacity-calibrated leaves.
 #
 # Start with:
 #   docker compose -f deploy/docker/compose.enterprise.yml up --build
+#
+# For production, mount 0600 secret files and set CONCERT_*_FILE (such as
+# CONCERT_KV_PASSWORD_FILE=/run/secrets/kv_password) instead of inline defaults.
 x-econcert-common: &econcert-common
   build:
     context: ../..
@@ -18,10 +21,22 @@ x-econcert-common: &econcert-common
     - ALL
 
 services:
-  redis:
-    image: redis:7-alpine
+  concert-kv:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.kv
+    image: concert-kv:v0.3.0
     restart: unless-stopped
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    command: ["-listen", "0.0.0.0:6379", "-data-dir", "/var/lib/concert-kv"]
+    environment:
+      CONCERT_KV_PASSWORD: "${CONCERT_KV_PASSWORD:-change-me-to-a-32-plus-char-kv-cluster-secret}"
+    volumes:
+      - kv_data:/var/lib/concert-kv
     networks:
       - mesh_net
 
@@ -85,7 +100,8 @@ services:
       CONCERT_HOP_LEAVES: "http://leaf-1:8080,http://leaf-2:8080"
       CONCERT_HOP_AUTO_CAP: "true"
       CONCERT_PRIORITY_CAP: "4"
-      CONCERT_REDIS_ADDR: "redis:6379"
+      CONCERT_KV_ADDR: "concert-kv:6379"
+      CONCERT_KV_PASSWORD: "${CONCERT_KV_PASSWORD:-change-me-to-a-32-plus-char-kv-cluster-secret}"
       CONCERT_ADMIT_SECRET: "${CONCERT_ADMIT_SECRET:-change-me-to-a-32-plus-char-random-secret-value}"
       CONCERT_HOP_SECRET: "${CONCERT_HOP_SECRET:-change-me-to-a-32-plus-char-hop-mesh-secret-key}"
       CONCERT_PORTAL_LISTEN: "0.0.0.0:8081"
@@ -98,7 +114,7 @@ services:
     volumes:
       - edge1_data:/var/lib/concert/data
     depends_on:
-      - redis
+      - concert-kv
       - leaf-1
       - leaf-2
     networks:
@@ -114,7 +130,8 @@ services:
       CONCERT_HOP_LEAVES: "http://leaf-1:8080,http://leaf-2:8080"
       CONCERT_HOP_AUTO_CAP: "true"
       CONCERT_PRIORITY_CAP: "4"
-      CONCERT_REDIS_ADDR: "redis:6379"
+      CONCERT_KV_ADDR: "concert-kv:6379"
+      CONCERT_KV_PASSWORD: "${CONCERT_KV_PASSWORD:-change-me-to-a-32-plus-char-kv-cluster-secret}"
       CONCERT_ADMIT_SECRET: "${CONCERT_ADMIT_SECRET:-change-me-to-a-32-plus-char-random-secret-value}"
       CONCERT_HOP_SECRET: "${CONCERT_HOP_SECRET:-change-me-to-a-32-plus-char-hop-mesh-secret-key}"
       CONCERT_PORTAL_LISTEN: "0.0.0.0:8081"
@@ -127,13 +144,14 @@ services:
     volumes:
       - edge2_data:/var/lib/concert/data
     depends_on:
-      - redis
+      - concert-kv
       - leaf-1
       - leaf-2
     networks:
       - mesh_net
 
 volumes:
+  kv_data:
   leaf1_data:
   leaf2_data:
   edge1_data:

@@ -132,7 +132,9 @@ func (s *Scheme) TokenBalance(ctx context.Context, address, asset string) (*big.
 			return ParseStroops(b.Balance)
 		}
 		if pa.Kind == AssetClassic && b.AssetCode == pa.Code && b.AssetIssuer == pa.Issuer {
-			if b.IsAuthorized != nil && !*b.IsAuthorized {
+			// Absent/null is_authorized means the asset does not require explicit authorization;
+			// only an explicit false marks an unauthorized trustline.
+			if auth, ok := b.IsAuthorized.Get(); ok && !auth {
 				return big.NewInt(0), nil
 			}
 			return ParseStroops(b.Balance)

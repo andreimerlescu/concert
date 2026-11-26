@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/andreimerlescu/concert/internal/configfile"
+	"github.com/andreimerlescu/concert/internal/opt"
 )
 
 // DefaultFPMPoolGlobs lists standard Linux and macOS PHP-FPM pool.d config locations.
@@ -401,7 +402,6 @@ func RunInit(args []string, out io.Writer) error {
 		prioSlots = max(1, capSlots/4)
 	}
 
-	secure := true
 	f := &configfile.File{
 		Global: configfile.GlobalConfig{
 			Listen:     ":443",
@@ -421,7 +421,7 @@ func RunInit(args []string, out io.Writer) error {
 				Cap:          capSlots,
 				PriorityCap:  prioSlots,
 				MicroCache:   microCache,
-				SecureCookie: &secure,
+				SecureCookie: opt.Some(true),
 			},
 		},
 	}

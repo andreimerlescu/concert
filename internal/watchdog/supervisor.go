@@ -18,6 +18,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/andreimerlescu/concert/internal/opt"
 )
 
 const (
@@ -235,21 +237,24 @@ func (p *osManagedProcess) Wait() error {
 
 // AlertEvent is the structured JSON payload sent to the optional alert webhook
 // and emitted to structured logs. It never includes tokens or raw credentials.
+// UpstreamHealthy uses opt.Option[int] with json omitzero so an unobserved
+// backend count is omitted while an observed zero healthy backends marshals as
+// `"upstream_healthy":0`.
 type AlertEvent struct {
-	Timestamp           time.Time     `json:"timestamp"`
-	Severity            string        `json:"severity"`
-	Action              ActionKind    `json:"action"`
-	Reason              FailureReason `json:"reason"`
-	Message             string        `json:"message"`
-	ConsecutiveFailures int           `json:"consecutive_failures"`
-	RestartsInWindow    int           `json:"restarts_in_window"`
-	CircuitOpen         bool          `json:"circuit_open"`
-	PID                 int           `json:"pid,omitempty"`
-	RSSBytes            uint64        `json:"rss_bytes,omitempty"`
-	OpenFDs             int           `json:"open_fds,omitempty"`
-	QueueDepth          float64       `json:"queue_depth,omitempty"`
-	LiveQueueDepth      float64       `json:"live_queue_depth,omitempty"`
-	UpstreamHealthy     *int          `json:"upstream_healthy,omitempty"`
+	Timestamp           time.Time       `json:"timestamp"`
+	Severity            string          `json:"severity"`
+	Action              ActionKind      `json:"action"`
+	Reason              FailureReason   `json:"reason"`
+	Message             string          `json:"message"`
+	ConsecutiveFailures int             `json:"consecutive_failures"`
+	RestartsInWindow    int             `json:"restarts_in_window"`
+	CircuitOpen         bool            `json:"circuit_open"`
+	PID                 int             `json:"pid,omitempty"`
+	RSSBytes            uint64          `json:"rss_bytes,omitempty"`
+	OpenFDs             int             `json:"open_fds,omitempty"`
+	QueueDepth          float64         `json:"queue_depth,omitempty"`
+	LiveQueueDepth      float64         `json:"live_queue_depth,omitempty"`
+	UpstreamHealthy     opt.Option[int] `json:"upstream_healthy,omitzero"`
 }
 
 // SupervisorConfig configures Supervisor for either parent-process supervision
@@ -358,14 +363,14 @@ type Supervisor struct {
 // Generated from verified repository symbol references; do not hand-edit.
 //
 //   - cmd/concert-watchdog/main.go:165 (direct call)
-//   - internal/watchdog/watchdog_test.go:1061 (direct call)
-//   - internal/watchdog/watchdog_test.go:1160 (direct call)
-//   - internal/watchdog/watchdog_test.go:1235 (direct call)
-//   - internal/watchdog/watchdog_test.go:1331 (direct call)
-//   - internal/watchdog/watchdog_test.go:1461 (direct call)
-//   - internal/watchdog/watchdog_test.go:1561 (direct call)
-//   - internal/watchdog/watchdog_test.go:1688 (direct call)
-//   - internal/watchdog/watchdog_test.go:1803 (direct call)
+//   - internal/watchdog/watchdog_test.go:1062 (direct call)
+//   - internal/watchdog/watchdog_test.go:1250 (direct call)
+//   - internal/watchdog/watchdog_test.go:1325 (direct call)
+//   - internal/watchdog/watchdog_test.go:1421 (direct call)
+//   - internal/watchdog/watchdog_test.go:1551 (direct call)
+//   - internal/watchdog/watchdog_test.go:1651 (direct call)
+//   - internal/watchdog/watchdog_test.go:1778 (direct call)
+//   - internal/watchdog/watchdog_test.go:1893 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func NewSupervisor(cfg SupervisorConfig) (*Supervisor, error) {
@@ -475,7 +480,7 @@ func NewSupervisor(cfg SupervisorConfig) (*Supervisor, error) {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/supervisor.go:422 (direct call)
+//   - internal/watchdog/supervisor.go:427 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func newBoundedHTTPClient(timeout time.Duration) *http.Client {
@@ -525,10 +530,10 @@ func newBoundedHTTPClient(timeout time.Duration) *http.Client {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/supervisor.go:779 (direct call)
-//   - internal/watchdog/supervisor.go:937 (direct call)
-//   - internal/watchdog/watchdog_test.go:1725 (direct call)
-//   - internal/watchdog/watchdog_test.go:1743 (direct call)
+//   - internal/watchdog/supervisor.go:784 (direct call)
+//   - internal/watchdog/supervisor.go:941 (direct call)
+//   - internal/watchdog/watchdog_test.go:1815 (direct call)
+//   - internal/watchdog/watchdog_test.go:1833 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (s *Supervisor) CurrentPID() int {
@@ -574,9 +579,9 @@ func (s *Supervisor) CurrentPID() int {
 // Generated from verified repository symbol references; do not hand-edit.
 //
 //   - cmd/concert-watchdog/main.go:209 (direct call)
-//   - internal/watchdog/watchdog_test.go:1365 (direct call)
-//   - internal/watchdog/watchdog_test.go:1713 (direct call)
-//   - internal/watchdog/watchdog_test.go:1835 (direct call)
+//   - internal/watchdog/watchdog_test.go:1455 (direct call)
+//   - internal/watchdog/watchdog_test.go:1803 (direct call)
+//   - internal/watchdog/watchdog_test.go:1925 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (s *Supervisor) Run(ctx context.Context) error {
@@ -658,20 +663,20 @@ func (s *Supervisor) Run(ctx context.Context) error {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/supervisor.go:631 (direct call)
-//   - internal/watchdog/watchdog_test.go:1089 (direct call)
-//   - internal/watchdog/watchdog_test.go:1184 (direct call)
-//   - internal/watchdog/watchdog_test.go:1195 (direct call)
-//   - internal/watchdog/watchdog_test.go:1211 (direct call)
-//   - internal/watchdog/watchdog_test.go:1256 (direct call)
-//   - internal/watchdog/watchdog_test.go:1258 (direct call)
-//   - internal/watchdog/watchdog_test.go:1265 (direct call)
-//   - internal/watchdog/watchdog_test.go:1275 (direct call)
-//   - internal/watchdog/watchdog_test.go:1480 (direct call)
-//   - internal/watchdog/watchdog_test.go:1488 (direct call)
-//   - internal/watchdog/watchdog_test.go:1496 (direct call)
-//   - internal/watchdog/watchdog_test.go:1588 (direct call)
-//   - internal/watchdog/watchdog_test.go:1593 (direct call)
+//   - internal/watchdog/supervisor.go:636 (direct call)
+//   - internal/watchdog/watchdog_test.go:1090 (direct call)
+//   - internal/watchdog/watchdog_test.go:1274 (direct call)
+//   - internal/watchdog/watchdog_test.go:1285 (direct call)
+//   - internal/watchdog/watchdog_test.go:1301 (direct call)
+//   - internal/watchdog/watchdog_test.go:1346 (direct call)
+//   - internal/watchdog/watchdog_test.go:1348 (direct call)
+//   - internal/watchdog/watchdog_test.go:1355 (direct call)
+//   - internal/watchdog/watchdog_test.go:1365 (direct call)
+//   - internal/watchdog/watchdog_test.go:1570 (direct call)
+//   - internal/watchdog/watchdog_test.go:1578 (direct call)
+//   - internal/watchdog/watchdog_test.go:1586 (direct call)
+//   - internal/watchdog/watchdog_test.go:1678 (direct call)
+//   - internal/watchdog/watchdog_test.go:1683 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (s *Supervisor) Step(ctx context.Context) (Observation, Decision, error) {
@@ -730,7 +735,7 @@ func (s *Supervisor) Step(ctx context.Context) (Observation, Decision, error) {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/supervisor.go:678 (direct call)
+//   - internal/watchdog/supervisor.go:683 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (s *Supervisor) Probe(ctx context.Context) Observation {
@@ -808,7 +813,7 @@ func (s *Supervisor) Probe(ctx context.Context) Observation {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/supervisor.go:688 (direct call)
+//   - internal/watchdog/supervisor.go:693 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (s *Supervisor) FlushStaleQueue(ctx context.Context) error {
@@ -867,9 +872,9 @@ func (s *Supervisor) FlushStaleQueue(ctx context.Context) error {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/supervisor.go:742 (direct call)
-//   - internal/watchdog/supervisor.go:752 (direct call)
-//   - internal/watchdog/supervisor.go:763 (direct call)
+//   - internal/watchdog/supervisor.go:747 (direct call)
+//   - internal/watchdog/supervisor.go:757 (direct call)
+//   - internal/watchdog/supervisor.go:768 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (s *Supervisor) doBoundedGET(ctx context.Context, rawURL string, maxBytes int64, withOperatorAuth bool) (int, []byte, error) {
@@ -913,17 +918,16 @@ func (s *Supervisor) doBoundedGET(ctx context.Context, rawURL string, maxBytes i
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/supervisor.go:682 (direct call)
-//   - internal/watchdog/supervisor.go:1230 (direct call)
+//   - internal/watchdog/supervisor.go:687 (direct call)
+//   - internal/watchdog/supervisor.go:1234 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (s *Supervisor) emitAlert(ctx context.Context, obs Observation, dec Decision) {
 	rssBytes, _ := effectiveRSS(obs)
 	openFDs, _ := effectiveOpenFDs(obs)
-	var upHealthy *int
+	var upHealthy opt.Option[int]
 	if obs.MetricsOK && obs.Metrics.HasUpstreamBackendsHealthy {
-		v := obs.Metrics.UpstreamBackendsHealthy
-		upHealthy = &v
+		upHealthy = opt.Some(obs.Metrics.UpstreamBackendsHealthy)
 	}
 	ev := AlertEvent{
 		Timestamp:           obs.ObservedAt.UTC(),
@@ -1004,7 +1008,7 @@ func (s *Supervisor) emitAlert(ctx context.Context, obs Observation, dec Decisio
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/supervisor.go:695 (direct call)
+//   - internal/watchdog/supervisor.go:700 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (s *Supervisor) executeRestart(ctx context.Context, dec Decision) error {
@@ -1058,10 +1062,10 @@ func (s *Supervisor) executeRestart(ctx context.Context, dec Decision) error {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/supervisor.go:589 (direct call)
-//   - internal/watchdog/supervisor.go:1021 (direct call)
-//   - internal/watchdog/supervisor.go:1246 (direct call)
-//   - internal/watchdog/supervisor.go:1282 (direct call)
+//   - internal/watchdog/supervisor.go:594 (direct call)
+//   - internal/watchdog/supervisor.go:1025 (direct call)
+//   - internal/watchdog/supervisor.go:1250 (direct call)
+//   - internal/watchdog/supervisor.go:1286 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (s *Supervisor) startChild() error {
@@ -1102,8 +1106,8 @@ func (s *Supervisor) startChild() error {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/supervisor.go:593 (direct call)
-//   - internal/watchdog/supervisor.go:1012 (direct call)
+//   - internal/watchdog/supervisor.go:598 (direct call)
+//   - internal/watchdog/supervisor.go:1016 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (s *Supervisor) stopActiveChild() {
@@ -1161,8 +1165,8 @@ func (s *Supervisor) stopActiveChild() {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/supervisor.go:602 (direct call)
-//   - internal/watchdog/supervisor.go:627 (direct call)
+//   - internal/watchdog/supervisor.go:607 (direct call)
+//   - internal/watchdog/supervisor.go:632 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (s *Supervisor) currentChildDone() <-chan error {
@@ -1188,8 +1192,8 @@ func (s *Supervisor) currentChildDone() <-chan error {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/supervisor.go:612 (direct call)
-//   - internal/watchdog/supervisor.go:615 (direct call)
+//   - internal/watchdog/supervisor.go:617 (direct call)
+//   - internal/watchdog/supervisor.go:620 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (s *Supervisor) clearChildIfDone(ch <-chan error) {
@@ -1216,7 +1220,7 @@ func (s *Supervisor) clearChildIfDone(ch <-chan error) {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/supervisor.go:619 (direct call)
+//   - internal/watchdog/supervisor.go:624 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (s *Supervisor) handleUnexpectedChildExit(ctx context.Context, exitErr error) {
@@ -1264,7 +1268,7 @@ func (s *Supervisor) handleUnexpectedChildExit(ctx context.Context, exitErr erro
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/supervisor.go:628 (direct call)
+//   - internal/watchdog/supervisor.go:633 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (s *Supervisor) maybeRespawnAfterCircuitBreaker(ctx context.Context) {
@@ -1303,8 +1307,8 @@ func (s *Supervisor) maybeRespawnAfterCircuitBreaker(ctx context.Context) {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/supervisor.go:541 (direct call)
-//   - internal/watchdog/supervisor.go:1024 (direct call)
+//   - internal/watchdog/supervisor.go:546 (direct call)
+//   - internal/watchdog/supervisor.go:1028 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (s *Supervisor) resolveExternalPID() int {
@@ -1354,7 +1358,7 @@ func (s *Supervisor) resolveExternalPID() int {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/supervisor.go:1029 (direct call)
+//   - internal/watchdog/supervisor.go:1033 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func (s *Supervisor) signalExternalPID(ctx context.Context, pid int) error {
@@ -1410,7 +1414,7 @@ func (s *Supervisor) signalExternalPID(ctx context.Context, pid int) error {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/supervisor.go:442 (function value)
+//   - internal/watchdog/supervisor.go:447 (function value)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func sleepWithContext(ctx context.Context, d time.Duration) error {
@@ -1446,9 +1450,9 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 //
 // Generated from verified repository symbol references; do not hand-edit.
 //
-//   - internal/watchdog/supervisor.go:830 (direct call)
-//   - internal/watchdog/supervisor.go:885 (direct call)
-//   - internal/watchdog/supervisor.go:975 (direct call)
+//   - internal/watchdog/supervisor.go:835 (direct call)
+//   - internal/watchdog/supervisor.go:890 (direct call)
+//   - internal/watchdog/supervisor.go:979 (direct call)
 //
 // Scope: internal/watchdog and cmd/concert-watchdog (including tests); darwin/arm64, default tags.
 func sanitizeNetError(err error) error {

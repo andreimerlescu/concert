@@ -86,9 +86,9 @@
 {{define "ban-window"}}<div class="history-ban border rounded p-3 mb-3">
 <div class="d-flex flex-wrap align-items-start gap-2 mb-2"><i aria-hidden="true" class="bi bi-slash-circle text-danger mt-1"></i>{{template "ipcell" (ipcell .Target)}}{{template "ban-state" .}}</div>
 <dl class="row small mb-2">
-<dt class="col-sm-3 text-body-secondary fw-normal">Began</dt><dd class="col-sm-9 mb-1">{{if .Began}}<time class="js-time" data-ms="{{.BeganMS}}"></time>{{else}}Before concert last started (restored from bans.json){{end}}</dd>
+<dt class="col-sm-3 text-body-secondary fw-normal">Began</dt><dd class="col-sm-9 mb-1">{{if .Began.IsSome}}<time class="js-time" data-ms="{{.BeganMS}}"></time>{{else}}Before concert last started (restored from bans.json){{end}}</dd>
 <dt class="col-sm-3 text-body-secondary fw-normal">{{if .Active}}Ends{{else}}Ended{{end}}</dt><dd class="col-sm-9 mb-1">{{template "ban-end" .}}</dd>
-{{with .Trigger}}<dt class="col-sm-3 text-body-secondary fw-normal">Started by</dt><dd class="col-sm-9 mb-1 text-break"><span class="font-monospace">{{.Method}} {{.Path}}</span> → {{.Status}}, from <span class="font-monospace">{{.Client}}</span> at <time class="js-time" data-ms="{{ms .At}}"></time></dd>{{else}}{{if and (not .Source) .Began}}<dt class="col-sm-3 text-body-secondary fw-normal">Started by</dt><dd class="col-sm-9 mb-1">Strikes that added up over several requests</dd>{{end}}{{end}}
+{{with .Trigger}}<dt class="col-sm-3 text-body-secondary fw-normal">Started by</dt><dd class="col-sm-9 mb-1 text-break"><span class="font-monospace">{{.Method}} {{.Path}}</span> → {{.Status}}, from <span class="font-monospace">{{.Client}}</span> at <time class="js-time" data-ms="{{ms .At}}"></time></dd>{{else}}{{if and (not .Source) .Began.IsSome}}<dt class="col-sm-3 text-body-secondary fw-normal">Started by</dt><dd class="col-sm-9 mb-1">Strikes that added up over several requests</dd>{{end}}{{end}}
 {{with .Source}}<dt class="col-sm-3 text-body-secondary fw-normal">Issued</dt><dd class="col-sm-9 mb-1">{{.}}</dd>{{end}}
 {{with .Changes}}<dt class="col-sm-3 text-body-secondary fw-normal">Changed</dt><dd class="col-sm-9 mb-1">{{plural . "time"}} while in force</dd>{{end}}
 <dt class="col-sm-3 text-body-secondary fw-normal">Requests during ban</dt><dd class="col-sm-9 mb-1">{{if .Requests}}{{num .Requests}} blocked · first <time class="js-time" data-ms="{{.FirstHitMS}}"></time> · last <time class="js-time" data-ms="{{.LastHitMS}}"></time>{{else}}None: nothing from this network arrived while it was banned{{end}}</dd>
@@ -103,7 +103,7 @@
 <td class="history-toggle"><button type="button" class="btn btn-sm btn-link text-body p-0" data-action="toggle" aria-expanded="false" aria-label="Show details"><i aria-hidden="true" class="bi bi-chevron-right"></i></button></td>
 <td class="cell-ip" data-chip>{{template "ipcell" (ipcell .Target)}}</td>
 <td>{{template "ban-state" .}}</td>
-<td class="small text-nowrap">{{if .Began}}<time class="js-time" data-ms="{{.BeganMS}}"></time>{{else}}before restart{{end}}</td>
+<td class="small text-nowrap">{{if .Began.IsSome}}<time class="js-time" data-ms="{{.BeganMS}}"></time>{{else}}before restart{{end}}</td>
 <td class="small">{{template "ban-end" .}}</td>
 <td class="{{if .Requests}}fw-semibold text-danger{{else}}text-body-secondary{{end}}">{{num .Requests}}</td>
 <td class="small font-monospace text-truncate cell-hist-path" title="{{.TopPaths}}">{{with .TopPaths}}{{.}}{{else}}—{{end}}</td>

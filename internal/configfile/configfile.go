@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/andreimerlescu/concert/internal/opt"
 )
 
 // File is the complete parsed declarative configuration.
@@ -24,116 +26,132 @@ type File struct {
 
 // GlobalConfig holds process-level listener, TLS, HTTP/3, Portal, and logging
 // directives shared across all virtual hosts.
+//
+// Optional scalar directives (such as PortalSecureCookie, StatsAuth,
+// RoomLeaseFraction, ClearQueueOnStart, UpstreamCBFailures, and
+// FastlaneLockDestinations) use value-type [opt.Option] fields tagged with
+// `omitzero`: an absent or JSON `null` directive leaves the zero value (None)
+// so runtime defaults apply, whereas explicit false/0/0.0 values decode as
+// Some(v) and marshal back to JSON. Value semantics guarantee that copying a
+// GlobalConfig never aliases optional scalar fields across copies.
 type GlobalConfig struct {
-	Listen                   string            `json:"listen,omitempty"`
-	HTTPListen               string            `json:"http_listen,omitempty"`
-	TLSEmail                 string            `json:"tls_email,omitempty"`
-	TLSCache                 string            `json:"tls_cache,omitempty"`
-	TLSStaging               bool              `json:"tls_staging,omitempty"`
-	TLSCert                  string            `json:"tls_cert,omitempty"`
-	TLSKey                   string            `json:"tls_key,omitempty"`
-	TLSMinVersion            string            `json:"tls_min_version,omitempty"`
-	TLSDNSProvider           string            `json:"tls_dns_provider,omitempty"`
-	TLSDNSWebhookURL         string            `json:"tls_dns_webhook_url,omitempty"`
-	HSTSMaxAge               int               `json:"hsts_max_age,omitempty"`
-	HTTP3                    bool              `json:"http3,omitempty"`
-	PortalListen             string            `json:"portal_listen,omitempty"`
-	PortalAllow              string            `json:"portal_allow,omitempty"`
-	PortalTLSCert            string            `json:"portal_tls_cert,omitempty"`
-	PortalTLSKey             string            `json:"portal_tls_key,omitempty"`
-	PortalSecureCookie       *bool             `json:"portal_secure_cookie,omitempty"`
-	DataDir                  string            `json:"data_dir,omitempty"`
-	TrustedProxies           string            `json:"trusted_proxies,omitempty"`
-	LogFormat                string            `json:"log_format,omitempty"`
-	LogLevel                 string            `json:"log_level,omitempty"`
-	StatsAuth                *bool             `json:"stats_auth,omitempty"`
-	RoomVerifyKeys           string            `json:"room_verify_keys,omitempty"`
-	RoomSignedMaxTTL         string            `json:"room_signed_max_ttl,omitempty"`
-	RoomLeaseFraction        *float64          `json:"room_lease_fraction,omitempty"`
-	TokenTTL                 string            `json:"token_ttl,omitempty"`
-	FirstPollGrace           string            `json:"first_poll_grace,omitempty"`
-	ReadyGrace               string            `json:"ready_grace,omitempty"`
-	IdlePollTTL              string            `json:"idle_poll_ttl,omitempty"`
-	Reaper                   string            `json:"reaper,omitempty"`
-	RetryAfter               int               `json:"retry_after,omitempty"`
-	BusyHTML                 string            `json:"busy_html,omitempty"`
-	ClearQueueOnStart        *bool             `json:"clear_queue_on_start,omitempty"`
-	BodyReadIdleTimeout      string            `json:"body_read_idle_timeout,omitempty"`
-	MaxUploadTime            string            `json:"max_upload_time,omitempty"`
-	UpstreamTimeout          string            `json:"upstream_timeout,omitempty"`
-	UpstreamBodyIdleTimeout  string            `json:"upstream_body_idle_timeout,omitempty"`
-	UpstreamCBFailures       *int              `json:"upstream_cb_failures,omitempty"`
-	UpstreamCBCooldown       string            `json:"upstream_cb_cooldown,omitempty"`
-	UpstreamHealthPath       string            `json:"upstream_health_path,omitempty"`
-	UpstreamHealthInterval   string            `json:"upstream_health_interval,omitempty"`
-	FastlaneConfig           string            `json:"fastlane_config,omitempty"`
-	NetworksConfig           string            `json:"networks_config,omitempty"`
-	FastlaneLockDestinations *bool             `json:"fastlane_lock_destinations,omitempty"`
-	Extra                    map[string]string `json:"extra,omitempty"`
+	Listen                   string              `json:"listen,omitempty"`
+	HTTPListen               string              `json:"http_listen,omitempty"`
+	TLSEmail                 string              `json:"tls_email,omitempty"`
+	TLSCache                 string              `json:"tls_cache,omitempty"`
+	TLSStaging               bool                `json:"tls_staging,omitempty"`
+	TLSCert                  string              `json:"tls_cert,omitempty"`
+	TLSKey                   string              `json:"tls_key,omitempty"`
+	TLSMinVersion            string              `json:"tls_min_version,omitempty"`
+	TLSDNSProvider           string              `json:"tls_dns_provider,omitempty"`
+	TLSDNSWebhookURL         string              `json:"tls_dns_webhook_url,omitempty"`
+	HSTSMaxAge               int                 `json:"hsts_max_age,omitempty"`
+	HTTP3                    bool                `json:"http3,omitempty"`
+	PortalListen             string              `json:"portal_listen,omitempty"`
+	PortalAllow              string              `json:"portal_allow,omitempty"`
+	PortalTLSCert            string              `json:"portal_tls_cert,omitempty"`
+	PortalTLSKey             string              `json:"portal_tls_key,omitempty"`
+	PortalSecureCookie       opt.Option[bool]    `json:"portal_secure_cookie,omitzero"`
+	DataDir                  string              `json:"data_dir,omitempty"`
+	TrustedProxies           string              `json:"trusted_proxies,omitempty"`
+	LogFormat                string              `json:"log_format,omitempty"`
+	LogLevel                 string              `json:"log_level,omitempty"`
+	StatsAuth                opt.Option[bool]    `json:"stats_auth,omitzero"`
+	RoomVerifyKeys           string              `json:"room_verify_keys,omitempty"`
+	RoomSignedMaxTTL         string              `json:"room_signed_max_ttl,omitempty"`
+	RoomLeaseFraction        opt.Option[float64] `json:"room_lease_fraction,omitzero"`
+	TokenTTL                 string              `json:"token_ttl,omitempty"`
+	FirstPollGrace           string              `json:"first_poll_grace,omitempty"`
+	ReadyGrace               string              `json:"ready_grace,omitempty"`
+	IdlePollTTL              string              `json:"idle_poll_ttl,omitempty"`
+	Reaper                   string              `json:"reaper,omitempty"`
+	RetryAfter               int                 `json:"retry_after,omitempty"`
+	BusyHTML                 string              `json:"busy_html,omitempty"`
+	ClearQueueOnStart        opt.Option[bool]    `json:"clear_queue_on_start,omitzero"`
+	BodyReadIdleTimeout      string              `json:"body_read_idle_timeout,omitempty"`
+	MaxUploadTime            string              `json:"max_upload_time,omitempty"`
+	UpstreamTimeout          string              `json:"upstream_timeout,omitempty"`
+	UpstreamBodyIdleTimeout  string              `json:"upstream_body_idle_timeout,omitempty"`
+	UpstreamCBFailures       opt.Option[int]     `json:"upstream_cb_failures,omitzero"`
+	UpstreamCBCooldown       string              `json:"upstream_cb_cooldown,omitempty"`
+	UpstreamHealthPath       string              `json:"upstream_health_path,omitempty"`
+	UpstreamHealthInterval   string              `json:"upstream_health_interval,omitempty"`
+	FastlaneConfig           string              `json:"fastlane_config,omitempty"`
+	NetworksConfig           string              `json:"networks_config,omitempty"`
+	FastlaneLockDestinations opt.Option[bool]    `json:"fastlane_lock_destinations,omitzero"`
+	Extra                    map[string]string   `json:"extra,omitempty"`
 }
 
 // SiteConfig holds one virtual host block (one or more hostnames sharing a
 // waiting room, upstream pool, static root, and optional micro-cache).
+//
+// Optional per-site overrides (StaticFallback, Compress, MaxQueue,
+// SecureCookie, PreserveHost, Abuse, RoomLeaseFraction, ClearQueueOnStart,
+// UpstreamCBFailures, and FastlaneLockDestinations) use value-type
+// [opt.Option] fields tagged with `omitzero`: None inherits the global or
+// preset default and is omitted when marshaling JSON, while Some(v) records an
+// explicit override (including false, 0, or 0.0) without pointer allocation or
+// cross-copy aliasing.
 type SiteConfig struct {
-	Hosts                    []string          `json:"hosts"`
-	Preset                   string            `json:"preset,omitempty"`
-	Upstream                 string            `json:"upstream,omitempty"`
-	Root                     string            `json:"root,omitempty"`
-	Mounts                   []string          `json:"mounts,omitempty"`
-	StaticAllowExt           string            `json:"static_allow_ext,omitempty"`
-	StaticCacheControl       string            `json:"static_cache_control,omitempty"`
-	StaticFallback           *bool             `json:"static_fallback,omitempty"`
-	Compress                 *bool             `json:"compress,omitempty"`
-	Assets                   string            `json:"assets,omitempty"`
-	AssetPublic              string            `json:"asset_public,omitempty"`
-	Bypass                   string            `json:"bypass,omitempty"`
-	StreamPaths              string            `json:"stream_paths,omitempty"`
-	Cap                      int               `json:"cap,omitempty"`
-	MaxQueue                 *int64            `json:"max_queue,omitempty"`
-	PriorityCap              int               `json:"priority_cap,omitempty"`
-	PriorityLaneRank         int               `json:"priority_lane_rank,omitempty"`
-	SecureCookie             *bool             `json:"secure_cookie,omitempty"`
-	PreserveHost             *bool             `json:"preserve_host,omitempty"`
-	FCGIIndex                string            `json:"fcgi_index,omitempty"`
-	FCGIDenyPaths            string            `json:"fcgi_deny_paths,omitempty"`
-	MicroCache               string            `json:"micro_cache,omitempty"`
-	MicroCacheMaxMB          int               `json:"micro_cache_max_mb,omitempty"`
-	Abuse                    *bool             `json:"abuse,omitempty"`
-	AbuseStrikes             int               `json:"abuse_strikes,omitempty"`
-	BanPaths                 string            `json:"ban_paths,omitempty"`
-	RateLimits               []string          `json:"rate_limits,omitempty"`
-	RoomVerifyKeys           string            `json:"room_verify_keys,omitempty"`
-	RoomScope                string            `json:"room_scope,omitempty"`
-	RoomSignedMaxTTL         string            `json:"room_signed_max_ttl,omitempty"`
-	RoomLeaseFraction        *float64          `json:"room_lease_fraction,omitempty"`
-	TokenTTL                 string            `json:"token_ttl,omitempty"`
-	FirstPollGrace           string            `json:"first_poll_grace,omitempty"`
-	ReadyGrace               string            `json:"ready_grace,omitempty"`
-	IdlePollTTL              string            `json:"idle_poll_ttl,omitempty"`
-	Reaper                   string            `json:"reaper,omitempty"`
-	RetryAfter               int               `json:"retry_after,omitempty"`
-	BusyHTML                 string            `json:"busy_html,omitempty"`
-	ClearQueueOnStart        *bool             `json:"clear_queue_on_start,omitempty"`
-	BodyReadIdleTimeout      string            `json:"body_read_idle_timeout,omitempty"`
-	MaxUploadTime            string            `json:"max_upload_time,omitempty"`
-	UpstreamTimeout          string            `json:"upstream_timeout,omitempty"`
-	UpstreamBodyIdleTimeout  string            `json:"upstream_body_idle_timeout,omitempty"`
-	UpstreamCBFailures       *int              `json:"upstream_cb_failures,omitempty"`
-	UpstreamCBCooldown       string            `json:"upstream_cb_cooldown,omitempty"`
-	UpstreamHealthPath       string            `json:"upstream_health_path,omitempty"`
-	UpstreamHealthInterval   string            `json:"upstream_health_interval,omitempty"`
-	FastlaneConfig           string            `json:"fastlane_config,omitempty"`
-	NetworksConfig           string            `json:"networks_config,omitempty"`
-	FastlaneLockDestinations *bool             `json:"fastlane_lock_destinations,omitempty"`
-	TLSCert                  string            `json:"tls_cert,omitempty"`
-	TLSKey                   string            `json:"tls_key,omitempty"`
-	Routes                   []RouteConfig     `json:"routes,omitempty"`
-	Headers                  []HeaderRule      `json:"headers,omitempty"`
-	Redirects                []RedirectRule    `json:"redirects,omitempty"`
-	DropEventID              string            `json:"drop_event_id,omitempty"`
-	DropLobbyAt              string            `json:"drop_lobby_at,omitempty"`
-	DropOpenAt               string            `json:"drop_open_at,omitempty"`
-	Extra                    map[string]string `json:"extra,omitempty"`
+	Hosts                    []string            `json:"hosts"`
+	Preset                   string              `json:"preset,omitempty"`
+	Upstream                 string              `json:"upstream,omitempty"`
+	Root                     string              `json:"root,omitempty"`
+	Mounts                   []string            `json:"mounts,omitempty"`
+	StaticAllowExt           string              `json:"static_allow_ext,omitempty"`
+	StaticCacheControl       string              `json:"static_cache_control,omitempty"`
+	StaticFallback           opt.Option[bool]    `json:"static_fallback,omitzero"`
+	Compress                 opt.Option[bool]    `json:"compress,omitzero"`
+	Assets                   string              `json:"assets,omitempty"`
+	AssetPublic              string              `json:"asset_public,omitempty"`
+	Bypass                   string              `json:"bypass,omitempty"`
+	StreamPaths              string              `json:"stream_paths,omitempty"`
+	Cap                      int                 `json:"cap,omitempty"`
+	MaxQueue                 opt.Option[int64]   `json:"max_queue,omitzero"`
+	PriorityCap              int                 `json:"priority_cap,omitempty"`
+	PriorityLaneRank         int                 `json:"priority_lane_rank,omitempty"`
+	SecureCookie             opt.Option[bool]    `json:"secure_cookie,omitzero"`
+	PreserveHost             opt.Option[bool]    `json:"preserve_host,omitzero"`
+	FCGIIndex                string              `json:"fcgi_index,omitempty"`
+	FCGIDenyPaths            string              `json:"fcgi_deny_paths,omitempty"`
+	MicroCache               string              `json:"micro_cache,omitempty"`
+	MicroCacheMaxMB          int                 `json:"micro_cache_max_mb,omitempty"`
+	Abuse                    opt.Option[bool]    `json:"abuse,omitzero"`
+	AbuseStrikes             int                 `json:"abuse_strikes,omitempty"`
+	BanPaths                 string              `json:"ban_paths,omitempty"`
+	RateLimits               []string            `json:"rate_limits,omitempty"`
+	RoomVerifyKeys           string              `json:"room_verify_keys,omitempty"`
+	RoomScope                string              `json:"room_scope,omitempty"`
+	RoomSignedMaxTTL         string              `json:"room_signed_max_ttl,omitempty"`
+	RoomLeaseFraction        opt.Option[float64] `json:"room_lease_fraction,omitzero"`
+	TokenTTL                 string              `json:"token_ttl,omitempty"`
+	FirstPollGrace           string              `json:"first_poll_grace,omitempty"`
+	ReadyGrace               string              `json:"ready_grace,omitempty"`
+	IdlePollTTL              string              `json:"idle_poll_ttl,omitempty"`
+	Reaper                   string              `json:"reaper,omitempty"`
+	RetryAfter               int                 `json:"retry_after,omitempty"`
+	BusyHTML                 string              `json:"busy_html,omitempty"`
+	ClearQueueOnStart        opt.Option[bool]    `json:"clear_queue_on_start,omitzero"`
+	BodyReadIdleTimeout      string              `json:"body_read_idle_timeout,omitempty"`
+	MaxUploadTime            string              `json:"max_upload_time,omitempty"`
+	UpstreamTimeout          string              `json:"upstream_timeout,omitempty"`
+	UpstreamBodyIdleTimeout  string              `json:"upstream_body_idle_timeout,omitempty"`
+	UpstreamCBFailures       opt.Option[int]     `json:"upstream_cb_failures,omitzero"`
+	UpstreamCBCooldown       string              `json:"upstream_cb_cooldown,omitempty"`
+	UpstreamHealthPath       string              `json:"upstream_health_path,omitempty"`
+	UpstreamHealthInterval   string              `json:"upstream_health_interval,omitempty"`
+	FastlaneConfig           string              `json:"fastlane_config,omitempty"`
+	NetworksConfig           string              `json:"networks_config,omitempty"`
+	FastlaneLockDestinations opt.Option[bool]    `json:"fastlane_lock_destinations,omitzero"`
+	TLSCert                  string              `json:"tls_cert,omitempty"`
+	TLSKey                   string              `json:"tls_key,omitempty"`
+	Routes                   []RouteConfig       `json:"routes,omitempty"`
+	Headers                  []HeaderRule        `json:"headers,omitempty"`
+	Redirects                []RedirectRule      `json:"redirects,omitempty"`
+	DropEventID              string              `json:"drop_event_id,omitempty"`
+	DropLobbyAt              string              `json:"drop_lobby_at,omitempty"`
+	DropOpenAt               string              `json:"drop_open_at,omitempty"`
+	Extra                    map[string]string   `json:"extra,omitempty"`
 }
 
 // Load reads and parses a Concertfile (or JSON file when path ends in .json).
@@ -221,8 +239,8 @@ func (f *File) NormalizeAndValidate() error {
 				return fmt.Errorf("site %s: invalid room_signed_max_ttl %q (must be 1s-1h)", s.Hosts[0], s.RoomSignedMaxTTL)
 			}
 		}
-		if s.RoomLeaseFraction != nil && (*s.RoomLeaseFraction < 0 || *s.RoomLeaseFraction > 1) {
-			return fmt.Errorf("site %s: invalid room_lease_fraction %g (must be 0-1)", s.Hosts[0], *s.RoomLeaseFraction)
+		if v, ok := s.RoomLeaseFraction.Get(); ok && (v < 0 || v > 1) {
+			return fmt.Errorf("site %s: invalid room_lease_fraction %g (must be 0-1)", s.Hosts[0], v)
 		}
 		if s.BodyReadIdleTimeout != "" && !strings.EqualFold(s.BodyReadIdleTimeout, "off") && s.BodyReadIdleTimeout != "0" {
 			d, err := time.ParseDuration(s.BodyReadIdleTimeout)
@@ -265,8 +283,8 @@ func (f *File) NormalizeAndValidate() error {
 			return fmt.Errorf("global: invalid room_signed_max_ttl %q (must be 1s-1h)", f.Global.RoomSignedMaxTTL)
 		}
 	}
-	if f.Global.RoomLeaseFraction != nil && (*f.Global.RoomLeaseFraction < 0 || *f.Global.RoomLeaseFraction > 1) {
-		return fmt.Errorf("global: invalid room_lease_fraction %g (must be 0-1)", *f.Global.RoomLeaseFraction)
+	if v, ok := f.Global.RoomLeaseFraction.Get(); ok && (v < 0 || v > 1) {
+		return fmt.Errorf("global: invalid room_lease_fraction %g (must be 0-1)", v)
 	}
 	if f.Global.BodyReadIdleTimeout != "" && !strings.EqualFold(f.Global.BodyReadIdleTimeout, "off") && f.Global.BodyReadIdleTimeout != "0" {
 		d, err := time.ParseDuration(f.Global.BodyReadIdleTimeout)
@@ -316,12 +334,51 @@ func validateDurationField(scope, name, raw string, allowOff bool, minD, maxD ti
 	return nil
 }
 
+// validateCommonTimers checks queue timer, retry, and upstream health/circuit-
+// breaker directives shared by [GlobalConfig] and [SiteConfig].
+//
+// # Parameters
+//
+//   - scope: Diagnostic label ("global" or "site <host>") prefixed to errors.
+//   - tokenTTL, firstPollGrace, readyGrace, idlePollTTL, reaper: Duration
+//     strings validated against their respective bounds; empty leaves defaults.
+//   - retryAfter: Non-negative Retry-After header interval in seconds.
+//   - upstreamTimeout, upstreamBodyIdleTimeout: Optional upstream durations
+//     ("off" or "0" disables).
+//   - upstreamCBFailures: Optional consecutive-failure threshold; None leaves
+//     the default, Some(0) disables the circuit breaker, and negative values
+//     are rejected.
+//   - upstreamCBCooldown, upstreamHealthPath, upstreamHealthInterval: Upstream
+//     circuit-breaker cooldown and active health-probe settings.
+//
+// # Returns
+//
+// nil when every supplied directive is within its permitted range, or an error
+// identifying scope and the first invalid directive.
+//
+// # Example
+//
+//	if err := validateCommonTimers("global", "2m", "20s", "15s", "30s", "10s", 3,
+//		"45s", "20s", opt.Some(5), "15s", "/healthz", "5s"); err != nil {
+//		return err
+//	}
+//
+// # Used By
+//
+// Generated from verified repository symbol references; do not hand-edit.
+//
+//   - internal/configfile/configfile.go:257 (direct call)
+//   - internal/configfile/configfile.go:301 (direct call)
+//
+// Scope: current module (github.com/andreimerlescu/concert), including tests;
+// build configuration: darwin/arm64, default tags.
+// Interface, reflection, callback, and external callers are not exhaustive.
 func validateCommonTimers(
 	scope string,
 	tokenTTL, firstPollGrace, readyGrace, idlePollTTL, reaper string,
 	retryAfter int,
 	upstreamTimeout, upstreamBodyIdleTimeout string,
-	upstreamCBFailures *int,
+	upstreamCBFailures opt.Option[int],
 	upstreamCBCooldown, upstreamHealthPath, upstreamHealthInterval string,
 ) error {
 	if err := validateDurationField(scope, "token_ttl", tokenTTL, true, 30*time.Second, 24*time.Hour); err != nil {
@@ -348,7 +405,7 @@ func validateCommonTimers(
 	if err := validateDurationField(scope, "upstream_body_idle_timeout", upstreamBodyIdleTimeout, true, time.Second, 24*time.Hour); err != nil {
 		return err
 	}
-	if upstreamCBFailures != nil && *upstreamCBFailures < 0 {
+	if v, ok := upstreamCBFailures.Get(); ok && v < 0 {
 		return fmt.Errorf("%s: upstream_cb_failures must not be negative", scope)
 	}
 	if err := validateDurationField(scope, "upstream_cb_cooldown", upstreamCBCooldown, false, time.Second, 0); err != nil {
@@ -805,7 +862,7 @@ func (p *parser) parseGlobalBlock(g *GlobalConfig) error {
 			if err != nil {
 				return err
 			}
-			g.PortalSecureCookie = &b
+			g.PortalSecureCookie = opt.Some(b)
 		case "data_dir":
 			if g.DataDir, err = requireOneArg(dir, args); err != nil {
 				return err
@@ -825,7 +882,7 @@ func (p *parser) parseGlobalBlock(g *GlobalConfig) error {
 			if err != nil {
 				return err
 			}
-			g.StatsAuth = &b
+			g.StatsAuth = opt.Some(b)
 		case "room_verify_keys":
 			if len(args) == 0 {
 				return fmt.Errorf("Concertfile:%d:%d: room_verify_keys requires kid=key entries", dir.line, dir.col)
@@ -844,7 +901,7 @@ func (p *parser) parseGlobalBlock(g *GlobalConfig) error {
 			if err != nil {
 				return fmt.Errorf("Concertfile:%d:%d: directive %q invalid number %q", dir.line, dir.col, dir.val, s)
 			}
-			g.RoomLeaseFraction = &v
+			g.RoomLeaseFraction = opt.Some(v)
 		case "token_ttl":
 			if g.TokenTTL, err = requireOneArg(dir, args); err != nil {
 				return err
@@ -883,7 +940,7 @@ func (p *parser) parseGlobalBlock(g *GlobalConfig) error {
 			if err != nil {
 				return err
 			}
-			g.ClearQueueOnStart = &b
+			g.ClearQueueOnStart = opt.Some(b)
 		case "body_read_idle_timeout":
 			if g.BodyReadIdleTimeout, err = requireOneArg(dir, args); err != nil {
 				return err
@@ -905,7 +962,7 @@ func (p *parser) parseGlobalBlock(g *GlobalConfig) error {
 			if err != nil {
 				return err
 			}
-			g.UpstreamCBFailures = &v
+			g.UpstreamCBFailures = opt.Some(v)
 		case "upstream_cb_cooldown":
 			if g.UpstreamCBCooldown, err = requireOneArg(dir, args); err != nil {
 				return err
@@ -931,7 +988,7 @@ func (p *parser) parseGlobalBlock(g *GlobalConfig) error {
 			if err != nil {
 				return err
 			}
-			g.FastlaneLockDestinations = &b
+			g.FastlaneLockDestinations = opt.Some(b)
 		default:
 			return fmt.Errorf("Concertfile:%d:%d: unknown global directive %q", dir.line, dir.col, dir.val)
 		}
@@ -1018,13 +1075,13 @@ body:
 			if err != nil {
 				return s, err
 			}
-			s.StaticFallback = &b
+			s.StaticFallback = opt.Some(b)
 		case "compress":
 			b, err := parseBoolArg(dir, args)
 			if err != nil {
 				return s, err
 			}
-			s.Compress = &b
+			s.Compress = opt.Some(b)
 		case "assets":
 			s.Assets = strings.Join(args, ",")
 		case "asset_public":
@@ -1042,7 +1099,7 @@ body:
 			if err != nil {
 				return s, err
 			}
-			s.MaxQueue = &v
+			s.MaxQueue = opt.Some(v)
 		case "priority_cap":
 			if s.PriorityCap, err = parseIntArg(dir, args); err != nil {
 				return s, err
@@ -1056,13 +1113,13 @@ body:
 			if err != nil {
 				return s, err
 			}
-			s.SecureCookie = &b
+			s.SecureCookie = opt.Some(b)
 		case "preserve_host":
 			b, err := parseBoolArg(dir, args)
 			if err != nil {
 				return s, err
 			}
-			s.PreserveHost = &b
+			s.PreserveHost = opt.Some(b)
 		case "fcgi_index":
 			if s.FCGIIndex, err = requireOneArg(dir, args); err != nil {
 				return s, err
@@ -1082,7 +1139,7 @@ body:
 			if err != nil {
 				return s, err
 			}
-			s.Abuse = &b
+			s.Abuse = opt.Some(b)
 		case "abuse_strikes":
 			if s.AbuseStrikes, err = parseIntArg(dir, args); err != nil {
 				return s, err
@@ -1119,7 +1176,7 @@ body:
 			if err != nil {
 				return s, fmt.Errorf("Concertfile:%d:%d: directive %q invalid number %q", dir.line, dir.col, dir.val, arg)
 			}
-			s.RoomLeaseFraction = &v
+			s.RoomLeaseFraction = opt.Some(v)
 		case "token_ttl":
 			if s.TokenTTL, err = requireOneArg(dir, args); err != nil {
 				return s, err
@@ -1158,7 +1215,7 @@ body:
 			if err != nil {
 				return s, err
 			}
-			s.ClearQueueOnStart = &b
+			s.ClearQueueOnStart = opt.Some(b)
 		case "body_read_idle_timeout":
 			if s.BodyReadIdleTimeout, err = requireOneArg(dir, args); err != nil {
 				return s, err
@@ -1180,7 +1237,7 @@ body:
 			if err != nil {
 				return s, err
 			}
-			s.UpstreamCBFailures = &v
+			s.UpstreamCBFailures = opt.Some(v)
 		case "upstream_cb_cooldown":
 			if s.UpstreamCBCooldown, err = requireOneArg(dir, args); err != nil {
 				return s, err
@@ -1206,7 +1263,7 @@ body:
 			if err != nil {
 				return s, err
 			}
-			s.FastlaneLockDestinations = &b
+			s.FastlaneLockDestinations = opt.Some(b)
 		case "tls_cert":
 			if s.TLSCert, err = requireOneArg(dir, args); err != nil {
 				return s, err
@@ -1259,11 +1316,11 @@ func FormatConcertfile(f *File) string {
 	hasGlobal := g.Listen != "" || g.HTTPListen != "" || g.TLSEmail != "" || g.TLSCache != "" ||
 		g.TLSStaging || g.TLSCert != "" || g.TLSDNSProvider != "" || g.TLSDNSWebhookURL != "" || g.HTTP3 || g.PortalListen != "" || g.DataDir != "" ||
 		g.TrustedProxies != "" || g.LogFormat != "" || g.LogLevel != "" || g.HSTSMaxAge > 0 ||
-		g.RoomVerifyKeys != "" || g.RoomSignedMaxTTL != "" || g.RoomLeaseFraction != nil ||
+		g.RoomVerifyKeys != "" || g.RoomSignedMaxTTL != "" || g.RoomLeaseFraction.IsSome() ||
 		g.TokenTTL != "" || g.FirstPollGrace != "" || g.ReadyGrace != "" || g.IdlePollTTL != "" ||
-		g.Reaper != "" || g.RetryAfter > 0 || g.BusyHTML != "" || g.ClearQueueOnStart != nil ||
+		g.Reaper != "" || g.RetryAfter > 0 || g.BusyHTML != "" || g.ClearQueueOnStart.IsSome() ||
 		g.BodyReadIdleTimeout != "" || g.MaxUploadTime != "" || g.UpstreamTimeout != "" ||
-		g.UpstreamBodyIdleTimeout != "" || g.UpstreamCBFailures != nil || g.UpstreamCBCooldown != "" ||
+		g.UpstreamBodyIdleTimeout != "" || g.UpstreamCBFailures.IsSome() || g.UpstreamCBCooldown != "" ||
 		g.UpstreamHealthPath != "" || g.UpstreamHealthInterval != ""
 	if hasGlobal {
 		b.WriteString("{\n")
@@ -1310,8 +1367,8 @@ func FormatConcertfile(f *File) string {
 		if g.RoomSignedMaxTTL != "" {
 			fmt.Fprintf(&b, "    room_signed_max_ttl %s\n", quote(g.RoomSignedMaxTTL))
 		}
-		if g.RoomLeaseFraction != nil {
-			fmt.Fprintf(&b, "    room_lease_fraction %g\n", *g.RoomLeaseFraction)
+		if v, ok := g.RoomLeaseFraction.Get(); ok {
+			fmt.Fprintf(&b, "    room_lease_fraction %g\n", v)
 		}
 		if g.TokenTTL != "" {
 			fmt.Fprintf(&b, "    token_ttl %s\n", quote(g.TokenTTL))
@@ -1334,8 +1391,8 @@ func FormatConcertfile(f *File) string {
 		if g.BusyHTML != "" {
 			fmt.Fprintf(&b, "    busy_html %s\n", quote(g.BusyHTML))
 		}
-		if g.ClearQueueOnStart != nil {
-			fmt.Fprintf(&b, "    clear_queue_on_start %v\n", *g.ClearQueueOnStart)
+		if v, ok := g.ClearQueueOnStart.Get(); ok {
+			fmt.Fprintf(&b, "    clear_queue_on_start %v\n", v)
 		}
 		if g.BodyReadIdleTimeout != "" {
 			fmt.Fprintf(&b, "    body_read_idle_timeout %s\n", quote(g.BodyReadIdleTimeout))
@@ -1349,8 +1406,8 @@ func FormatConcertfile(f *File) string {
 		if g.UpstreamBodyIdleTimeout != "" {
 			fmt.Fprintf(&b, "    upstream_body_idle_timeout %s\n", quote(g.UpstreamBodyIdleTimeout))
 		}
-		if g.UpstreamCBFailures != nil {
-			fmt.Fprintf(&b, "    upstream_cb_failures %d\n", *g.UpstreamCBFailures)
+		if v, ok := g.UpstreamCBFailures.Get(); ok {
+			fmt.Fprintf(&b, "    upstream_cb_failures %d\n", v)
 		}
 		if g.UpstreamCBCooldown != "" {
 			fmt.Fprintf(&b, "    upstream_cb_cooldown %s\n", quote(g.UpstreamCBCooldown))
@@ -1403,8 +1460,8 @@ func FormatConcertfile(f *File) string {
 		if s.FCGIDenyPaths != "" {
 			fmt.Fprintf(&b, "    fcgi_deny_paths %s\n", quote(s.FCGIDenyPaths))
 		}
-		if s.SecureCookie != nil {
-			fmt.Fprintf(&b, "    secure_cookie %v\n", *s.SecureCookie)
+		if v, ok := s.SecureCookie.Get(); ok {
+			fmt.Fprintf(&b, "    secure_cookie %v\n", v)
 		}
 		if s.RoomVerifyKeys != "" {
 			fmt.Fprintf(&b, "    room_verify_keys %s\n", quote(s.RoomVerifyKeys))
@@ -1415,8 +1472,8 @@ func FormatConcertfile(f *File) string {
 		if s.RoomSignedMaxTTL != "" {
 			fmt.Fprintf(&b, "    room_signed_max_ttl %s\n", quote(s.RoomSignedMaxTTL))
 		}
-		if s.RoomLeaseFraction != nil {
-			fmt.Fprintf(&b, "    room_lease_fraction %g\n", *s.RoomLeaseFraction)
+		if v, ok := s.RoomLeaseFraction.Get(); ok {
+			fmt.Fprintf(&b, "    room_lease_fraction %g\n", v)
 		}
 		if s.TokenTTL != "" {
 			fmt.Fprintf(&b, "    token_ttl %s\n", quote(s.TokenTTL))
@@ -1439,8 +1496,8 @@ func FormatConcertfile(f *File) string {
 		if s.BusyHTML != "" {
 			fmt.Fprintf(&b, "    busy_html %s\n", quote(s.BusyHTML))
 		}
-		if s.ClearQueueOnStart != nil {
-			fmt.Fprintf(&b, "    clear_queue_on_start %v\n", *s.ClearQueueOnStart)
+		if v, ok := s.ClearQueueOnStart.Get(); ok {
+			fmt.Fprintf(&b, "    clear_queue_on_start %v\n", v)
 		}
 		if s.BodyReadIdleTimeout != "" {
 			fmt.Fprintf(&b, "    body_read_idle_timeout %s\n", quote(s.BodyReadIdleTimeout))
@@ -1454,8 +1511,8 @@ func FormatConcertfile(f *File) string {
 		if s.UpstreamBodyIdleTimeout != "" {
 			fmt.Fprintf(&b, "    upstream_body_idle_timeout %s\n", quote(s.UpstreamBodyIdleTimeout))
 		}
-		if s.UpstreamCBFailures != nil {
-			fmt.Fprintf(&b, "    upstream_cb_failures %d\n", *s.UpstreamCBFailures)
+		if v, ok := s.UpstreamCBFailures.Get(); ok {
+			fmt.Fprintf(&b, "    upstream_cb_failures %d\n", v)
 		}
 		if s.UpstreamCBCooldown != "" {
 			fmt.Fprintf(&b, "    upstream_cb_cooldown %s\n", quote(s.UpstreamCBCooldown))

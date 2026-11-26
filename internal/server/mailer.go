@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/andreimerlescu/concert/internal/mailer"
+	"github.com/andreimerlescu/concert/internal/opt"
 	"github.com/gin-gonic/gin"
 )
 
@@ -295,35 +296,65 @@ func (p *portal) apiEmail(c *gin.Context) {
 	c.JSON(http.StatusOK, p.emailView())
 }
 
+// emailConfigSaveReq is the partial-update JSON payload accepted by
+// POST /api/email/config. Each scalar field uses [opt.Option] so omitted or
+// JSON null fields leave existing settings unchanged while explicit zero/empty
+// values are applied.
 type emailConfigSaveReq struct {
-	Provider         *string         `json:"provider"`
-	SMTPHost         *string         `json:"smtp_host"`
-	SMTPPort         *int            `json:"smtp_port"`
-	SMTPTLS          *string         `json:"smtp_tls"`
-	SMTPUser         *string         `json:"smtp_user"`
-	ResendBaseURL    *string         `json:"resend_base_url"`
-	SendPandaBaseURL *string         `json:"sendpanda_base_url"`
-	FromName         *string         `json:"from_name"`
-	FromAddr         *string         `json:"from_addr"`
-	ToAddrs          *string         `json:"to_addrs"`
-	DKIMSelector     *string         `json:"dkim_selector"`
-	CadenceMax       *int            `json:"cadence_max"`
-	CadenceWindow    *int            `json:"cadence_window"`
-	CadenceUnit      *string         `json:"cadence_unit"`
-	Categories       map[string]bool `json:"categories"`
-	OrgName          *string         `json:"org_name"`
-	PostalAddress    *string         `json:"postal_address"`
-	PrivacyURL       *string         `json:"privacy_url"`
-	TermsURL         *string         `json:"terms_url"`
-	PortalURL        *string         `json:"portal_url"`
-	PublicBaseURL    *string         `json:"public_base_url"`
+	Provider         opt.Option[string] `json:"provider"`
+	SMTPHost         opt.Option[string] `json:"smtp_host"`
+	SMTPPort         opt.Option[int]    `json:"smtp_port"`
+	SMTPTLS          opt.Option[string] `json:"smtp_tls"`
+	SMTPUser         opt.Option[string] `json:"smtp_user"`
+	ResendBaseURL    opt.Option[string] `json:"resend_base_url"`
+	SendPandaBaseURL opt.Option[string] `json:"sendpanda_base_url"`
+	FromName         opt.Option[string] `json:"from_name"`
+	FromAddr         opt.Option[string] `json:"from_addr"`
+	ToAddrs          opt.Option[string] `json:"to_addrs"`
+	DKIMSelector     opt.Option[string] `json:"dkim_selector"`
+	CadenceMax       opt.Option[int]    `json:"cadence_max"`
+	CadenceWindow    opt.Option[int]    `json:"cadence_window"`
+	CadenceUnit      opt.Option[string] `json:"cadence_unit"`
+	Categories       map[string]bool    `json:"categories"`
+	OrgName          opt.Option[string] `json:"org_name"`
+	PostalAddress    opt.Option[string] `json:"postal_address"`
+	PrivacyURL       opt.Option[string] `json:"privacy_url"`
+	TermsURL         opt.Option[string] `json:"terms_url"`
+	PortalURL        opt.Option[string] `json:"portal_url"`
+	PublicBaseURL    opt.Option[string] `json:"public_base_url"`
 	Secrets          *struct {
-		SMTPPass        *string `json:"smtp_pass"`
-		ResendAPIKey    *string `json:"resend_api_key"`
-		SendPandaAPIKey *string `json:"sendpanda_api_key"`
+		SMTPPass        opt.Option[string] `json:"smtp_pass"`
+		ResendAPIKey    opt.Option[string] `json:"resend_api_key"`
+		SendPandaAPIKey opt.Option[string] `json:"sendpanda_api_key"`
 	} `json:"secrets"`
 }
 
+// apiEmailConfigSave applies a partial email configuration and write-only
+// credential update from the Admin Portal. Absent or null [opt.Option] fields
+// preserve existing values; secret updates fail fast if encrypted persistence
+// is unavailable.
+//
+// # Parameters
+//
+//   - c: Gin HTTP request context for an authenticated admin POST /api/email/config.
+//
+// # Returns
+//
+// Writes a JSON HTTP response (200 with updated emailView, or 4xx/5xx error).
+//
+// # Example
+//
+//	// Registered on the admin portal router:
+//	admin.POST("/api/email/config", p.apiEmailConfigSave)
+//
+// # Used By
+//
+// Generated from verified AST symbol references; do not hand-edit.
+//
+//   - internal/server/enterprise_hooks.go:753 (method value)
+//
+// Scope: internal/server (including tests and all build tags).
+// Registered as a Gin handler callback; runtime HTTP dispatch is not statically enumerable.
 func (p *portal) apiEmailConfigSave(c *gin.Context) {
 	if p.a.current().cfg.readOnlySettings {
 		jsonError(c, http.StatusForbidden, "settings are read-only (-read-only-settings / GitOps mode)")
@@ -336,15 +367,15 @@ func (p *portal) apiEmailConfigSave(c *gin.Context) {
 	}
 
 	set := map[string]json.RawMessage{}
-	addStr := func(key string, v *string) {
-		if v != nil {
-			b, _ := json.Marshal(strings.TrimSpace(*v))
+	addStr := func(key string, v opt.Option[string]) {
+		if s, ok := v.Get(); ok {
+			b, _ := json.Marshal(strings.TrimSpace(s))
 			set[key] = b
 		}
 	}
-	addInt := func(key string, v *int) {
-		if v != nil {
-			b, _ := json.Marshal(*v)
+	addInt := func(key string, v opt.Option[int]) {
+		if n, ok := v.Get(); ok {
+			b, _ := json.Marshal(n)
 			set[key] = b
 		}
 	}
@@ -378,19 +409,16 @@ func (p *portal) apiEmailConfigSave(c *gin.Context) {
 	var secPatch mailer.SecretsPatch
 	var secFields []string
 	if req.Secrets != nil {
-		if req.Secrets.SMTPPass != nil && *req.Secrets.SMTPPass != "" {
-			v := *req.Secrets.SMTPPass
-			secPatch.SMTPPass = &v
+		if v, ok := req.Secrets.SMTPPass.Get(); ok && v != "" {
+			secPatch.SMTPPass = opt.Some(v)
 			secFields = append(secFields, "smtp_pass")
 		}
-		if req.Secrets.ResendAPIKey != nil && *req.Secrets.ResendAPIKey != "" {
-			v := strings.TrimSpace(*req.Secrets.ResendAPIKey)
-			secPatch.ResendAPIKey = &v
+		if v, ok := req.Secrets.ResendAPIKey.Get(); ok && v != "" {
+			secPatch.ResendAPIKey = opt.Some(strings.TrimSpace(v))
 			secFields = append(secFields, "resend_api_key")
 		}
-		if req.Secrets.SendPandaAPIKey != nil && *req.Secrets.SendPandaAPIKey != "" {
-			v := strings.TrimSpace(*req.Secrets.SendPandaAPIKey)
-			secPatch.SendPandaAPIKey = &v
+		if v, ok := req.Secrets.SendPandaAPIKey.Get(); ok && v != "" {
+			secPatch.SendPandaAPIKey = opt.Some(strings.TrimSpace(v))
 			secFields = append(secFields, "sendpanda_api_key")
 		}
 	}

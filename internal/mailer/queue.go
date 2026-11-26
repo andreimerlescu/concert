@@ -14,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/andreimerlescu/concert/internal/opt"
 )
 
 const (
@@ -45,28 +47,31 @@ type DeliveryRecord struct {
 }
 
 // StatusSnapshot is the read-only view served by the Admin Portal /api/email.
+// NextEligibleAt and BackoffUntil use opt.Option[time.Time] with json omitzero
+// so absent timestamps are omitted from JSON while present timestamps marshal
+// as RFC 3339 strings without heap-allocated pointers.
 type StatusSnapshot struct {
-	Enabled             bool                 `json:"enabled"`
-	Provider            string               `json:"provider"`
-	Paused              bool                 `json:"paused"`
-	Unsubscribed        map[string]time.Time `json:"unsubscribed"`
-	Cadence             Cadence              `json:"cadence"`
-	CadenceText         string               `json:"cadence_text"`
-	WindowSeconds       int64                `json:"window_seconds"`
-	PaceSeconds         int64                `json:"pace_seconds"`
-	SentInWindow        int                  `json:"sent_in_window"`
-	RemainingInWindow   int                  `json:"remaining_in_window"`
-	NextEligibleAt      *time.Time           `json:"next_eligible_at,omitempty"`
-	QueuedUnique        int                  `json:"queued_unique"`
-	QueuedTotal         int                  `json:"queued_total"`
-	OverflowCount       int                  `json:"overflow_count"`
-	Pending             []QueuedEvent        `json:"pending"`
-	SentTotal           int64                `json:"sent_total"`
-	ErrorTotal          int64                `json:"error_total"`
-	ConsecutiveFailures int                  `json:"consecutive_failures"`
-	BackoffUntil        *time.Time           `json:"backoff_until,omitempty"`
-	LastDelivery        *DeliveryRecord      `json:"last_delivery,omitempty"`
-	Secrets             SecretStatus         `json:"secrets"`
+	Enabled             bool                  `json:"enabled"`
+	Provider            string                `json:"provider"`
+	Paused              bool                  `json:"paused"`
+	Unsubscribed        map[string]time.Time  `json:"unsubscribed"`
+	Cadence             Cadence               `json:"cadence"`
+	CadenceText         string                `json:"cadence_text"`
+	WindowSeconds       int64                 `json:"window_seconds"`
+	PaceSeconds         int64                 `json:"pace_seconds"`
+	SentInWindow        int                   `json:"sent_in_window"`
+	RemainingInWindow   int                   `json:"remaining_in_window"`
+	NextEligibleAt      opt.Option[time.Time] `json:"next_eligible_at,omitzero"`
+	QueuedUnique        int                   `json:"queued_unique"`
+	QueuedTotal         int                   `json:"queued_total"`
+	OverflowCount       int                   `json:"overflow_count"`
+	Pending             []QueuedEvent         `json:"pending"`
+	SentTotal           int64                 `json:"sent_total"`
+	ErrorTotal          int64                 `json:"error_total"`
+	ConsecutiveFailures int                   `json:"consecutive_failures"`
+	BackoffUntil        opt.Option[time.Time] `json:"backoff_until,omitzero"`
+	LastDelivery        *DeliveryRecord       `json:"last_delivery,omitempty"`
+	Secrets             SecretStatus          `json:"secrets"`
 }
 
 type queueDiskDoc struct {
@@ -768,7 +773,39 @@ func isIPChar(b byte) bool {
 	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F') || b == '.' || b == ':'
 }
 
-// Status returns a snapshot of configuration, cadence budget, queue contents, and metrics.
+// Status returns a snapshot of configuration, cadence budget, queue contents,
+// and delivery metrics.
+//
+// # Parameters
+//
+// None. Safe for concurrent calls; copies queue slices, maps, and delivery
+// metadata while holding s.mu before querying secrets outside the lock.
+//
+// # Returns
+//
+// A [StatusSnapshot] value whose NextEligibleAt is present only while cadence
+// or backoff throttles dispatch, and whose BackoffUntil is present only while
+// an active failure backoff extends past the current clock instant.
+//
+// # Example
+//
+//	snap := svc.Status()
+//	if until, ok := snap.BackoffUntil.Get(); ok {
+//		fmt.Println("backed off until:", until.Format(time.RFC3339))
+//	}
+//
+// # Used By
+//
+// Generated from verified repository symbol references; do not hand-edit.
+//
+//   - internal/mailer/mailer_test.go:1014 (direct call)
+//   - internal/mailer/mailer_test.go:1039 (direct call)
+//   - internal/mailer/mailer_test.go:1066 (direct call)
+//   - internal/mailer/mailer_test.go:1106 (direct call)
+//   - internal/mailer/mailer_test.go:1157 (direct call)
+//   - internal/mailer/mailer_test.go:1163 (direct call)
+//
+// Scope: internal/mailer (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/mailer are not exhaustive.
 func (s *Service) Status() StatusSnapshot {
 	now := s.now().UTC()
 	s.mu.Lock()
@@ -794,15 +831,13 @@ func (s *Service) Status() StatusSnapshot {
 		cp := *s.lastDelivery
 		lastDel = &cp
 	}
-	var backoffPtr *time.Time
+	var backoffUntil opt.Option[time.Time]
 	if !s.backoffUntil.IsZero() && now.Before(s.backoffUntil) {
-		t := s.backoffUntil
-		backoffPtr = &t
+		backoffUntil = opt.Some(s.backoffUntil)
 	}
-	var nextPtr *time.Time
+	var nextEligibleAt opt.Option[time.Time]
 	if !ok {
-		t := nextAt
-		nextPtr = &t
+		nextEligibleAt = opt.Some(nextAt)
 	}
 
 	remaining := s.cfg.Cadence.MaxEmails - len(s.sentAt)
@@ -820,7 +855,7 @@ func (s *Service) Status() StatusSnapshot {
 		PaceSeconds:         int64(pace / time.Second),
 		SentInWindow:        len(s.sentAt),
 		RemainingInWindow:   remaining,
-		NextEligibleAt:      nextPtr,
+		NextEligibleAt:      nextEligibleAt,
 		QueuedUnique:        len(pending),
 		QueuedTotal:         totalQueued,
 		OverflowCount:       s.overflowCount,
@@ -828,7 +863,7 @@ func (s *Service) Status() StatusSnapshot {
 		SentTotal:           s.sentTotal.Load(),
 		ErrorTotal:          s.errorTotal.Load(),
 		ConsecutiveFailures: s.consecutiveFailures,
-		BackoffUntil:        backoffPtr,
+		BackoffUntil:        backoffUntil,
 		LastDelivery:        lastDel,
 	}
 	s.mu.Unlock()

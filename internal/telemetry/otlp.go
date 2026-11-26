@@ -19,6 +19,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/andreimerlescu/concert/internal/opt"
 )
 
 // Default OTLP/HTTP JSON exporter limits and timings enforcing R3 and R2.
@@ -100,19 +102,19 @@ type Config struct {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :129 (direct call)
-//   - :297 (direct call)
-//   - :355 (direct call)
-//   - :385 (direct call)
-//   - :478 (direct call)
-//   - :482 (direct call)
-//   - :485 (direct call)
-//   - :488 (direct call)
-//   - :513 (direct call)
+//   - internal/telemetry/telemetry_test.go:130 (direct call)
+//   - internal/telemetry/telemetry_test.go:298 (direct call)
+//   - internal/telemetry/telemetry_test.go:356 (direct call)
+//   - internal/telemetry/telemetry_test.go:386 (direct call)
+//   - internal/telemetry/telemetry_test.go:479 (direct call)
+//   - internal/telemetry/telemetry_test.go:483 (direct call)
+//   - internal/telemetry/telemetry_test.go:486 (direct call)
+//   - internal/telemetry/telemetry_test.go:489 (direct call)
+//   - internal/telemetry/telemetry_test.go:514 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func DefaultConfig(endpoint string) Config {
 	return Config{
 		Endpoint:       endpoint,
@@ -153,12 +155,11 @@ type spanRing struct {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :670 (direct call)
-//   - :670 (function value)
+//   - internal/telemetry/otlp.go:668 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (r *spanRing) push(s SpanData) (dropped bool) {
 	if len(r.buf) == 0 {
 		return true
@@ -191,14 +192,12 @@ func (r *spanRing) push(s SpanData) (dropped bool) {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :749 (direct call)
-//   - :749 (function value)
-//   - :794 (direct call)
-//   - :794 (function value)
+//   - internal/telemetry/otlp.go:745 (direct call)
+//   - internal/telemetry/otlp.go:787 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (r *spanRing) popBatch(limit int) []SpanData {
 	if r.count == 0 || limit <= 0 {
 		return nil
@@ -274,19 +273,19 @@ type Tracer struct {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :137 (direct call)
-//   - :303 (direct call)
-//   - :359 (direct call)
-//   - :389 (direct call)
-//   - :478 (direct call)
-//   - :482 (direct call)
-//   - :485 (direct call)
-//   - :488 (direct call)
-//   - :519 (direct call)
+//   - internal/telemetry/telemetry_test.go:138 (direct call)
+//   - internal/telemetry/telemetry_test.go:304 (direct call)
+//   - internal/telemetry/telemetry_test.go:360 (direct call)
+//   - internal/telemetry/telemetry_test.go:390 (direct call)
+//   - internal/telemetry/telemetry_test.go:479 (direct call)
+//   - internal/telemetry/telemetry_test.go:483 (direct call)
+//   - internal/telemetry/telemetry_test.go:486 (direct call)
+//   - internal/telemetry/telemetry_test.go:489 (direct call)
+//   - internal/telemetry/telemetry_test.go:520 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func NewTracer(cfg Config) (*Tracer, error) {
 	u, err := ValidateEndpointURL(cfg.Endpoint, cfg.AllowLoopbackHTTP)
 	if err != nil {
@@ -407,18 +406,18 @@ func NewTracer(cfg Config) (*Tracer, error) {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :147 (direct call)
-//   - :158 (direct call)
-//   - :310 (direct call)
-//   - :317 (direct call)
-//   - :364 (direct call)
-//   - :372 (direct call)
-//   - :395 (direct call)
-//   - :528 (direct call)
+//   - internal/telemetry/telemetry_test.go:148 (direct call)
+//   - internal/telemetry/telemetry_test.go:159 (direct call)
+//   - internal/telemetry/telemetry_test.go:311 (direct call)
+//   - internal/telemetry/telemetry_test.go:318 (direct call)
+//   - internal/telemetry/telemetry_test.go:365 (direct call)
+//   - internal/telemetry/telemetry_test.go:373 (direct call)
+//   - internal/telemetry/telemetry_test.go:396 (direct call)
+//   - internal/telemetry/telemetry_test.go:529 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (t *Tracer) StartSpan(ctx context.Context, name string, attrs ...Attribute) (context.Context, *Span) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -469,11 +468,11 @@ func (t *Tracer) StartSpan(ctx context.Context, name string, attrs ...Attribute)
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :321 (direct call)
+//   - internal/telemetry/telemetry_test.go:322 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (t *Tracer) DroppedSpans() uint64 {
 	return t.droppedSpans.Load()
 }
@@ -495,15 +494,15 @@ func (t *Tracer) DroppedSpans() uint64 {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :178 (direct call)
-//   - :179 (direct call)
-//   - :329 (direct call)
-//   - :380 (direct call)
-//   - :381 (direct call)
+//   - internal/telemetry/telemetry_test.go:179 (direct call)
+//   - internal/telemetry/telemetry_test.go:180 (direct call)
+//   - internal/telemetry/telemetry_test.go:330 (direct call)
+//   - internal/telemetry/telemetry_test.go:381 (direct call)
+//   - internal/telemetry/telemetry_test.go:382 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (t *Tracer) ExportedSpans() uint64 {
 	return t.exportedSpans.Load()
 }
@@ -524,12 +523,12 @@ func (t *Tracer) ExportedSpans() uint64 {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :178 (direct call)
-//   - :179 (direct call)
+//   - internal/telemetry/telemetry_test.go:179 (direct call)
+//   - internal/telemetry/telemetry_test.go:180 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (t *Tracer) ExportErrors() uint64 {
 	return t.exportErrors.Load()
 }
@@ -553,11 +552,11 @@ func (t *Tracer) ExportErrors() uint64 {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :534 (direct call)
+//   - internal/telemetry/telemetry_test.go:535 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (t *Tracer) Flush(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -602,16 +601,16 @@ func (t *Tracer) Flush(ctx context.Context) error {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :170 (direct call)
-//   - :174 (direct call)
-//   - :326 (direct call)
-//   - :377 (direct call)
-//   - :401 (direct call)
-//   - :536 (direct call)
+//   - internal/telemetry/telemetry_test.go:171 (direct call)
+//   - internal/telemetry/telemetry_test.go:175 (direct call)
+//   - internal/telemetry/telemetry_test.go:327 (direct call)
+//   - internal/telemetry/telemetry_test.go:378 (direct call)
+//   - internal/telemetry/telemetry_test.go:402 (direct call)
+//   - internal/telemetry/telemetry_test.go:537 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (t *Tracer) Shutdown(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -655,12 +654,11 @@ func (t *Tracer) Shutdown(ctx context.Context) error {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :965 (direct call)
-//   - :965 (function value)
+//   - internal/telemetry/trace.go:954 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (t *Tracer) recordSpan(data SpanData) {
 	t.mu.Lock()
 	if t.closed {
@@ -696,12 +694,11 @@ func (t *Tracer) recordSpan(data SpanData) {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :382 (direct call)
-//   - :382 (function value)
+//   - internal/telemetry/otlp.go:381 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (t *Tracer) exportLoop() {
 	defer close(t.doneCh)
 
@@ -738,12 +735,11 @@ func (t *Tracer) exportLoop() {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :716 (direct call)
-//   - :716 (function value)
+//   - internal/telemetry/otlp.go:713 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (t *Tracer) drainBatch(ctx context.Context) error {
 	t.mu.Lock()
 	batch := t.ring.popBatch(t.batchSize)
@@ -771,16 +767,13 @@ func (t *Tracer) drainBatch(ctx context.Context) error {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :642 (direct call)
-//   - :642 (function value)
-//   - :718 (direct call)
-//   - :718 (function value)
-//   - :720 (direct call)
-//   - :720 (function value)
+//   - internal/telemetry/otlp.go:641 (direct call)
+//   - internal/telemetry/otlp.go:715 (direct call)
+//   - internal/telemetry/otlp.go:717 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (t *Tracer) drainAll(ctx context.Context) error {
 	var firstErr error
 	for {
@@ -820,14 +813,12 @@ func (t *Tracer) drainAll(ctx context.Context) error {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :754 (direct call)
-//   - :754 (function value)
-//   - :799 (direct call)
-//   - :799 (function value)
+//   - internal/telemetry/otlp.go:750 (direct call)
+//   - internal/telemetry/otlp.go:792 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func (t *Tracer) exportBatch(ctx context.Context, batch []SpanData) error {
 	body, err := MarshalOTLPTracesJSON(t.resourceAttrs, batch)
 	if err != nil {
@@ -929,10 +920,10 @@ type otlpKeyValue struct {
 }
 
 type otlpAnyValue struct {
-	StringValue *string  `json:"stringValue,omitempty"`
-	IntValue    *string  `json:"intValue,omitempty"`
-	DoubleValue *float64 `json:"doubleValue,omitempty"`
-	BoolValue   *bool    `json:"boolValue,omitempty"`
+	StringValue opt.Option[string]  `json:"stringValue,omitzero"`
+	IntValue    opt.Option[string]  `json:"intValue,omitzero"`
+	DoubleValue opt.Option[float64] `json:"doubleValue,omitzero"`
+	BoolValue   opt.Option[bool]    `json:"boolValue,omitzero"`
 }
 
 // MarshalOTLPTracesJSON encodes resourceAttrs and spans into a schema-accurate
@@ -959,12 +950,12 @@ type otlpAnyValue struct {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :832 (direct call)
-//   - :832 (function value)
+//   - internal/telemetry/otlp.go:823 (direct call)
+//   - internal/telemetry/telemetry_test.go:620 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func MarshalOTLPTracesJSON(resourceAttrs []Attribute, spans []SpanData) ([]byte, error) {
 	wireSpans := make([]otlpSpan, 0, len(spans))
 	for _, sp := range spans {
@@ -1028,14 +1019,12 @@ func MarshalOTLPTracesJSON(resourceAttrs []Attribute, spans []SpanData) ([]byte,
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :982 (direct call)
-//   - :982 (function value)
-//   - :998 (direct call)
-//   - :998 (function value)
+//   - internal/telemetry/otlp.go:973 (direct call)
+//   - internal/telemetry/otlp.go:989 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func encodeOTLPAttrs(attrs []Attribute) []otlpKeyValue {
 	if len(attrs) == 0 {
 		return nil
@@ -1048,20 +1037,17 @@ func encodeOTLPAttrs(attrs []Attribute) []otlpKeyValue {
 		var val otlpAnyValue
 		switch a.Kind {
 		case AttrString:
-			s := a.StrVal
-			val.StringValue = &s
+			val.StringValue = opt.Some(a.StrVal)
 		case AttrInt:
-			s := strconv.FormatInt(a.IntVal, 10)
-			val.IntValue = &s
+			val.IntValue = opt.Some(strconv.FormatInt(a.IntVal, 10))
 		case AttrFloat64:
 			f := a.FltVal
 			if math.IsNaN(f) || math.IsInf(f, 0) {
 				f = 0
 			}
-			val.DoubleValue = &f
+			val.DoubleValue = opt.Some(f)
 		case AttrBool:
-			b := a.BolVal
-			val.BoolValue = &b
+			val.BoolValue = opt.Some(a.BolVal)
 		default:
 			continue
 		}
@@ -1094,12 +1080,11 @@ func encodeOTLPAttrs(attrs []Attribute) []otlpKeyValue {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :291 (direct call)
-//   - :291 (function value)
+//   - internal/telemetry/otlp.go:290 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func ValidateEndpointURL(rawURL string, allowLoopbackHTTP bool) (*url.URL, error) {
 	s := strings.TrimSpace(rawURL)
 	if s == "" || len(s) > maxEndpointURLLen || strings.ContainsAny(s, "\r\n\x00 \t\"<>") {
@@ -1162,12 +1147,11 @@ func ValidateEndpointURL(rawURL string, allowLoopbackHTTP bool) (*url.URL, error
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :372 (direct call)
-//   - :372 (function value)
+//   - internal/telemetry/otlp.go:371 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func newHardenedHTTPClient(allowLoopback bool, timeout time.Duration) *http.Client {
 	dialer := &net.Dialer{
 		Timeout:   5 * time.Second,
@@ -1213,12 +1197,11 @@ func newHardenedHTTPClient(allowLoopback bool, timeout time.Duration) *http.Clie
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :1178 (direct call)
-//   - :1178 (function value)
+//   - internal/telemetry/otlp.go:1162 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func ssrfGuardedDialContext(dialer *net.Dialer, allowLoopback bool) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(addr)
@@ -1284,16 +1267,13 @@ var cgnatPrefix = netip.MustParsePrefix("100.64.0.0/10")
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :1138 (direct call)
-//   - :1138 (function value)
-//   - :1229 (direct call)
-//   - :1229 (function value)
-//   - :1247 (direct call)
-//   - :1247 (function value)
+//   - internal/telemetry/otlp.go:1123 (direct call)
+//   - internal/telemetry/otlp.go:1212 (direct call)
+//   - internal/telemetry/otlp.go:1230 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func isBlockedAddr(addr netip.Addr, allowLoopback bool) bool {
 	if !addr.IsValid() {
 		return true
@@ -1328,12 +1308,11 @@ func isBlockedAddr(addr netip.Addr, allowLoopback bool) bool {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :1130 (direct call)
-//   - :1130 (function value)
+//   - internal/telemetry/otlp.go:1115 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func isLoopbackHost(host string) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true
@@ -1360,14 +1339,12 @@ func isLoopbackHost(host string) bool {
 //
 // # Used By
 //
-// Generated from repository symbol references; do not edit these lines.
+// Generated from verified repository symbol references; do not hand-edit.
 //
-//   - :846 (direct call)
-//   - :846 (function value)
-//   - :862 (direct call)
-//   - :862 (function value)
+//   - internal/telemetry/otlp.go:837 (direct call)
+//   - internal/telemetry/otlp.go:853 (direct call)
 //
-// Scope: current module (internal/telemetry, including tests); darwin/arm64, default tags. Interface/runtime/external uses are not exhaustive.
+// Scope: internal/telemetry (including tests); darwin/arm64, default tags. Interface/runtime/external callers outside internal/telemetry are not exhaustive.
 func sanitizeURLError(err error, redactedURL string) error {
 	var ue *url.Error
 	if errors.As(err, &ue) {

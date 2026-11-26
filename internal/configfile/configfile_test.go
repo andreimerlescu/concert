@@ -1,10 +1,13 @@
 package configfile
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/andreimerlescu/concert/internal/opt"
 )
 
 func TestParseConcertfile_MultiSiteAndRoundTrip(t *testing.T) {
@@ -56,11 +59,11 @@ blog.example.com {
 	if s0.Preset != "wordpress" || s0.Cap != 12 || s0.PriorityCap != 4 || s0.MicroCache != "15s" || s0.StaticCacheControl != "public, max-age=86400" {
 		t.Fatalf("unexpected s0: %+v", s0)
 	}
-	if s0.SecureCookie == nil || !*s0.SecureCookie {
+	if v, ok := s0.SecureCookie.Get(); !ok || !v {
 		t.Fatalf("expected secure_cookie=true")
 	}
 	s1 := f.Sites[1]
-	if s1.Cap != 6 || s1.Compress == nil || *s1.Compress {
+	if v, ok := s1.Compress.Get(); s1.Cap != 6 || !ok || v {
 		t.Fatalf("unexpected s1: %+v", s1)
 	}
 
@@ -177,9 +180,9 @@ beta.example.com {
 	}
 	if f.Global.TokenTTL != "2m" || f.Global.FirstPollGrace != "20s" || f.Global.ReadyGrace != "15s" ||
 		f.Global.IdlePollTTL != "30s" || f.Global.Reaper != "10s" || f.Global.RetryAfter != 3 ||
-		f.Global.BusyHTML != "/etc/concert/busy.html" || f.Global.ClearQueueOnStart == nil || *f.Global.ClearQueueOnStart ||
+		f.Global.BusyHTML != "/etc/concert/busy.html" || !opt.Equal(f.Global.ClearQueueOnStart, opt.Some(false)) ||
 		f.Global.UpstreamTimeout != "45s" || f.Global.UpstreamBodyIdleTimeout != "20s" ||
-		f.Global.UpstreamCBFailures == nil || *f.Global.UpstreamCBFailures != 5 ||
+		!opt.Equal(f.Global.UpstreamCBFailures, opt.Some(5)) ||
 		f.Global.UpstreamCBCooldown != "15s" || f.Global.UpstreamHealthPath != "/healthz" ||
 		f.Global.UpstreamHealthInterval != "5s" {
 		t.Fatalf("unexpected global fields: %+v", f.Global)
@@ -187,9 +190,9 @@ beta.example.com {
 	s1 := f.Sites[1]
 	if s1.TokenTTL != "0" || s1.FirstPollGrace != "off" || s1.ReadyGrace != "off" ||
 		s1.IdlePollTTL != "off" || s1.Reaper != "12s" || s1.RetryAfter != 4 ||
-		s1.BusyHTML != "/etc/concert/beta-busy.html" || s1.ClearQueueOnStart == nil || !*s1.ClearQueueOnStart ||
+		s1.BusyHTML != "/etc/concert/beta-busy.html" || !opt.Equal(s1.ClearQueueOnStart, opt.Some(true)) ||
 		s1.UpstreamTimeout != "off" || s1.UpstreamBodyIdleTimeout != "off" ||
-		s1.UpstreamCBFailures == nil || *s1.UpstreamCBFailures != 0 ||
+		!opt.Equal(s1.UpstreamCBFailures, opt.Some(0)) ||
 		s1.UpstreamCBCooldown != "30s" || s1.UpstreamHealthPath != "off" ||
 		s1.UpstreamHealthInterval != "15s" {
 		t.Fatalf("unexpected site fields: %+v", s1)
@@ -202,14 +205,14 @@ beta.example.com {
 	}
 	if f2.Global.ReadyGrace != "15s" || f2.Global.IdlePollTTL != "30s" || f2.Global.Reaper != "10s" ||
 		f2.Global.RetryAfter != 3 || f2.Global.BusyHTML != "/etc/concert/busy.html" ||
-		f2.Global.ClearQueueOnStart == nil || *f2.Global.ClearQueueOnStart ||
-		f2.Global.UpstreamBodyIdleTimeout != "20s" || f2.Global.UpstreamCBFailures == nil || *f2.Global.UpstreamCBFailures != 5 ||
+		!opt.Equal(f2.Global.ClearQueueOnStart, opt.Some(false)) ||
+		f2.Global.UpstreamBodyIdleTimeout != "20s" || !opt.Equal(f2.Global.UpstreamCBFailures, opt.Some(5)) ||
 		f2.Global.UpstreamHealthPath != "/healthz" || f2.Global.UpstreamHealthInterval != "5s" {
 		t.Fatalf("global round-trip mismatch: %+v\n%s", f2.Global, out)
 	}
 	if f2.Sites[1].ReadyGrace != "off" || f2.Sites[1].IdlePollTTL != "off" ||
-		f2.Sites[1].ClearQueueOnStart == nil || !*f2.Sites[1].ClearQueueOnStart ||
-		f2.Sites[1].UpstreamCBFailures == nil || *f2.Sites[1].UpstreamCBFailures != 0 ||
+		!opt.Equal(f2.Sites[1].ClearQueueOnStart, opt.Some(true)) ||
+		!opt.Equal(f2.Sites[1].UpstreamCBFailures, opt.Some(0)) ||
 		f2.Sites[1].UpstreamHealthPath != "off" {
 		t.Fatalf("site round-trip mismatch: %+v\n%s", f2.Sites[1], out)
 	}
@@ -223,8 +226,8 @@ beta.example.com {
 	if err != nil {
 		t.Fatalf("ParseJSON: %v", err)
 	}
-	if jf.Global.ReadyGrace != "25s" || jf.Global.ClearQueueOnStart == nil || !*jf.Global.ClearQueueOnStart ||
-		jf.Sites[0].ReadyGrace != "off" || jf.Sites[0].UpstreamCBFailures == nil || *jf.Sites[0].UpstreamCBFailures != 0 {
+	if jf.Global.ReadyGrace != "25s" || !opt.Equal(jf.Global.ClearQueueOnStart, opt.Some(true)) ||
+		jf.Sites[0].ReadyGrace != "off" || !opt.Equal(jf.Sites[0].UpstreamCBFailures, opt.Some(0)) {
 		t.Fatalf("unexpected JSON config: %+v", jf)
 	}
 
@@ -274,4 +277,143 @@ func FuzzParseConcertfile(f *testing.F) {
 			}
 		}
 	})
+}
+
+func TestOptionFields_JSONAndConcertfileWireSemantics(t *testing.T) {
+	// 1. Omitted and explicit JSON null decode to None, and marshaling omits all 16 optional keys.
+	omittedOrNull := `{
+		"global": {
+			"portal_secure_cookie": null,
+			"stats_auth": null,
+			"room_lease_fraction": null,
+			"clear_queue_on_start": null,
+			"upstream_cb_failures": null,
+			"fastlane_lock_destinations": null
+		},
+		"sites": [{
+			"hosts": ["none.example.com"],
+			"static_fallback": null,
+			"compress": null,
+			"max_queue": null,
+			"secure_cookie": null,
+			"preserve_host": null,
+			"abuse": null,
+			"room_lease_fraction": null,
+			"clear_queue_on_start": null,
+			"upstream_cb_failures": null,
+			"fastlane_lock_destinations": null
+		}]
+	}`
+	fNone, err := ParseJSON([]byte(omittedOrNull))
+	if err != nil {
+		t.Fatalf("ParseJSON(nulls): %v", err)
+	}
+	if fNone.Global.PortalSecureCookie.IsSome() || fNone.Global.StatsAuth.IsSome() ||
+		fNone.Global.RoomLeaseFraction.IsSome() || fNone.Global.ClearQueueOnStart.IsSome() ||
+		fNone.Global.UpstreamCBFailures.IsSome() || fNone.Global.FastlaneLockDestinations.IsSome() {
+		t.Fatalf("expected all GlobalConfig options to be None, got %+v", fNone.Global)
+	}
+	sn := fNone.Sites[0]
+	if sn.StaticFallback.IsSome() || sn.Compress.IsSome() || sn.MaxQueue.IsSome() ||
+		sn.SecureCookie.IsSome() || sn.PreserveHost.IsSome() || sn.Abuse.IsSome() ||
+		sn.RoomLeaseFraction.IsSome() || sn.ClearQueueOnStart.IsSome() ||
+		sn.UpstreamCBFailures.IsSome() || sn.FastlaneLockDestinations.IsSome() {
+		t.Fatalf("expected all SiteConfig options to be None, got %+v", sn)
+	}
+	wireNone, err := json.Marshal(fNone)
+	if err != nil {
+		t.Fatalf("json.Marshal(fNone): %v", err)
+	}
+	for _, key := range []string{
+		"portal_secure_cookie", "stats_auth", "room_lease_fraction",
+		"clear_queue_on_start", "upstream_cb_failures", "fastlane_lock_destinations",
+		"static_fallback", "compress", "max_queue", "secure_cookie", "preserve_host", "abuse",
+	} {
+		if strings.Contains(string(wireNone), `"`+key+`"`) {
+			t.Errorf("omitzero failed to omit absent key %q in %s", key, wireNone)
+		}
+	}
+
+	// 2. Explicit zero values (false, 0, 0.0) decode as Some(zero) and stay present on marshal.
+	explicitZeros := `{
+		"global": {
+			"portal_secure_cookie": false,
+			"stats_auth": false,
+			"room_lease_fraction": 0,
+			"clear_queue_on_start": false,
+			"upstream_cb_failures": 0,
+			"fastlane_lock_destinations": false
+		},
+		"sites": [{
+			"hosts": ["zero.example.com"],
+			"static_fallback": false,
+			"compress": false,
+			"max_queue": 0,
+			"secure_cookie": false,
+			"preserve_host": false,
+			"abuse": false,
+			"room_lease_fraction": 0,
+			"clear_queue_on_start": false,
+			"upstream_cb_failures": 0,
+			"fastlane_lock_destinations": false
+		}]
+	}`
+	fZero, err := ParseJSON([]byte(explicitZeros))
+	if err != nil {
+		t.Fatalf("ParseJSON(zeros): %v", err)
+	}
+	if !opt.Equal(fZero.Global.PortalSecureCookie, opt.Some(false)) ||
+		!opt.Equal(fZero.Global.StatsAuth, opt.Some(false)) ||
+		!opt.Equal(fZero.Global.RoomLeaseFraction, opt.Some(0.0)) ||
+		!opt.Equal(fZero.Global.ClearQueueOnStart, opt.Some(false)) ||
+		!opt.Equal(fZero.Global.UpstreamCBFailures, opt.Some(0)) ||
+		!opt.Equal(fZero.Global.FastlaneLockDestinations, opt.Some(false)) {
+		t.Fatalf("expected all GlobalConfig options to be Some(zero), got %+v", fZero.Global)
+	}
+	sz := fZero.Sites[0]
+	if !opt.Equal(sz.StaticFallback, opt.Some(false)) ||
+		!opt.Equal(sz.Compress, opt.Some(false)) ||
+		!opt.Equal(sz.MaxQueue, opt.Some(int64(0))) ||
+		!opt.Equal(sz.SecureCookie, opt.Some(false)) ||
+		!opt.Equal(sz.PreserveHost, opt.Some(false)) ||
+		!opt.Equal(sz.Abuse, opt.Some(false)) ||
+		!opt.Equal(sz.RoomLeaseFraction, opt.Some(0.0)) ||
+		!opt.Equal(sz.ClearQueueOnStart, opt.Some(false)) ||
+		!opt.Equal(sz.UpstreamCBFailures, opt.Some(0)) ||
+		!opt.Equal(sz.FastlaneLockDestinations, opt.Some(false)) {
+		t.Fatalf("expected all SiteConfig options to be Some(zero), got %+v", sz)
+	}
+	wireZero, err := json.Marshal(fZero)
+	if err != nil {
+		t.Fatalf("json.Marshal(fZero): %v", err)
+	}
+	var rawMap struct {
+		Global map[string]any   `json:"global"`
+		Sites  []map[string]any `json:"sites"`
+	}
+	if err := json.Unmarshal(wireZero, &rawMap); err != nil {
+		t.Fatalf("unmarshal wireZero: %v", err)
+	}
+	for _, k := range []string{"portal_secure_cookie", "stats_auth", "room_lease_fraction", "clear_queue_on_start", "upstream_cb_failures", "fastlane_lock_destinations"} {
+		if _, ok := rawMap.Global[k]; !ok {
+			t.Errorf("expected explicit zero global key %q to be emitted in %s", k, wireZero)
+		}
+	}
+	for _, k := range []string{"static_fallback", "compress", "max_queue", "secure_cookie", "preserve_host", "abuse", "room_lease_fraction", "clear_queue_on_start", "upstream_cb_failures", "fastlane_lock_destinations"} {
+		if _, ok := rawMap.Sites[0][k]; !ok {
+			t.Errorf("expected explicit zero site key %q to be emitted in %s", k, wireZero)
+		}
+	}
+
+	// 3. Value copies of GlobalConfig and SiteConfig do not alias optional fields.
+	gCopy := fZero.Global
+	gCopy.UpstreamCBFailures = opt.Some(9)
+	if !opt.Equal(fZero.Global.UpstreamCBFailures, opt.Some(0)) {
+		t.Fatalf("mutating GlobalConfig copy mutated original: %v", fZero.Global.UpstreamCBFailures)
+	}
+	sCopy := fZero.Sites[0]
+	sCopy.MaxQueue = opt.Some(int64(42))
+	if !opt.Equal(fZero.Sites[0].MaxQueue, opt.Some(int64(0))) {
+		t.Fatalf("mutating SiteConfig copy mutated original: %v", fZero.Sites[0].MaxQueue)
+	}
 }

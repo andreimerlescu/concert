@@ -8,8 +8,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/andreimerlescu/concert/internal/opt"
 )
 
 type stubGateway struct {
@@ -290,5 +293,144 @@ func TestDirectProof_PrecheckDestTagMemo_SlidingCrossEdgeAndRevoke(t *testing.T)
 	}
 	if rep.Archived != 1 || rep.Kept != 0 || rep.ArchiveSHA256 == "" {
 		t.Fatalf("unexpected online archive report: %+v", rep)
+	}
+}
+
+func TestConfig_OptionFieldsAndDirectOfferIndex(t *testing.T) {
+	// 1. Default absent and JSON null both default to true and omit keys on marshal.
+	var cfgDefault Config
+	if !cfgDefault.IsSliding() || !cfgDefault.IsDirectPayEnabled() {
+		t.Fatalf("zero Config should default to sliding=true directPay=true")
+	}
+	wireDefault, err := json.Marshal(cfgDefault)
+	if err != nil {
+		t.Fatalf("json.Marshal(cfgDefault): %v", err)
+	}
+	if strings.Contains(string(wireDefault), `"pass_sliding"`) || strings.Contains(string(wireDefault), `"direct_pay_enabled"`) {
+		t.Fatalf("expected omitted None fields in JSON, got %s", wireDefault)
+	}
+
+	var cfgNull Config
+	if err := json.Unmarshal([]byte(`{"pass_sliding":null,"direct_pay_enabled":null}`), &cfgNull); err != nil {
+		t.Fatalf("json.Unmarshal(nulls): %v", err)
+	}
+	if cfgNull.PassSliding.IsSome() || cfgNull.DirectPayEnabled.IsSome() || !cfgNull.IsSliding() || !cfgNull.IsDirectPayEnabled() {
+		t.Fatalf("null JSON fields should decode to None (defaulting true): %+v", cfgNull)
+	}
+
+	// 2. Explicit false decodes to Some(false), overrides defaults, and stays emitted in JSON.
+	var cfgFalse Config
+	if err := json.Unmarshal([]byte(`{"pass_sliding":false,"direct_pay_enabled":false}`), &cfgFalse); err != nil {
+		t.Fatalf("json.Unmarshal(false): %v", err)
+	}
+	if !opt.Equal(cfgFalse.PassSliding, opt.Some(false)) || !opt.Equal(cfgFalse.DirectPayEnabled, opt.Some(false)) {
+		t.Fatalf("expected Some(false) for both flags, got %+v", cfgFalse)
+	}
+	if cfgFalse.IsSliding() || cfgFalse.IsDirectPayEnabled() {
+		t.Fatalf("explicit false must disable sliding and direct pay")
+	}
+	wireFalse, err := json.Marshal(cfgFalse)
+	if err != nil {
+		t.Fatalf("json.Marshal(cfgFalse): %v", err)
+	}
+	if !strings.Contains(string(wireFalse), `"pass_sliding":false`) || !strings.Contains(string(wireFalse), `"direct_pay_enabled":false`) {
+		t.Fatalf("expected explicit false keys in JSON, got %s", wireFalse)
+	}
+
+	// 3. Direct payment challenge distinguishes omitted/null offer_index from explicit 0.
+	secret := bytes.Repeat([]byte("m"), 32)
+	gw := &stubGateway{gatePass: true}
+	cfg := Config{
+		Enabled:          true,
+		Origin:           "https://shop.example.com",
+		TestMode:         true,
+		PolicyMode:       PolicyModeNone,
+		PassSeconds:      60,
+		NFTPassSeconds:   60,
+		MaxRecords:       100,
+		Merchant:         "Concert Shop",
+		TermsURL:         "https://shop.example.com/terms",
+		PrivacyURL:       "https://shop.example.com/privacy",
+		RefundURL:        "https://shop.example.com/refunds",
+		PassSliding:      opt.Some(false),
+		DirectPayEnabled: opt.Some(true),
+		Offers: []Offer{
+			{
+				Label:         "0.99 RLUSD",
+				DisplayAmount: "0.99",
+				AssetSymbol:   "RLUSD",
+				Requirements: Requirements{
+					Scheme:            "exact",
+					Network:           "xrpl:1",
+					Amount:            "0.99",
+					Asset:             "RLUSD:rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De",
+					PayTo:             "rQLTGGRoGbQZLK2ErVKio1pxViAR8fvMBT",
+					MaxTimeoutSeconds: 60,
+					Extra:             map[string]any{"areFeesSponsored": false},
+				},
+			},
+		},
+	}
+	svc, err := New(cfg, t.TempDir(), secret, gw, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer svc.Close()
+
+	wSess := httptest.NewRecorder()
+	reqSess := httptest.NewRequest(http.MethodPost, "/_concert/session", bytes.NewReader([]byte("{}")))
+	reqSess.Header.Set("Origin", cfg.Origin)
+	reqSess.RemoteAddr = "198.51.100.11"
+	svc.ServeHTTP(wSess, reqSess)
+	if wSess.Code != 200 {
+		t.Fatalf("session failed: %d %s", wSess.Code, wSess.Body.String())
+	}
+	var sessOut struct {
+		Session string `json:"session"`
+		CSRF    string `json:"csrf"`
+	}
+	_ = json.Unmarshal(wSess.Body.Bytes(), &sessOut)
+
+	postRaw := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/_concert/direct/challenge", strings.NewReader(body))
+		req.Header.Set("Origin", cfg.Origin)
+		req.Header.Set(CSRFHeader, sessOut.CSRF)
+		req.AddCookie(&http.Cookie{Name: Cookie, Value: sessOut.Session})
+		req.RemoteAddr = "198.51.100.11"
+		rec := httptest.NewRecorder()
+		svc.ServeHTTP(rec, req)
+		return rec
+	}
+
+	if w := postRaw(`{"kind":"payment"}`); w.Code != 400 {
+		t.Fatalf("omitted offer_index: got %d %s, want 400", w.Code, w.Body.String())
+	}
+	if w := postRaw(`{"kind":"payment","offer_index":null}`); w.Code != 400 {
+		t.Fatalf("null offer_index: got %d %s, want 400", w.Code, w.Body.String())
+	}
+	if w := postRaw(`{"kind":"payment","offer_index":-1}`); w.Code != 400 {
+		t.Fatalf("negative offer_index: got %d %s, want 400", w.Code, w.Body.String())
+	}
+	if w := postRaw(`{"kind":"payment","offer_index":0}`); w.Code != 200 {
+		t.Fatalf("explicit offer_index=0: got %d %s, want 200", w.Code, w.Body.String())
+	}
+
+	// DirectPayEnabled = Some(false) disables direct challenges with 404.
+	cfgOff := cfg
+	cfgOff.DirectPayEnabled = opt.Some(false)
+	svcOff, err := New(cfgOff, t.TempDir(), secret, gw, "")
+	if err != nil {
+		t.Fatalf("New(direct off): %v", err)
+	}
+	defer svcOff.Close()
+	reqOff := httptest.NewRequest(http.MethodPost, "/_concert/direct/challenge", strings.NewReader(`{"kind":"payment","offer_index":0}`))
+	reqOff.Header.Set("Origin", cfgOff.Origin)
+	reqOff.Header.Set(CSRFHeader, sessOut.CSRF)
+	reqOff.AddCookie(&http.Cookie{Name: Cookie, Value: sessOut.Session})
+	reqOff.RemoteAddr = "198.51.100.12"
+	recOff := httptest.NewRecorder()
+	svcOff.ServeHTTP(recOff, reqOff)
+	if recOff.Code != 404 {
+		t.Fatalf("DirectPayEnabled=Some(false): got %d %s, want 404", recOff.Code, recOff.Body.String())
 	}
 }

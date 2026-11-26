@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/netip"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -111,5 +112,59 @@ func TestFragments_QueueAndBans(t *testing.T) {
 	b := frag(t, p, ck, "/api/frag/bans")
 	if b.Total != 1 || !strings.Contains(b.HTML, `class="table-warning"`) || !b.Flags["enabled"] {
 		t.Errorf("bans fragment: total=%d flags=%v", b.Total, b.Flags)
+	}
+}
+
+func TestFragments_RestoredBanWithoutBeganRendersBeforeRestart(t *testing.T) {
+	a, err := newApp(portalTestConfig("http://127.0.0.1:1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(a.Close)
+
+	// Ban present before newPortal starts gets Began = opt.None[time.Time]().
+	if _, err := a.abuse.banFor(netip.MustParseAddr("203.0.113.44"), 0, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	p, err := newPortal(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(p.closeListener)
+	ck, _ := portalLogin(t, p)
+
+	logFrag := frag(t, p, ck, "/api/frag/banlog")
+	if logFrag.Total != 1 {
+		t.Fatalf("banlog total = %d, want 1", logFrag.Total)
+	}
+	if !strings.Contains(logFrag.HTML, "before restart") {
+		t.Errorf("banlog fragment for restored ban missing %q: %s", "before restart", logFrag.HTML)
+	}
+	if strings.Contains(logFrag.HTML, `<time class="js-time" data-ms="0">`) {
+		t.Errorf("banlog fragment rendered zero timestamp instead of before restart: %s", logFrag.HTML)
+	}
+
+	views := p.history.windowViews("", time.Now())
+	if len(views) != 1 {
+		t.Fatalf("windowViews len = %d, want 1", len(views))
+	}
+	detail := frag(t, p, ck, "/api/frag/ban?id="+strconv.FormatUint(views[0].ID, 10))
+	if !strings.Contains(detail.HTML, "Before concert last started (restored from bans.json)") {
+		t.Errorf("ban detail missing restored-ban notice: %s", detail.HTML)
+	}
+	if strings.Contains(detail.HTML, "Strikes that added up over several requests") {
+		t.Errorf("ban detail erroneously rendered strike notice when Began is None: %s", detail.HTML)
+	}
+
+	// A live ban created after portal startup has Began = opt.Some(...) and renders js-time.
+	if _, err := a.abuse.banFor(netip.MustParseAddr("203.0.113.45"), time.Hour, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	liveLog := frag(t, p, ck, "/api/frag/banlog")
+	if liveLog.Total != 2 {
+		t.Fatalf("banlog total after live ban = %d, want 2", liveLog.Total)
+	}
+	if !strings.Contains(liveLog.HTML, `<time class="js-time" data-ms="`) {
+		t.Errorf("banlog fragment missing js-time for live ban: %s", liveLog.HTML)
 	}
 }

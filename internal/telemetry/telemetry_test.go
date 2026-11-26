@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -562,4 +563,68 @@ func ExampleParseTraceparent() {
 	// Output:
 	// true
 	// 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+}
+
+// TestMarshalOTLPTracesJSON_ByteIdenticalAnyValue verifies that replacing raw
+// scalar pointer fields on otlpAnyValue with opt.Option[T] and json omitzero
+// preserves byte-for-byte identical OTLP/HTTP Proto3 JSON output across all
+// attribute kinds including explicit zero values ("", 0, 0.0, false) and
+// sanitized non-finite floats (NaN, +Inf).
+//
+// # Parameters
+//
+//   - t: Testing handle injected by go test.
+//
+// # Example
+//
+//	go test -run '^TestMarshalOTLPTracesJSON_ByteIdenticalAnyValue$' ./internal/telemetry
+//
+// # Used By
+//
+// Invoked by the Go test runner.
+func TestMarshalOTLPTracesJSON_ByteIdenticalAnyValue(t *testing.T) {
+	sc, err := telemetry.ParseTraceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+	if err != nil {
+		t.Fatalf("ParseTraceparent: %v", err)
+	}
+	start := time.Unix(0, 1700000000000000000).UTC()
+	end := time.Unix(0, 1700000000001000000).UTC()
+
+	resAttrs := []telemetry.Attribute{
+		telemetry.StringAttr("service.name", "concert"),
+	}
+	spans := []telemetry.SpanData{
+		{
+			TraceID:   sc.TraceID,
+			SpanID:    sc.SpanID,
+			Name:      "otlp.anyvalue.check",
+			Kind:      telemetry.SpanKindServer,
+			StartTime: start,
+			EndTime:   end,
+			Attributes: []telemetry.Attribute{
+				telemetry.StringAttr("s.empty", ""),
+				telemetry.StringAttr("s.val", "ok"),
+				telemetry.IntAttr("i.zero", 0),
+				telemetry.IntAttr("i.val", -42),
+				telemetry.Float64Attr("f.zero", 0.0),
+				telemetry.Float64Attr("f.val", 0.42),
+				telemetry.Float64Attr("f.nan", math.NaN()),
+				telemetry.Float64Attr("f.inf", math.Inf(1)),
+				telemetry.BoolAttr("b.false", false),
+				telemetry.BoolAttr("b.true", true),
+			},
+			StatusCode: telemetry.StatusOK,
+		},
+	}
+
+	got, err := telemetry.MarshalOTLPTracesJSON(resAttrs, spans)
+	if err != nil {
+		t.Fatalf("MarshalOTLPTracesJSON: %v", err)
+	}
+
+	const want = `{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"concert"}}]},"scopeSpans":[{"scope":{"name":"github.com/andreimerlescu/concert/internal/telemetry","version":"1.0.0"},"spans":[{"traceId":"4bf92f3577b34da6a3ce929d0e0e4736","spanId":"00f067aa0ba902b7","name":"otlp.anyvalue.check","kind":2,"startTimeUnixNano":"1700000000000000000","endTimeUnixNano":"1700000000001000000","attributes":[{"key":"s.empty","value":{"stringValue":""}},{"key":"s.val","value":{"stringValue":"ok"}},{"key":"i.zero","value":{"intValue":"0"}},{"key":"i.val","value":{"intValue":"-42"}},{"key":"f.zero","value":{"doubleValue":0}},{"key":"f.val","value":{"doubleValue":0.42}},{"key":"f.nan","value":{"doubleValue":0}},{"key":"f.inf","value":{"doubleValue":0}},{"key":"b.false","value":{"boolValue":false}},{"key":"b.true","value":{"boolValue":true}}],"status":{"code":1}}]}]}]}`
+
+	if string(got) != want {
+		t.Fatalf("MarshalOTLPTracesJSON byte mismatch:\n got: %s\nwant: %s", got, want)
+	}
 }

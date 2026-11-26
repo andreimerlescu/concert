@@ -24,7 +24,7 @@ Six production deployment tutorials designed for both **senior infrastructure en
 1. **Secrets always live in `0600` (or Kubernetes `0400`) files referenced by `*_FILE` environment variables.** Never pass secrets on the command line or commit them into `Concertfile` / Git manifests.
 2. **Every command block uses explicit environment variables** at the top of the tutorial (`DOMAIN`, `ORIGIN`, `ADMIN_EMAIL`, etc.) so both engineers and deployment agents can parameterize the run cleanly.
 3. **Every deployment ends with deterministic checks** (`/_room/healthz`, `/_room/readyz`, `/_room/metrics`, `X-Concert-Queue`, `concert_admit`, and `audit verify`) plus a documented rollback procedure.
-4. **Production readiness sign-off:** After completing your tutorial, validate your deployment against the 33-point [Production Readiness Scorecard](../../todo/PRODUCTION-33.md) and the [Operations & Queue Recovery Runbook](../OPERATIONS.md).
+4. **Production readiness sign-off:** After completing your tutorial, validate your deployment against the [Operations & Queue Recovery Runbook](../OPERATIONS.md) and the [Enterprise Hardening Guide](../ENTERPRISE.md).
 
 ---
 
