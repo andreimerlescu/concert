@@ -19,6 +19,12 @@ var concertWeb embed.FS
 func registerConcertRoutes(r *gin.Engine, g *generation) {
 	r.Any("/_concert/*path", func(c *gin.Context) {
 		path := strings.TrimPrefix(c.Request.URL.Path, fastlane.Prefix)
+		if g.handleChallengeSubroute(c, path) {
+			return
+		}
+		if g.handleBiddingSubroute(c, path) {
+			return
+		}
 		if path == "/email/unsubscribe" {
 			g.a.handleEmailUnsubscribe(c)
 			return
@@ -73,6 +79,10 @@ func registerConcertRoutes(r *gin.Engine, g *generation) {
 				conf = g.a.fastlane.PublicConfig()
 			}
 			conf["legacy_skip_url"] = g.cfg.skipURL
+			wrCfg := g.a.waitingRoomConfig()
+			if wrCfg.Broadcast.Message != "" {
+				conf["broadcast"] = wrCfg.Broadcast
+			}
 			c.Header("Cache-Control", "no-store")
 			c.JSON(200, conf)
 			return

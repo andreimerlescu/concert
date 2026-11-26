@@ -409,6 +409,29 @@ func registerOps(r *gin.Engine, g *generation) {
 		handleQueueClear(c, a, actor.Actor, actor.Role.String(), "api", nil)
 	})
 
+	r.POST("/_room/cache/purge", func(c *gin.Context) {
+		actor, ok := g.requireRole(c, roleOperator)
+		if !ok {
+			return
+		}
+		handleCachePurge(c, a, actor, "api")
+	})
+
+	r.GET("/_room/drop", func(c *gin.Context) {
+		if _, ok := g.requireRole(c, roleViewer); !ok {
+			return
+		}
+		handleDropGet(c, a)
+	})
+
+	r.POST("/_room/drop", func(c *gin.Context) {
+		actor, ok := g.requireRole(c, roleOperator)
+		if !ok {
+			return
+		}
+		handleDropUpdate(c, a, actor, "api")
+	})
+
 	r.GET("/_room/abuse", func(c *gin.Context) {
 		if _, ok := g.requireRole(c, roleViewer); !ok {
 			return
@@ -539,6 +562,7 @@ func handleQueueClear(c *gin.Context, a *app, actor, role, source string, p *por
 	if removed > 0 {
 		a.stats.cleared.Add(int64(removed))
 	}
+	a.purgeSharedQueue(c.Request.Context(), req.Mode)
 	a.agents.reconcile(a.room)
 	if p != nil {
 		p.pruneNotesFor(a)
@@ -576,5 +600,96 @@ func handleQueueClear(c *gin.Context, a *app, actor, role, source string, p *por
 		"removed":          removed,
 		"live_queue_depth": liveDepth,
 		"queue_depth":      queueDepth,
+	})
+}
+
+type cachePurgeReq struct {
+	Mode   string `json:"mode"`
+	Host   string `json:"host"`
+	Target string `json:"target"`
+}
+
+// handleCachePurge executes an active page-cache purge ("url", "prefix", "tag",
+// or "all") against the active generation's built-in micro-cache or external
+// concert-cache daemon, writes an audit record, and returns {"purged", "mode"}.
+//
+// # Parameters
+//
+//   - c: Request *gin.Context carrying the JSON body.
+//   - a: Target *app whose active page cache will be purged.
+//   - actor: Authenticated operator/admin principal.
+//   - source: Origin of the call ("api" or "portal").
+func handleCachePurge(c *gin.Context, a *app, actor principal, source string) {
+	if c.Request.Body == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": `mode is required ("url", "prefix", "tag", or "all")`})
+		return
+	}
+	var req cachePurgeReq
+	if err := json.NewDecoder(io.LimitReader(c.Request.Body, 4<<10)).Decode(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid JSON body: " + err.Error()})
+		return
+	}
+	req.Mode = strings.ToLower(strings.TrimSpace(req.Mode))
+	req.Host = strings.TrimSpace(req.Host)
+	req.Target = strings.TrimSpace(req.Target)
+
+	switch req.Mode {
+	case "url", "prefix", "tag":
+		if req.Target == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "target is required for mode " + req.Mode})
+			return
+		}
+	case "all":
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": `mode must be "url", "prefix", "tag", or "all"`})
+		return
+	}
+
+	g := a.current()
+	if g == nil || g.microCache == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "page cache is not enabled"})
+		return
+	}
+
+	purged, err := g.microCache.purge(c.Request.Context(), req.Mode, req.Host, req.Target)
+	details := map[string]any{
+		"mode":   req.Mode,
+		"host":   req.Host,
+		"target": req.Target,
+		"purged": purged,
+	}
+	if site := g.cfg.siteHost; site != "" {
+		details["site"] = site
+	}
+	if err != nil {
+		details["error"] = err.Error()
+		a.recordAudit(auditEvent{
+			Actor:    actor.Actor,
+			Role:     actor.Role.String(),
+			Source:   source,
+			Action:   "cache.purge",
+			Target:   req.Target,
+			Outcome:  "error",
+			ClientIP: clientIPString(c),
+			Details:  details,
+		})
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+
+	a.recordAudit(auditEvent{
+		Actor:    actor.Actor,
+		Role:     actor.Role.String(),
+		Source:   source,
+		Action:   "cache.purge",
+		Target:   req.Target,
+		Outcome:  "allow",
+		ClientIP: clientIPString(c),
+		Details:  details,
+	})
+	c.Header("Cache-Control", "no-store")
+	c.JSON(http.StatusOK, gin.H{
+		"purged": purged,
+		"mode":   req.Mode,
 	})
 }

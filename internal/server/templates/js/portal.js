@@ -2155,6 +2155,215 @@
         });
     }
 
+    // ── Waiting Room Studio & Scheduled Drops ──────────────────────────────
+    const ytIDRe = /^[A-Za-z0-9_-]{11}$/;
+    function parseYouTubeIDClient(raw) {
+        const s = String(raw || '').trim();
+        if (!s) return '';
+        if (ytIDRe.test(s)) return s;
+        try {
+            const u = new URL(s);
+            if (u.protocol !== 'https:' && u.protocol !== 'http:') return '';
+            const host = u.hostname.toLowerCase();
+            const segs = u.pathname.split('/').filter(Boolean);
+            let id = '';
+            if (host === 'youtu.be' || host === 'www.youtu.be') {
+                if (segs.length === 1) id = segs[0];
+            } else if (host === 'youtube.com' || host === 'www.youtube.com' || host === 'm.youtube.com' || host === 'music.youtube.com') {
+                if (segs.length === 1 && segs[0] === 'watch') id = u.searchParams.get('v') || '';
+                else if (segs.length === 2 && (segs[0] === 'live' || segs[0] === 'embed' || segs[0] === 'shorts')) id = segs[1];
+            } else if ((host === 'youtube-nocookie.com' || host === 'www.youtube-nocookie.com') && segs.length === 2 && segs[0] === 'embed') {
+                id = segs[1];
+            }
+            return ytIDRe.test(id) ? id : '';
+        } catch {
+            return '';
+        }
+    }
+
+    function updateYouTubePreview() {
+        const input = byId('wr-youtube-input');
+        const badge = byId('wr-youtube-parsed');
+        if (!input || !badge) return;
+        const raw = input.value.trim();
+        if (!raw) {
+            badge.textContent = 'none';
+            return;
+        }
+        const parsed = parseYouTubeIDClient(raw);
+        badge.textContent = parsed ? `ID: ${parsed}` : 'invalid';
+    }
+
+    function renderWaitingRoomStudio(d) {
+        const cfg = (d && d.config) || {};
+        const localeSel = byId('wr-locale');
+        if (localeSel && Array.isArray(d && d.locales) && d.locales.length > 0) {
+            localeSel.replaceChildren();
+            for (const loc of d.locales) {
+                const opt = document.createElement('option');
+                opt.value = loc.code;
+                const dirTag = loc.dir === 'rtl' ? ' · RTL' : '';
+                opt.textContent = `${loc.native_name || loc.name || loc.code} (${loc.code}${dirTag})`;
+                localeSel.append(opt);
+            }
+        }
+        if (byId('wr-layout')) byId('wr-layout').value = cfg.layout || 'default';
+        if (byId('wr-theme')) byId('wr-theme').value = cfg.theme || 'system';
+        if (localeSel) localeSel.value = cfg.default_locale || 'en';
+        if (byId('wr-brand')) byId('wr-brand').value = cfg.brand_name || '';
+        if (byId('wr-accent')) byId('wr-accent').value = cfg.accent_color || '';
+        if (byId('wr-logo-url')) byId('wr-logo-url').value = cfg.logo_url || '';
+        if (byId('wr-hero-image-url')) byId('wr-hero-image-url').value = cfg.hero_image_url || '';
+        if (byId('wr-headline')) byId('wr-headline').value = cfg.headline || '';
+        if (byId('wr-subheadline')) byId('wr-subheadline').value = cfg.subheadline || '';
+        if (byId('wr-youtube-input')) byId('wr-youtube-input').value = cfg.youtube_video_id || '';
+        updateYouTubePreview();
+        if (d && d.csp) setText('wr-csp-preview', d.csp);
+
+        const bc = cfg.broadcast || {};
+        if (byId('wr-broadcast-msg')) byId('wr-broadcast-msg').value = bc.message || '';
+        setText('wr-broadcast-status', bc.message ? `Active (${fmtTime(bc.updated_at)})` : 'No active broadcast');
+    }
+
+    async function loadWaitingRoomStudio() {
+        if (!byId('wr-studio-form')) return;
+        try {
+            const d = await api('GET', '/api/waitingroom');
+            renderWaitingRoomStudio(d);
+        } catch (err) {
+            toast(err.message, 'danger');
+        }
+    }
+
+    function renderDropStatus(d) {
+        const badge = byId('drop-phase-badge');
+        const phase = (d && d.phase) || 'none';
+        if (badge) {
+            badge.textContent = phase;
+            badge.className = 'badge ' + (
+                phase === 'open' ? 'text-bg-success' :
+                phase === 'lobby' ? 'text-bg-info' :
+                phase === 'paused' ? 'text-bg-warning' :
+                phase === 'sold_out' ? 'text-bg-danger' : 'text-bg-secondary'
+            );
+        }
+        setText('drop-event-label', (d && d.configured && d.event_id) ? d.event_id : '–');
+        setText('drop-countdown-label', (d && d.configured) ? fmtSeconds(d.countdown_seconds || 0) : '–');
+        setText('drop-lobby-count', fmtNum((d && d.lobby_count) || 0));
+        setText('drop-queue-count', `${fmtNum((d && d.shuffled_count) || 0)} / ${fmtNum((d && d.total_queue_count) || 0)}`);
+        if (d && d.configured) {
+            if (byId('drop-event-id') && !byId('drop-event-id').value) byId('drop-event-id').value = d.event_id || '';
+            if (byId('drop-lobby-at') && !byId('drop-lobby-at').value) byId('drop-lobby-at').value = d.lobby_at || '';
+            if (byId('drop-opens-at') && !byId('drop-opens-at').value) byId('drop-opens-at').value = d.opens_at || '';
+            if (byId('drop-sold-out-msg') && !byId('drop-sold-out-msg').value && d.sold_out_message) {
+                byId('drop-sold-out-msg').value = d.sold_out_message;
+            }
+        }
+    }
+
+    async function loadDropStatus() {
+        if (!byId('drop-control-form')) return;
+        try {
+            const d = await api('GET', '/api/drop');
+            renderDropStatus(d);
+        } catch (_) {
+            // Ignore transient poll errors.
+        }
+    }
+
+    if (byId('wr-studio-form')) {
+        byId('wr-youtube-input').addEventListener('input', updateYouTubePreview);
+        byId('wr-refresh-btn').addEventListener('click', () => {
+            loadWaitingRoomStudio();
+            loadDropStatus();
+        });
+        byId('wr-studio-form').addEventListener('submit', async (ev) => {
+            ev.preventDefault();
+            const btn = byId('wr-save-btn');
+            btn.disabled = true;
+            try {
+                const rawYT = byId('wr-youtube-input').value.trim();
+                const res = await api('PUT', '/api/waitingroom', {
+                    layout: byId('wr-layout').value,
+                    theme: byId('wr-theme').value,
+                    default_locale: byId('wr-locale').value,
+                    brand_name: byId('wr-brand').value.trim(),
+                    accent_color: byId('wr-accent').value.trim(),
+                    logo_url: byId('wr-logo-url').value.trim(),
+                    hero_image_url: byId('wr-hero-image-url').value.trim(),
+                    headline: byId('wr-headline').value.trim(),
+                    subheadline: byId('wr-subheadline').value.trim(),
+                    youtube_video_id: rawYT,
+                });
+                if (res.csp) setText('wr-csp-preview', res.csp);
+                if (res.config && byId('wr-youtube-input')) {
+                    byId('wr-youtube-input').value = res.config.youtube_video_id || '';
+                    updateYouTubePreview();
+                }
+                toast('Waiting room studio settings saved.');
+            } catch (err) {
+                toast(err.message, 'danger');
+            } finally {
+                btn.disabled = false;
+            }
+        });
+    }
+
+    if (byId('wr-broadcast-form')) {
+        const sendBroadcast = async (message) => {
+            try {
+                const res = await api('POST', '/api/waitingroom/broadcast', { message });
+                const bc = (res && res.broadcast) || {};
+                byId('wr-broadcast-msg').value = bc.message || '';
+                setText('wr-broadcast-status', bc.message ? `Active (${fmtTime(bc.updated_at)})` : 'No active broadcast');
+                toast(bc.message ? 'Live broadcast published.' : 'Broadcast cleared.');
+            } catch (err) {
+                toast(err.message, 'danger');
+            }
+        };
+        byId('wr-broadcast-form').addEventListener('submit', (ev) => {
+            ev.preventDefault();
+            sendBroadcast(byId('wr-broadcast-msg').value.trim());
+        });
+        byId('wr-broadcast-clear').addEventListener('click', () => sendBroadcast(''));
+    }
+
+    if (byId('drop-control-form')) {
+        const sendDropAction = async (payload, label) => {
+            try {
+                const res = await api('POST', '/api/drop', payload);
+                renderDropStatus(res);
+                toast(label);
+            } catch (err) {
+                toast(err.message, 'danger');
+            }
+        };
+        byId('drop-control-form').addEventListener('submit', (ev) => {
+            ev.preventDefault();
+            const maxLobby = parseInt(byId('drop-max-lobby').value, 10);
+            sendDropAction({
+                action: 'schedule',
+                event_id: byId('drop-event-id').value.trim(),
+                lobby_at: byId('drop-lobby-at').value.trim(),
+                opens_at: byId('drop-opens-at').value.trim(),
+                max_lobby_tickets: Number.isFinite(maxLobby) && maxLobby > 0 ? maxLobby : 0,
+                sold_out_message: byId('drop-sold-out-msg').value.trim(),
+            }, 'Drop scheduled.');
+        });
+        byId('drop-pause-btn').addEventListener('click', () => sendDropAction({ action: 'pause', reason: 'operator pause' }, 'Drop paused.'));
+        byId('drop-resume-btn').addEventListener('click', () => sendDropAction({ action: 'resume' }, 'Drop resumed.'));
+        byId('drop-sold-out-btn').addEventListener('click', () => sendDropAction({
+            action: 'sold_out',
+            sold_out_message: byId('drop-sold-out-msg').value.trim() || 'Sold out.',
+        }, 'Drop marked sold out.'));
+        byId('drop-reset-btn').addEventListener('click', () => {
+            byId('drop-event-id').value = '';
+            byId('drop-lobby-at').value = '';
+            byId('drop-opens-at').value = '';
+            sendDropAction({ action: 'reset' }, 'Drop reset.');
+        });
+    }
+
     // ── Polling ────────────────────────────────────────────────────────────
     // Only the visible tab's table updates, every 3 seconds; relative times
     // in the visible tab tick every second without a request.
@@ -2173,6 +2382,7 @@
             const t = tables[id];
             if (t) { t.loaded = false; t.refresh(); }
             if (id === 'tab-email') loadEmail(true);
+            if (id === 'tab-waitingroom') { loadWaitingRoomStudio(); loadDropStatus(); }
             if (id === 'tab-settings') loadSettings().then(scheduleSpy);
         });
     });
@@ -2257,6 +2467,7 @@
         refreshOverview();
         const tab = activeTab();
         if (tab === 'tab-email') loadEmail(false);
+        if (tab === 'tab-waitingroom') loadDropStatus();
         const t = tables[tab];
         if (t) t.poll();
     }, 3000);

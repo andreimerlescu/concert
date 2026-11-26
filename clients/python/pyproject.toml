@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "concert-client"
+version = "0.3.0"
+description = "Official zero-dependency Python client SDK for Concert waiting-room reverse proxy (priority headers, signals, rm1 tokens, cache purge, crypto-only agent bidding)"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [
+  { name = "Andrei Merlescu" },
+]
+keywords = ["concert", "waiting-room", "asgi", "wsgi", "fastapi", "flask", "ed25519", "crypto", "x402"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Internet :: WWW/HTTP",
+  "Topic :: Security :: Cryptography",
+]
+dependencies = []
+
+[project.optional-dependencies]
+crypto = ["cryptography>=41.0"]
+
+[project.urls]
+Homepage = "https://github.com/andreimerlescu/concert"
+Repository = "https://github.com/andreimerlescu/concert"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["concert_client*"]

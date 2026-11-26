@@ -33,6 +33,8 @@ type GlobalConfig struct {
 	TLSCert                  string            `json:"tls_cert,omitempty"`
 	TLSKey                   string            `json:"tls_key,omitempty"`
 	TLSMinVersion            string            `json:"tls_min_version,omitempty"`
+	TLSDNSProvider           string            `json:"tls_dns_provider,omitempty"`
+	TLSDNSWebhookURL         string            `json:"tls_dns_webhook_url,omitempty"`
 	HSTSMaxAge               int               `json:"hsts_max_age,omitempty"`
 	HTTP3                    bool              `json:"http3,omitempty"`
 	PortalListen             string            `json:"portal_listen,omitempty"`
@@ -99,6 +101,7 @@ type SiteConfig struct {
 	Abuse                    *bool             `json:"abuse,omitempty"`
 	AbuseStrikes             int               `json:"abuse_strikes,omitempty"`
 	BanPaths                 string            `json:"ban_paths,omitempty"`
+	RateLimits               []string          `json:"rate_limits,omitempty"`
 	RoomVerifyKeys           string            `json:"room_verify_keys,omitempty"`
 	RoomScope                string            `json:"room_scope,omitempty"`
 	RoomSignedMaxTTL         string            `json:"room_signed_max_ttl,omitempty"`
@@ -124,6 +127,12 @@ type SiteConfig struct {
 	FastlaneLockDestinations *bool             `json:"fastlane_lock_destinations,omitempty"`
 	TLSCert                  string            `json:"tls_cert,omitempty"`
 	TLSKey                   string            `json:"tls_key,omitempty"`
+	Routes                   []RouteConfig     `json:"routes,omitempty"`
+	Headers                  []HeaderRule      `json:"headers,omitempty"`
+	Redirects                []RedirectRule    `json:"redirects,omitempty"`
+	DropEventID              string            `json:"drop_event_id,omitempty"`
+	DropLobbyAt              string            `json:"drop_lobby_at,omitempty"`
+	DropOpenAt               string            `json:"drop_open_at,omitempty"`
 	Extra                    map[string]string `json:"extra,omitempty"`
 }
 
@@ -236,6 +245,19 @@ func (f *File) NormalizeAndValidate() error {
 		if (s.TLSCert == "") != (s.TLSKey == "") {
 			return fmt.Errorf("site %s: tls_cert and tls_key must both be set", s.Hosts[0])
 		}
+		for _, rl := range s.RateLimits {
+			if err := validateRateLimitDirective(rl); err != nil {
+				return fmt.Errorf("site %s: %w", s.Hosts[0], err)
+			}
+		}
+		if err := validateSiteExtensions(s); err != nil {
+			return err
+		}
+	}
+	if dp := strings.ToLower(strings.TrimSpace(f.Global.TLSDNSProvider)); dp != "" && dp != "cloudflare" && dp != "webhook" {
+		return fmt.Errorf("global: invalid tls_dns_provider %q (supported: cloudflare, webhook)", f.Global.TLSDNSProvider)
+	} else {
+		f.Global.TLSDNSProvider = dp
 	}
 	if f.Global.RoomSignedMaxTTL != "" {
 		d, err := time.ParseDuration(f.Global.RoomSignedMaxTTL)
@@ -341,9 +363,9 @@ func validateCommonTimers(
 	return nil
 }
 
-// NormalizeHost canonicalizes a virtual host label: "*" (catch-all), a bare
-// IP literal, "localhost", or a bare DNS hostname (lowercased, trailing dot
-// removed, no scheme/port/path/whitespace).
+// NormalizeHost canonicalizes a virtual host label: "*" (catch-all), a single-
+// label wildcard ("*.example.com"), a bare IP literal, "localhost", or a bare
+// DNS hostname (lowercased, trailing dot removed, no scheme/port/path/whitespace).
 func NormalizeHost(raw string) (string, error) {
 	h := strings.TrimSpace(strings.ToLower(raw))
 	if h == "" {
@@ -356,13 +378,27 @@ func NormalizeHost(raw string) (string, error) {
 	if h == "" {
 		return "", errors.New("empty hostname")
 	}
+	wildcard := false
+	if strings.HasPrefix(h, "*.") {
+		wildcard = true
+		h = strings.TrimPrefix(h, "*.")
+		if h == "" || !strings.Contains(h, ".") {
+			return "", errors.New("wildcard hostname must look like *.example.com")
+		}
+	}
 	if strings.ContainsAny(h, "/:@ \t\r\n\\?*") {
-		return "", errors.New("must be a bare hostname (no scheme, port, path, or wildcard) or *")
+		return "", errors.New("must be a bare hostname (no scheme, port, or path), *.example.com, or *")
 	}
 	if h == "localhost" {
+		if wildcard {
+			return "", errors.New("wildcard hostname must look like *.example.com")
+		}
 		return h, nil
 	}
 	if addr, err := netip.ParseAddr(h); err == nil {
+		if wildcard {
+			return "", errors.New("wildcard hostname cannot be an IP address")
+		}
 		return addr.Unmap().String(), nil
 	}
 	for _, r := range h {
@@ -373,7 +409,54 @@ func NormalizeHost(raw string) (string, error) {
 	if strings.HasPrefix(h, ".") || strings.HasPrefix(h, "-") || strings.HasSuffix(h, "-") || strings.Contains(h, "..") {
 		return "", errors.New("malformed DNS hostname")
 	}
+	if wildcard {
+		return "*." + h, nil
+	}
 	return h, nil
+}
+
+func validateRateLimitDirective(raw string) error {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return errors.New("rate_limit directive must not be empty")
+	}
+	var prefix, spec string
+	if p, sp, ok := strings.Cut(s, "="); ok {
+		prefix, spec = strings.TrimSpace(p), strings.TrimSpace(sp)
+	} else {
+		fields := strings.Fields(s)
+		if len(fields) != 2 {
+			return fmt.Errorf("invalid rate_limit %q: expected <path> <rate>/<window>", raw)
+		}
+		prefix, spec = fields[0], fields[1]
+	}
+	if !strings.HasPrefix(prefix, "/") {
+		return fmt.Errorf("invalid rate_limit %q: path must start with /", raw)
+	}
+	rateStr, winSpec, ok := strings.Cut(spec, "/")
+	if !ok || rateStr == "" || winSpec == "" {
+		return fmt.Errorf("invalid rate_limit %q: expected <rate>/<window>", raw)
+	}
+	rate, err := strconv.Atoi(strings.TrimSpace(rateStr))
+	if err != nil || rate <= 0 {
+		return fmt.Errorf("invalid rate_limit %q: invalid rate %q", raw, rateStr)
+	}
+	winPart, burstPart, hasBurst := strings.Cut(winSpec, ":")
+	if hasBurst {
+		b, berr := strconv.Atoi(strings.TrimSpace(burstPart))
+		if berr != nil || b <= 0 {
+			return fmt.Errorf("invalid rate_limit %q: invalid burst %q", raw, burstPart)
+		}
+	}
+	winPart = strings.TrimSpace(winPart)
+	switch winPart {
+	case "s", "m", "h":
+		winPart = "1" + winPart
+	}
+	if d, derr := time.ParseDuration(winPart); derr != nil || d <= 0 {
+		return fmt.Errorf("invalid rate_limit %q: invalid window %q", raw, winPart)
+	}
+	return nil
 }
 
 // ─── Concertfile lexer & recursive-descent parser ────────────────────────────
@@ -687,6 +770,14 @@ func (p *parser) parseGlobalBlock(g *GlobalConfig) error {
 			if g.TLSMinVersion, err = requireOneArg(dir, args); err != nil {
 				return err
 			}
+		case "tls_dns_provider":
+			if g.TLSDNSProvider, err = requireOneArg(dir, args); err != nil {
+				return err
+			}
+		case "tls_dns_webhook_url":
+			if g.TLSDNSWebhookURL, err = requireOneArg(dir, args); err != nil {
+				return err
+			}
 		case "hsts_max_age":
 			if g.HSTSMaxAge, err = parseIntArg(dir, args); err != nil {
 				return err
@@ -878,11 +969,19 @@ body:
 			return s, fmt.Errorf("Concertfile:%d:%d: expected directive name, got %q", t.line, t.col, t.val)
 		}
 		dir := p.next()
+		key := strings.ToLower(strings.ReplaceAll(dir.val, "-", "_"))
+		if key == "route" {
+			r, err := p.parseRouteBlock(dir)
+			if err != nil {
+				return s, err
+			}
+			s.Routes = append(s.Routes, r)
+			continue
+		}
 		args, err := p.parseDirectiveArgs()
 		if err != nil {
 			return s, err
 		}
-		key := strings.ToLower(strings.ReplaceAll(dir.val, "-", "_"))
 		switch key {
 		case "preset":
 			if s.Preset, err = requireOneArg(dir, args); err != nil {
@@ -990,6 +1089,14 @@ body:
 			}
 		case "ban_paths":
 			s.BanPaths = strings.Join(args, ",")
+		case "rate_limit":
+			if len(args) == 2 {
+				s.RateLimits = append(s.RateLimits, args[0]+" "+args[1])
+			} else if len(args) == 1 && strings.Contains(args[0], "=") {
+				s.RateLimits = append(s.RateLimits, args[0])
+			} else {
+				return s, fmt.Errorf("Concertfile:%d:%d: rate_limit expects <path> <rate>/<window>", dir.line, dir.col)
+			}
 		case "room_verify_keys":
 			if len(args) == 0 {
 				return s, fmt.Errorf("Concertfile:%d:%d: room_verify_keys requires kid=key entries", dir.line, dir.col)
@@ -1108,6 +1215,30 @@ body:
 			if s.TLSKey, err = requireOneArg(dir, args); err != nil {
 				return s, err
 			}
+		case "header":
+			hr, err := parseHeaderDirective(dir, args)
+			if err != nil {
+				return s, err
+			}
+			s.Headers = append(s.Headers, hr)
+		case "redirect":
+			rr, err := parseRedirectDirective(dir, args)
+			if err != nil {
+				return s, err
+			}
+			s.Redirects = append(s.Redirects, rr)
+		case "drop_event_id":
+			if s.DropEventID, err = requireOneArg(dir, args); err != nil {
+				return s, err
+			}
+		case "drop_lobby_at":
+			if s.DropLobbyAt, err = requireOneArg(dir, args); err != nil {
+				return s, err
+			}
+		case "drop_open_at":
+			if s.DropOpenAt, err = requireOneArg(dir, args); err != nil {
+				return s, err
+			}
 		default:
 			return s, fmt.Errorf("Concertfile:%d:%d: unknown site directive %q", dir.line, dir.col, dir.val)
 		}
@@ -1126,7 +1257,7 @@ func FormatConcertfile(f *File) string {
 
 	g := f.Global
 	hasGlobal := g.Listen != "" || g.HTTPListen != "" || g.TLSEmail != "" || g.TLSCache != "" ||
-		g.TLSStaging || g.TLSCert != "" || g.HTTP3 || g.PortalListen != "" || g.DataDir != "" ||
+		g.TLSStaging || g.TLSCert != "" || g.TLSDNSProvider != "" || g.TLSDNSWebhookURL != "" || g.HTTP3 || g.PortalListen != "" || g.DataDir != "" ||
 		g.TrustedProxies != "" || g.LogFormat != "" || g.LogLevel != "" || g.HSTSMaxAge > 0 ||
 		g.RoomVerifyKeys != "" || g.RoomSignedMaxTTL != "" || g.RoomLeaseFraction != nil ||
 		g.TokenTTL != "" || g.FirstPollGrace != "" || g.ReadyGrace != "" || g.IdlePollTTL != "" ||
@@ -1154,6 +1285,12 @@ func FormatConcertfile(f *File) string {
 		if g.TLSCert != "" {
 			fmt.Fprintf(&b, "    tls_cert %s\n", quote(g.TLSCert))
 			fmt.Fprintf(&b, "    tls_key %s\n", quote(g.TLSKey))
+		}
+		if g.TLSDNSProvider != "" {
+			fmt.Fprintf(&b, "    tls_dns_provider %s\n", quote(g.TLSDNSProvider))
+		}
+		if g.TLSDNSWebhookURL != "" {
+			fmt.Fprintf(&b, "    tls_dns_webhook_url %s\n", quote(g.TLSDNSWebhookURL))
 		}
 		if g.HSTSMaxAge > 0 {
 			fmt.Fprintf(&b, "    hsts_max_age %d\n", g.HSTSMaxAge)
@@ -1333,6 +1470,14 @@ func FormatConcertfile(f *File) string {
 			fmt.Fprintf(&b, "    tls_cert %s\n", quote(s.TLSCert))
 			fmt.Fprintf(&b, "    tls_key %s\n", quote(s.TLSKey))
 		}
+		for _, rl := range s.RateLimits {
+			if p, sp, ok := strings.Cut(rl, "="); ok {
+				fmt.Fprintf(&b, "    rate_limit %s %s\n", quote(strings.TrimSpace(p)), quote(strings.TrimSpace(sp)))
+			} else if fields := strings.Fields(rl); len(fields) == 2 {
+				fmt.Fprintf(&b, "    rate_limit %s %s\n", quote(fields[0]), quote(fields[1]))
+			}
+		}
+		formatSiteExtensions(&b, s, quote)
 		b.WriteString("}\n")
 	}
 	return b.String()

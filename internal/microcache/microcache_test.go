@@ -1,6 +1,9 @@
 package microcache
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -8,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/andreimerlescu/concert/internal/cache"
 )
 
 func TestMicroCache_StampedeCollapseAndBypass(t *testing.T) {
@@ -175,4 +180,184 @@ func FuzzCacheKeyAndBypass(f *testing.F) {
 			t.Fatalf("cached private/no-store response: cc=%q", cc)
 		}
 	})
+}
+
+func TestMicroCache_PurgeURLPrefixTagAll(t *testing.T) {
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	var clockMu sync.Mutex
+	clk := func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return now
+	}
+
+	mc := New(Config{
+		TTL:           time.Minute,
+		MaxBytes:      1 << 20,
+		MaxEntryBytes: 64 << 10,
+		Clock:         clk,
+	})
+
+	// Nil receiver must be safe across all purge and lookup operations.
+	var nilCache *Cache
+	if nilCache.PurgeURL("a", "/b") != 0 || nilCache.PurgePrefix("a", "/") != 0 ||
+		nilCache.PurgeTag("x") != 0 || nilCache.PurgeAll() != 0 {
+		t.Fatal("nil *Cache purge returned non-zero")
+	}
+	if _, ok := nilCache.Lookup("k"); ok {
+		t.Fatal("nil *Cache Lookup returned ok=true")
+	}
+
+	// Serve response with Surrogate-Key and Cache-Tag headers: tags are auto-indexed.
+	reqRaw := httptest.NewRequest(http.MethodGet, "https://shop.example.com/product/tee?color=red", nil)
+	recRaw := httptest.NewRecorder()
+	mc.Serve(recRaw, reqRaw, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Surrogate-Key", "product:1 catalog")
+		w.Header().Set("Cache-Tag", "featured, summer")
+		_, _ = w.Write([]byte("tee-raw"))
+	})
+
+	reqGz := httptest.NewRequest(http.MethodGet, "https://shop.example.com/product/tee", nil)
+	reqGz.Header.Set("Accept-Encoding", "gzip")
+	recGz := httptest.NewRecorder()
+	mc.Serve(recGz, reqGz, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Surrogate-Key", "product:1 catalog")
+		_, _ = w.Write([]byte("tee-gz"))
+	})
+
+	// Direct Store (backward-compatible) and StoreWithTags.
+	if !mc.Store("shop.example.com\x00/blog/post-1\x00\x00raw", http.StatusOK, nil, []byte("post1"), time.Minute) {
+		t.Fatal("Store failed")
+	}
+	if !mc.StoreWithTags("shop.example.com\x00/blog/post-2\x00\x00raw", http.StatusOK, nil, []byte("post2"), time.Minute, []string{"blog", "featured"}) {
+		t.Fatal("StoreWithTags failed")
+	}
+	if !mc.StoreWithTags("other.example.com\x00/product/tee\x00\x00raw", http.StatusOK, nil, []byte("other-tee"), time.Minute, []string{"catalog"}) {
+		t.Fatal("StoreWithTags(other host) failed")
+	}
+
+	// PurgeURL removes both raw+query and gz variants for shop.example.com /product/tee,
+	// while preserving other.example.com /product/tee.
+	if removed := mc.PurgeURL("SHOP.EXAMPLE.COM", "/product/tee"); removed != 2 {
+		t.Fatalf("PurgeURL = %d, want 2", removed)
+	}
+	if _, ok := mc.Lookup("other.example.com\x00/product/tee\x00\x00raw"); !ok {
+		t.Fatal("PurgeURL removed entry for different host")
+	}
+
+	// PurgeTag removes tagged entries and cleans empty buckets.
+	if removed := mc.PurgeTag("FEATURED"); removed != 1 {
+		t.Fatalf("PurgeTag(featured) = %d, want 1", removed)
+	}
+	if removed := mc.PurgeTag("catalog"); removed != 1 {
+		t.Fatalf("PurgeTag(catalog) = %d, want 1", removed)
+	}
+
+	// PurgePrefix removes remaining /blog/ entry.
+	if removed := mc.PurgePrefix("shop.example.com", "/blog/"); removed != 1 {
+		t.Fatalf("PurgePrefix(/blog/) = %d, want 1", removed)
+	}
+	if mc.Entries() != 0 || mc.BytesUsed() != 0 {
+		t.Fatalf("expected empty cache, got entries=%d bytes=%d", mc.Entries(), mc.BytesUsed())
+	}
+
+	// PurgeAll clears entries and reports removed count.
+	mc.StoreWithTags("shop.example.com\x00/a\x00\x00raw", http.StatusOK, nil, []byte("a"), time.Minute, []string{"t1"})
+	mc.StoreWithTags("shop.example.com\x00/b\x00\x00raw", http.StatusOK, nil, []byte("b"), time.Minute, []string{"t2"})
+	if removed := mc.PurgeAll(); removed != 2 {
+		t.Fatalf("PurgeAll = %d, want 2", removed)
+	}
+	if mc.Entries() != 0 || mc.BytesUsed() != 0 {
+		t.Fatalf("after PurgeAll entries=%d bytes=%d, want 0/0", mc.Entries(), mc.BytesUsed())
+	}
+}
+
+func TestMicroCache_PageCacheAdapter(t *testing.T) {
+	ctx := t.Context()
+	mc := New(Config{TTL: time.Minute, MaxBytes: 1 << 20, MaxEntryBytes: 64 << 10})
+	var pc cache.PageCache = mc.AsPageCache()
+	t.Cleanup(func() { _ = pc.Close() })
+
+	key := "shop.example.com\x00/item/9\x00\x00raw"
+	if err := pc.Put(ctx, cache.Entry{
+		Key:     key,
+		Status:  http.StatusOK,
+		Headers: http.Header{"Content-Type": {"text/html"}},
+		Body:    []byte("item-9"),
+		Tags:    []string{"item:9", "shop"},
+		TTL:     30 * time.Second,
+	}); err != nil {
+		t.Fatalf("PageCache.Put: %v", err)
+	}
+
+	got, ok, err := pc.Get(ctx, key)
+	if err != nil || !ok || string(got.Body) != "item-9" {
+		t.Fatalf("PageCache.Get = (%+v, %v, %v)", got, ok, err)
+	}
+
+	st, err := pc.Stats(ctx)
+	if err != nil {
+		t.Fatalf("PageCache.Stats: %v", err)
+	}
+	if st.Entries != 1 || st.Tags != 2 || st.Hits < 1 {
+		t.Fatalf("Stats = %+v, want Entries=1 Tags=2 Hits>=1", st)
+	}
+
+	if n, err := pc.PurgeTag(ctx, "item:9"); err != nil || n != 1 {
+		t.Fatalf("PageCache.PurgeTag = (%d, %v), want (1, nil)", n, err)
+	}
+
+	canceledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, _, err := pc.Get(canceledCtx, key); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled Get err = %v, want context.Canceled", err)
+	}
+}
+
+func TestMicroCache_ConcurrentPurgeAndServe_Race(t *testing.T) {
+	const maxBytes int64 = 16 << 10
+	mc := New(Config{
+		TTL:           time.Minute,
+		MaxBytes:      maxBytes,
+		MaxEntryBytes: 2 << 10,
+	})
+
+	const workers = 16
+	const iters = 80
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for w := range workers {
+		wg.Go(func() {
+			<-start
+			body := []byte(strings.Repeat("x", 200))
+			for i := range iters {
+				path := fmt.Sprintf("/p/%d", i%10)
+				key := fmt.Sprintf("h%d.example.com\x00%s\x00\x00raw", w%2, path)
+				tag := fmt.Sprintf("t:%d", i%4)
+				mc.StoreWithTags(key, http.StatusOK, nil, body, time.Minute, []string{tag})
+				_, _ = mc.Lookup(key)
+
+				req := httptest.NewRequest(http.MethodGet, "https://h0.example.com"+path, nil)
+				rec := httptest.NewRecorder()
+				mc.Serve(rec, req, func(rw http.ResponseWriter, r *http.Request) {
+					rw.Header().Set("Surrogate-Key", tag)
+					_, _ = rw.Write(body)
+				})
+
+				switch i % 9 {
+				case 0:
+					_ = mc.PurgeTag(tag)
+				case 3:
+					_ = mc.PurgeURL("h0.example.com", path)
+				case 6:
+					_ = mc.PurgePrefix("", "/p/1")
+				}
+				if used := mc.BytesUsed(); used < 0 || used > maxBytes {
+					t.Errorf("BytesUsed=%d out of [0, %d]", used, maxBytes)
+				}
+			}
+		})
+	}
+	close(start)
+	wg.Wait()
 }

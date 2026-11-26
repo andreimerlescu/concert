@@ -20,7 +20,28 @@ const (
 	// because maxQueueDepth was reached, so apiQueueWriter and agentWaitWriter
 	// pass the response through untouched.
 	ctxRoomFull = "concert.room_full"
+	// ctxWaitingHeadersApplied marks that waiting-room signal headers (and any
+	// concert_admit clearance) were already applied by apiQueueWriter so the
+	// inner waitingRoomHeaderWriter does not duplicate Set-Cookie headers.
+	ctxWaitingHeadersApplied = "concert.waiting_headers_applied"
+	// ctxSkipWaitingHeaders marks that apiQueueWriter translated a non-queued
+	// response (such as a bare room 503) and the inner waitingRoomHeaderWriter
+	// must not add X-Concert-Queue.
+	ctxSkipWaitingHeaders = "concert.skip_waiting_headers"
 )
+
+// Waiting-room signal headers emitted exclusively on queued waiting-room responses.
+const (
+	headerConcertQueue     = "X-Concert-Queue"
+	headerConcertPosition  = "X-Concert-Position"
+	headerConcertStatusURL = "X-Concert-Status-Url"
+	defaultQueueStatusURL  = "/queue/status"
+)
+
+// defaultAdmitPageCap bounds concurrent page requests allowed per admission
+// pass when -admit-session-continuity is enabled so a single cookie cannot
+// saturate the upstream origin.
+const defaultAdmitPageCap = 4
 
 // shutdownGrace bounds how long in-flight requests get to finish on SIGTERM,
 // and on the old listener when a listen address changes.

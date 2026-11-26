@@ -38,6 +38,9 @@ func buildRouter(g *generation) (engine *gin.Engine, err error) {
 
 	r.Use(concertRecovery())
 	r.Use(correlateMiddleware)
+	if g.a != nil && g.a.tracer != nil {
+		r.Use(g.telemetryMiddleware)
+	}
 	r.Use(g.mainSecurityHeaders)
 	r.Use(g.identify) // before the logger: banned requests are never logged
 	if cfg.accessLogEnabled {
@@ -64,6 +67,12 @@ func buildRouter(g *generation) (engine *gin.Engine, err error) {
 	registerOps(r, g)
 	registerHopControl(r, g)
 	registerConcertRoutes(r, g)
+	if g.guard != nil {
+		r.Use(g.guardEarlyMiddleware)
+	}
+	if g.routes != nil {
+		r.Use(g.routeDispatchMiddleware)
+	}
 	registerPaths(r, parsePaths(cfg.bypass), g.serveStaticOrForward(false, classBypass))
 	registerPaths(r, parsePaths(cfg.assets), g.assets.private, g.serveStaticOrForward(true, classAsset))
 	registerPaths(r, parsePaths(cfg.assetPublic), g.assets.public, g.serveStaticOrForward(true, classAsset))
@@ -81,12 +90,20 @@ func buildRouter(g *generation) (engine *gin.Engine, err error) {
 
 	// ---- Run ahead of room's middleware on gated requests only. ----
 	// The priority gate comes first, so its lane requests and refused forms
-	// are answered before the API interceptor wraps the writer.
+	// are answered before the waiting-room header and API interceptors wrap
+	// the writer.
 	r.Use(g.priorityGate)
 	r.Use(g.agentGate) // keyed places for Concert-Session clients; see agent.go
+	if g.guard != nil {
+		r.Use(g.guardPreQueueMiddleware)
+	}
+	r.Use(g.dropMiddleware)
+	r.Use(waitingRoomSignalHeaders(g.a, cfg.retryAfter))
 	if cfg.apiJSON {
 		r.Use(apiQueueResponses(g.a, cfg.retryAfter))
 	}
+	r.Use(g.waitingRoomStudioMiddleware)
+	r.Use(g.queueStatusEnricherMiddleware)
 
 	// ---- Attaches room's middleware and GET /queue/status. ----
 	g.a.room.RegisterRoutes(r)
@@ -207,6 +224,7 @@ func accessLogSkipper(cfg config) func(*gin.Context) bool {
 // ends up holding travels with the request, so a Concert-Priority grant
 // from the origin is bound to it (see priority.go).
 func (g *generation) gated(c *gin.Context) {
+	g.a.recordAdmission(time.Now().UTC())
 	id, status := g.a.admit.refresh(c.Writer, c.Request, time.Now())
 	if status == passForged {
 		g.strike(c, strikeForgedPass)
@@ -217,12 +235,38 @@ func (g *generation) gated(c *gin.Context) {
 	g.forwardPage(c)
 }
 
-// proxyForward marks the request as admitted, picks its upstream, attaches
-// the resolved client IP, body read deadlines (for non-stream requests), and
-// an edge's claim, and hands it to the proxy.
+// proxyForward marks the request as admitted, picks its upstream (honoring
+// matched declarative SiteConfig.Routes overrides, strip_prefix, and per-route
+// concurrency caps), attaches the resolved client IP, body read deadlines (for
+// non-stream requests), and an edge's claim, and hands it to the proxy.
 func (g *generation) proxyForward(c *gin.Context) {
+	cr := matchedRouteFrom(c)
+	if cr != nil && cr.sem != nil {
+		if !cr.sem.TryAcquire() {
+			c.Set(ctxSkipWaitingHeaders, true)
+			c.Header("Cache-Control", "no-store")
+			c.Header("Retry-After", strconvItoa(max(g.cfg.retryAfter, 1)))
+			c.AbortWithStatus(http.StatusServiceUnavailable)
+			return
+		}
+		defer func() { _ = cr.sem.Release() }()
+	}
+
 	c.Set(ctxAdmitted, true)
-	req := selectBackendForRequest(c.Request, g.upstreams)
+	pool := g.upstreams
+	proxy := g.proxy
+	if cr != nil && cr.pool != nil && cr.proxy != nil {
+		pool = cr.pool
+		proxy = cr.proxy
+	}
+	req := c.Request
+	if cr != nil && cr.cfg.StripPrefix {
+		r2 := req.Clone(req.Context())
+		r2.URL.Path = cr.stripRequestPath(req.URL.Path)
+		r2.URL.RawPath = ""
+		req = r2
+	}
+	req = selectBackendForRequest(req, pool)
 	req = g.edgeClaim(c, req)
 	if hopIP, ok := hopInClientIP(req.Context()); ok {
 		req = withFastCGIClientIP(req, hopIP.String())
@@ -238,7 +282,7 @@ func (g *generation) proxyForward(c *gin.Context) {
 		r2.Body = db
 		req = withFastCGIBodyAbort(r2, db.Abort)
 	}
-	g.proxy.ServeHTTP(c.Writer, req)
+	proxy.ServeHTTP(c.Writer, req)
 }
 
 // concertRecovery catches unexpected request panics while re-panicking

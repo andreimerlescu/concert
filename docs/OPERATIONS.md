@@ -1,6 +1,8 @@
 # Concert Operations & Queue Recovery Runbook
 
-This runbook covers production configuration baselines, capacity calibration, live waiting-room recovery, and monitoring/alerting for Concert (`concert`, `wpconcert`, and `econcert`).
+This runbook covers production configuration baselines, host-protection guardrails, capacity calibration, live waiting-room recovery, active cache purging, scheduled drops, and monitoring/alerting for the complete Concert Suite (`concert`, `wpconcert`, `econcert`, `concert-kv`, `concert-cache`, `concert-watchdog`, `bench-concert`, and `concert-client`).
+
+> **Related guides:** [6 Production Deployment Tutorials](tutorials/README.md) · [Enterprise Hardening Guide](ENTERPRISE.md) · [Official Client SDKs](../clients/) · [33-Point Production Readiness Scorecard](../todo/PRODUCTION-33.md)
 
 ---
 
@@ -17,6 +19,10 @@ Concert's default waiting-room liveness timers and upstream stall bounds are cho
 | `-upstream-cb-failures` / `CONCERT_UPSTREAM_CB_FAILURES` | `5` | Trips the upstream circuit breaker after 5 consecutive transport/502–504/body-stall failures so broken origins fail fast instead of pinning room slots. |
 | `-upstream-cb-cooldown` / `CONCERT_UPSTREAM_CB_COOLDOWN` | `15s` | Cool-off period before probing a tripped backend again. |
 | `-upstream-health-path` / `CONCERT_UPSTREAM_HEALTH_PATH` | `/healthz` | Active origin health probe (even on single-backend origins, an unhealthy active probe fails live traffic fast with `503` and marks `/_room/readyz` unready). |
+| `-admit-session-continuity` / `CONCERT_ADMIT_SESSION_CONTINUITY` | `true` (default) | Allows active `concert_admit` holders to continue browsing without queue re-entry (bounded per pass, sliding expiry/Max-Age), while explicitly clearing stale passes with `Set-Cookie: concert_admit=; Max-Age=0` on requeue. |
+| `-max-queue-per-ip` / `-allow-max-queue-per-ip` | `4` / `24` | Caps concurrent waiting-room tickets per client IP (or IPv6 `/64`) and per `-abuse-allow` CIDR so a single flood source cannot starve `-max-queue`. |
+| `-host-max-mem-mb` / `-host-max-fds` / `-host-max-conns` | Host-sized (e.g. `768` / `32768` / `20000`) | Sheds excess arrivals cleanly with `503` + `Retry-After` before kernel OOM or FD exhaustion can take down Concert. |
+| `-challenge-mode` / `-challenge-pow-bits` | `pow` / `16` (or `turnstile`) | Optional pre-ticket bot challenge stopping headless cookie-less floods before waiting-room tickets are allocated. |
 
 ### Standalone (`concert`)
 
@@ -152,9 +158,26 @@ bench-concert -target http://127.0.0.1:3000/ -out /var/lib/concert/data/bench-re
 
 This writes `capacity.json` into `-data-dir`. Set `-cap` to ~80% of the measured ceiling and `-priority-cap` to the remaining ~20% (or let leaf nodes run `-bench-on-start` on first boot and recalibrate live via `POST /_room/rebench` or Portal **Drain & re-benchmark**).
 
-### Stress-Testing & Verifying Recovery with `lemmings` v2.0.0
+### Stress-Testing & Verifying Recovery with `bench-concert` (`soak-100k`) & `lemmings` v2.0.0
 
-Validate saturation, branded `503` overflow behavior, and automatic post-burst self-healing with `lemmings` v2.0.0 against a staging Concert instance:
+Validate 100k-connection flood isolation, zero re-queuing of admitted human sessions (`concert_admit` continuity), and Lemmings waiting-room signal headers (`X-Concert-Queue: 1`, `X-Concert-Position`, `Retry-After`, `Cache-Control: no-store`) using Concert's built-in soak harness:
+
+```sh
+bench-concert \
+  -target https://staging.example.com/ \
+  -profile soak-100k \
+  -mix-real-and-flood \
+  -soak-duration 5m \
+  -soak-connections 100000 \
+  -humans 200 \
+  -flood 1000 \
+  -max-requeues 0 \
+  -max-human-5xx 0 \
+  -p95 2s \
+  -out ./soak-100k-report.json
+```
+
+You can also validate saturation, branded `503` overflow behavior, and automatic post-burst self-healing with `lemmings` v2.0.0 against a staging Concert instance:
 
 ```sh
 ./bin/lemmings \
@@ -261,6 +284,19 @@ When Concert starts with `-data-dir` set:
 | `concert_room_occupancy` / `concert_room_cap` | gauge | Current active page slots vs cap. Sustained `occupancy == cap` with rising `concert_room_live_queue_depth` means the origin is at capacity. |
 | `concert_room_live_queue_depth` / `concert_room_max_queue_depth` | gauge | Active waiting visitors vs configured `503` breaker ceiling. Alert when `live_queue_depth / max_queue_depth > 0.8`. |
 | `concert_upstream_backends_healthy` / `concert_ready` | gauge | Healthy upstream count and readiness state (`0` when draining or all backends are unhealthy). |
+| `concert_guard_quota_rejected_total` / `concert_guard_shed_total` | counter | Arrivals rejected by per-IP queue quotas or shed with `503` by host RSS/FD/connection ceilings. Alert immediately on `concert_guard_shed_total > 0`. |
+| `concert_guard_challenge_passed_total` / `concert_guard_challenge_failed_total` | counter | Pre-ticket PoW / Turnstile challenge outcomes. |
+| `concert_bidding_submitted_total` / `concert_bidding_settled_total` / `concert_bidding_rejected_total` | counter | 4-chain non-custodial AI Agent Pass Bidding lifecycle counters. |
+
+### Production Prometheus Alert Rules, Grafana Dashboard, OTLP & ChatOps
+
+Apply the maintained production ruleset and Grafana dashboard directly from [`deploy/observability/`](../deploy/observability/):
+
+- [`deploy/observability/prometheus-rules.yaml`](../deploy/observability/prometheus-rules.yaml) — Ready-to-apply `PrometheusRule` covering `HighQueueDepth`, `CapacityBreakerActive`, `OriginUnhealthy`, `UpstreamBodyIdleTimeouts`, `GuardHostShedding`, `FastLaneSettlementFailure`, and `FastLaneJournalNearCapacity`.
+- [`deploy/observability/grafana-dashboard.json`](../deploy/observability/grafana-dashboard.json) — Prebuilt Grafana dashboard for Waiting Room, Guardrails, Upstream Health, Fast-Lane, and Bidding.
+- **ChatOps Alerts (`internal/notify`):** Set `CONCERT_NOTIFY_SLACK_URL_FILE`, `CONCERT_NOTIFY_DISCORD_URL_FILE`, `CONCERT_NOTIFY_TEAMS_URL_FILE`, `CONCERT_NOTIFY_WEBHOOK_URL_FILE` (+ `CONCERT_NOTIFY_WEBHOOK_SECRET_FILE`), or `CONCERT_NOTIFY_PAGERDUTY_KEY_FILE` for async, coalesced real-time alerts alongside email digests.
+- **Distributed Tracing (`internal/telemetry`):** Set `-otlp-endpoint`, `-otlp-sample-rate`, and `CONCERT_OTLP_AUTH_HEADER_FILE` for pure-stdlib OTLP/HTTP JSON span export and W3C `traceparent` propagation.
+- **External Supervision (`concert-watchdog`):** Supervise Concert on Linux hosts via `installer.sh` with `CONCERT_WATCHDOG=1` (or systemd parent mode; see [Tutorial 01](tutorials/01-single-host-vps.md)). `concert-watchdog` inspects `concert_upstream_backends_healthy` so origin outages never trigger pointless Concert restarts.
 
 ### Example Prometheus Alert Rules
 

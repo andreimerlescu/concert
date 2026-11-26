@@ -159,6 +159,20 @@ func (a *app) renderPrometheusMetrics() string {
 	writePromMetric(&b, "concert_abuse_rejected_total", "counter", "Total requests rejected due to active bans.", stats.abuseRejected.Load())
 	writePromMetric(&b, "concert_abuse_dropped_total", "counter", "Total strikes dropped because abuse table was full.", stats.abuseDropped.Load())
 
+	// Host-protection guardrails
+	writePromMetric(&b, "concert_guard_quota_rejected_total", "counter", "Total arrivals rejected by per-IP waiting-room queue quotas.", stats.guardQuotaRejected.Load())
+	writePromMetric(&b, "concert_guard_shed_total", "counter", "Total arrivals shed with 503 due to host memory, FD, or connection ceilings.", stats.guardShed.Load())
+	writePromMetric(&b, "concert_guard_ratelimit_total", "counter", "Total requests rejected with 429 by per-route rate limits.", stats.guardRateLimit.Load())
+	writePromMetric(&b, "concert_guard_geo_blocked_total", "counter", "Total requests blocked with 403 by Geo/ASN access policies.", stats.guardGeoBlocked.Load())
+	writePromMetric(&b, "concert_guard_challenge_passed_total", "counter", "Total pre-ticket PoW or Turnstile challenges passed.", stats.guardChallengePassed.Load())
+	writePromMetric(&b, "concert_guard_challenge_failed_total", "counter", "Total pre-ticket PoW or Turnstile challenge verifications failed.", stats.guardChallengeFailed.Load())
+
+	// Non-custodial hybrid AI agent pass bidding
+	bidSub, bidSet, bidRej := a.biddingMetricsTotals()
+	writePromMetric(&b, "concert_bidding_submitted_total", "counter", "Total crypto agent pass bids accepted for instant-buy or auction epochs.", bidSub)
+	writePromMetric(&b, "concert_bidding_settled_total", "counter", "Total winning crypto agent pass bids settled on-chain.", bidSet)
+	writePromMetric(&b, "concert_bidding_rejected_total", "counter", "Total agent pass bids rejected on validation, verification, or replay checks.", bidRej)
+
 	// Upstream pool & latency
 	healthyBackends := 0
 	totalBackends := 0

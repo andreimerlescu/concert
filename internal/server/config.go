@@ -14,10 +14,19 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/andreimerlescu/concert/internal/acme"
+	"github.com/andreimerlescu/concert/internal/bidding"
+	"github.com/andreimerlescu/concert/internal/cache"
+	"github.com/andreimerlescu/concert/internal/configfile"
+	"github.com/andreimerlescu/concert/internal/guard"
+	"github.com/andreimerlescu/concert/internal/kv"
+	"github.com/andreimerlescu/concert/internal/notify"
 	"github.com/andreimerlescu/concert/internal/static"
+	"github.com/andreimerlescu/concert/internal/telemetry"
 	"github.com/andreimerlescu/goenv/env"
 	"github.com/andreimerlescu/room"
 )
@@ -29,7 +38,8 @@ import (
 //	room_probe       — non-HttpOnly cookie-support probe
 //	concert_admit    — HttpOnly signed admission pass for the asset and stream tiers
 //	concert_priority — HttpOnly signed rank granted by the origin; see priority.go
-var proxyCookies = []string{"room_ticket", "room_pass", "room_probe", admitCookie, priorityCookie, "concert_fastlane", "concert_fastlane_pass"}
+//	concert_pow      — HttpOnly signed Proof-of-Work / Turnstile clearance pass
+var proxyCookies = []string{"room_ticket", "room_pass", "room_probe", admitCookie, priorityCookie, guard.DefaultClearanceCookieName, dropTicketCookie, "concert_fastlane", "concert_fastlane_pass"}
 
 type config struct {
 	fastlaneFile             string // fast-lane configuration JSON path; see docs/FASTLANE.md
@@ -45,6 +55,9 @@ type config struct {
 	wpPreset        bool
 	microCacheTTL   time.Duration
 	microCacheMaxMB int
+	cacheAddr       string       // external concert-cache address (TCP or Unix); empty uses in-process microcache
+	cacheTLS        bool         // enable TLS when dialing external concert-cache over TCP
+	cacheSecret     cache.Secret // CONCERT_CACHE_SECRET[_FILE]; env/file only, never logged (S6)
 	http3           bool
 
 	listen                  string
@@ -83,16 +96,17 @@ type config struct {
 	roomLeaseFraction    float64
 	parsedRoomVerifyKeys map[string]ed25519.PublicKey
 
-	assets            string
-	assetPublic       string
-	assetCap          int
-	assetWait         time.Duration
-	assetUserCapH1    int
-	assetUserCapH2    int
-	assetUserWait     time.Duration
-	admitTTL          time.Duration
-	clientProtoHeader string
-	accessLogEnabled  bool
+	assets                 string
+	assetPublic            string
+	assetCap               int
+	assetWait              time.Duration
+	assetUserCapH1         int
+	assetUserCapH2         int
+	assetUserWait          time.Duration
+	admitTTL               time.Duration
+	admitSessionContinuity bool
+	clientProtoHeader      string
+	accessLogEnabled       bool
 
 	// Static file offload, compression, and FastCGI (php-fpm); see internal/static and internal/fcgi.
 	staticRoot         string
@@ -129,6 +143,37 @@ type config struct {
 	agentQueue  bool
 	agentPlaces int
 
+	// Non-custodial hybrid AI agent pass bidding; see bidding_wiring.go.
+	agentBidding              bool
+	agentBiddingFloorMicroUSD int64
+	agentBiddingEpoch         time.Duration
+	agentBiddingSlots         int
+	agentBiddingMinWait       time.Duration
+	biddingSettler            bidding.PaymentSettler // optional test injection; nil uses gateway/fail-closed
+
+	// Declarative path-based routes, response headers, redirects, and scheduled drop; see routes_wiring.go & drop_wiring.go.
+	siteRoutes    []configfile.RouteConfig
+	siteHeaders   []configfile.HeaderRule
+	siteRedirects []configfile.RedirectRule
+	dropEventID   string
+	dropLobbyAt   string
+	dropOpenAt    string
+
+	// ChatOps alerting & pure-stdlib OTLP/HTTP JSON tracing; see observability_wiring.go.
+	notifySlackURL                 notify.Secret // CONCERT_NOTIFY_SLACK_URL[_FILE] / -notify-slack-url (S6)
+	notifyDiscordURL               notify.Secret // CONCERT_NOTIFY_DISCORD_URL[_FILE] / -notify-discord-url (S6)
+	notifyTeamsURL                 notify.Secret // CONCERT_NOTIFY_TEAMS_URL[_FILE] / -notify-teams-url (S6)
+	notifyWebhookURL               notify.Secret // CONCERT_NOTIFY_WEBHOOK_URL[_FILE] / -notify-webhook-url (S6)
+	notifyWebhookSecret            notify.Secret // CONCERT_NOTIFY_WEBHOOK_SECRET[_FILE] (S6)
+	notifyPagerDutyKey             notify.Secret // CONCERT_NOTIFY_PAGERDUTY_KEY[_FILE] / -notify-pagerduty-key (S6)
+	notifyPagerDutyURL             string        // CONCERT_NOTIFY_PAGERDUTY_URL (defaults to PagerDuty Events API v2)
+	notifyDisableCoalesce          bool          // internal test toggle
+	otlpEndpoint                   string        // -otlp-endpoint / CONCERT_OTLP_ENDPOINT
+	otlpSampleRate                 float64       // -otlp-sample-rate / CONCERT_OTLP_SAMPLE_RATE
+	otlpAuthHeaderName             string        // CONCERT_OTLP_AUTH_HEADER_NAME (default "Authorization")
+	otlpAuthHeader                 telemetry.Secret
+	observabilityAllowLoopbackHTTP bool // internal test toggle; production always enforces HTTPS + SSRF checks
+
 	// Let's Encrypt & Enterprise TLS; see tls.go. TLS on -listen is enabled
 	// when tlsDomains names at least one host OR tlsCert+tlsKey are set.
 	tlsDomains           string
@@ -142,6 +187,10 @@ type config struct {
 	tlsMinVersion        string
 	hstsMaxAge           int
 	tlsHTTPListen        string
+	tlsDNSProvider       string      // ACME DNS-01 provider: "" (disabled), "cloudflare", or "webhook"
+	tlsDNSWebhookURL     string      // HTTPS endpoint for -tls-dns-provider webhook
+	dnsAPIToken          acme.Secret // CONCERT_DNS_API_TOKEN[_FILE]; env/file only (S6)
+	dnsWebhookToken      acme.Secret // CONCERT_DNS_WEBHOOK_TOKEN[_FILE]; env/file only (S6)
 
 	// Upstream resilience & mTLS; see upstream.go.
 	upstreamHealthPath     string
@@ -164,10 +213,37 @@ type config struct {
 	privacyAnonymizeIP bool
 	historyRetention   time.Duration
 
+	kvAddr        string
+	kvTLS         bool
+	kvPrefix      string
+	kvSharedQueue bool
+	kvPassword    kv.Secret // env/file only: CONCERT_KV_PASSWORD[_FILE] (S6)
+
 	redisAddr     string
 	redisTLS      bool
 	redisPrefix   string
-	redisPassword string // env/file only: CONCERT_REDIS_PASSWORD
+	redisPassword string // env/file only: CONCERT_REDIS_PASSWORD[_FILE] (legacy alias)
+
+	// Host-protection guardrails; see internal/guard and guard_wiring.go.
+	maxQueuePerIP             int
+	allowMaxQueuePerIP        int
+	hostMaxMemMB              int
+	hostMaxFDs                int
+	hostMaxConns              int64
+	rateLimits                string   // comma-separated /path=rate/window[:burst]
+	concertfileRateLimits     []string // declarative Concertfile rate_limit directives
+	blockASN                  string
+	allowCountries            string
+	blockCountries            string
+	challengeMode             string // off | pow | turnstile
+	challengePowBits          int
+	challengeTurnstileSiteKey string
+	turnstileSecret           guard.Secret // env/file only: CONCERT_TURNSTILE_SECRET[_FILE] (S6)
+	turnstileEndpoint         string       // optional override for tests; defaults to Cloudflare endpoint
+	parsedRateLimits          []guard.Rule
+	parsedBlockASNs           []uint32
+	parsedAllowCountries      []string
+	parsedBlockCountries      []string
 
 	// Edge and leaf tiers; see topology.go and docs/TOPOLOGY.md.
 	role             string        // standalone, edge or leaf
@@ -268,6 +344,15 @@ func parseConfig(fs *flag.FlagSet, args []string) (config, bool, error) {
 		return config{}, false, err
 	}
 
+	if v := strings.TrimSpace(envOrFile("CONCERT_NOTIFY_WEBHOOK_SECRET", "")); v != "" {
+		cfg.notifyWebhookSecret = notify.NewSecret(v)
+	}
+	cfg.notifyPagerDutyURL = strings.TrimSpace(os.Getenv("CONCERT_NOTIFY_PAGERDUTY_URL"))
+	cfg.otlpAuthHeaderName = strings.TrimSpace(os.Getenv("CONCERT_OTLP_AUTH_HEADER_NAME"))
+	if v := strings.TrimSpace(envOrFile("CONCERT_OTLP_AUTH_HEADER", "")); v != "" {
+		cfg.otlpAuthHeader = telemetry.NewSecret(v)
+	}
+
 	// Secrets are environment-only (or *_FILE for Kubernetes/Docker/Vault
 	// mounted secrets): command-line arguments are visible in ps output and
 	// shell history, and secrets are never written to settings.json.
@@ -278,6 +363,21 @@ func parseConfig(fs *flag.FlagSet, args []string) (config, bool, error) {
 	cfg.portal.pass = envOrFile("CONCERT_PORTAL_PASS", "")
 	cfg.portal.usersSpec = envOrFile("CONCERT_PORTAL_USERS", "")
 	cfg.redisPassword = envOrFile("CONCERT_REDIS_PASSWORD", "")
+	if kvPass := envOrFile("CONCERT_KV_PASSWORD", ""); kvPass != "" {
+		cfg.kvPassword = kv.NewSecret(kvPass)
+	}
+	if cacheSec := envOrFile("CONCERT_CACHE_SECRET", ""); cacheSec != "" {
+		cfg.cacheSecret = cache.NewSecret(cacheSec)
+	}
+	if tsSec := envOrFile("CONCERT_TURNSTILE_SECRET", ""); tsSec != "" {
+		cfg.turnstileSecret = guard.NewSecret(tsSec)
+	}
+	if dnsTok := envOrFile("CONCERT_DNS_API_TOKEN", ""); dnsTok != "" {
+		cfg.dnsAPIToken = acme.NewSecret(dnsTok)
+	}
+	if whTok := envOrFile("CONCERT_DNS_WEBHOOK_TOKEN", ""); whTok != "" {
+		cfg.dnsWebhookToken = acme.NewSecret(whTok)
+	}
 	cfg.hopSecret = []byte(envOrFile("CONCERT_HOP_SECRET", ""))
 	cfg.hopSecretPrev = []byte(envOrFile("CONCERT_HOP_SECRET_PREV", ""))
 	cfg.email.smtpPass = envOrFile("CONCERT_SMTP_PASS", "")
@@ -317,6 +417,14 @@ func (c *config) normalize() error {
 	}
 	if c.microCacheMaxMB < 0 {
 		return fmt.Errorf("invalid -micro-cache-max-mb %d: must not be negative", c.microCacheMaxMB)
+	}
+	if strings.TrimSpace(c.cacheAddr) != "" {
+		if c.cacheSecret.IsZero() {
+			return errors.New("CONCERT_CACHE_SECRET or CONCERT_CACHE_SECRET_FILE is required when -cache-addr is set")
+		}
+		if c.microCacheTTL == 0 {
+			c.microCacheTTL = 15 * time.Second
+		}
 	}
 	targets, err := parseUpstreams(c.upstream)
 	if err != nil {
@@ -499,8 +607,22 @@ func (c *config) normalize() error {
 		return fmt.Errorf("invalid -agent-places %d: must be between 1 and %d", c.agentPlaces, maxAgentPlaces)
 	}
 
-	if c.tlsHosts, err = parseTLSDomains(c.tlsDomains); err != nil {
+	dnsProv := strings.ToLower(strings.TrimSpace(c.tlsDNSProvider))
+	switch dnsProv {
+	case "", "cloudflare", "webhook":
+		c.tlsDNSProvider = dnsProv
+	default:
+		return fmt.Errorf("invalid -tls-dns-provider %q: must be empty, cloudflare, or webhook", c.tlsDNSProvider)
+	}
+	allowWildcard := c.tlsDNSProvider != ""
+	if c.tlsHosts, err = parseTLSDomainsMode(c.tlsDomains, allowWildcard); err != nil {
 		return fmt.Errorf("invalid -tls-domains: %w", err)
+	}
+	if c.tlsDNSProvider == "cloudflare" && c.dnsAPIToken.IsZero() {
+		return errors.New("CONCERT_DNS_API_TOKEN or CONCERT_DNS_API_TOKEN_FILE is required when -tls-dns-provider=cloudflare")
+	}
+	if c.tlsDNSProvider == "webhook" && strings.TrimSpace(c.tlsDNSWebhookURL) == "" {
+		return errors.New("-tls-dns-webhook-url is required when -tls-dns-provider=webhook")
 	}
 	if _, err := parseTLSMinVersion(c.tlsMinVersion); err != nil {
 		return err
@@ -603,6 +725,12 @@ func (c *config) normalize() error {
 		return errors.New("-ban-paths requires -abuse")
 	}
 
+	if err := c.normalizeGuard(); err != nil {
+		return err
+	}
+	if err := c.normalizeObservability(); err != nil {
+		return err
+	}
 	if err := c.portal.normalize(); err != nil {
 		return err
 	}
@@ -611,6 +739,194 @@ func (c *config) normalize() error {
 	}
 
 	return validateRoutes(c)
+}
+
+// effectiveKVAddr returns the configured concert-kv / Redis address, preferring
+// -kv-addr over the legacy -redis-addr alias.
+func (c config) effectiveKVAddr() string {
+	if s := strings.TrimSpace(c.kvAddr); s != "" {
+		return s
+	}
+	return strings.TrimSpace(c.redisAddr)
+}
+
+// effectiveKVTLS reports whether TLS is enabled for the KV/cluster connection.
+func (c config) effectiveKVTLS() bool {
+	return c.kvTLS || c.redisTLS
+}
+
+// effectiveKVPrefix returns the key/channel prefix for KV/cluster sync,
+// preserving backward compatibility with -redis-prefix.
+func (c config) effectiveKVPrefix() string {
+	if p := strings.TrimSpace(c.kvPrefix); p != "" && p != "concert" {
+		return p
+	}
+	if p := strings.TrimSpace(c.redisPrefix); p != "" && p != "concert" {
+		return p
+	}
+	if p := strings.TrimSpace(c.kvPrefix); p != "" {
+		return p
+	}
+	if p := strings.TrimSpace(c.redisPrefix); p != "" {
+		return p
+	}
+	return "concert"
+}
+
+// effectiveKVPassword returns the redacting KV AUTH password, preferring
+// CONCERT_KV_PASSWORD[_FILE] and falling back to CONCERT_REDIS_PASSWORD[_FILE].
+func (c config) effectiveKVPassword() kv.Secret {
+	if !c.kvPassword.IsZero() {
+		return c.kvPassword
+	}
+	if c.redisPassword != "" {
+		return kv.NewSecret(c.redisPassword)
+	}
+	return kv.Secret{}
+}
+
+// normalizeGuard validates all host-protection guardrail settings (queue
+// quotas, host shedder ceilings, per-route rate limits, Geo/ASN policies, and
+// PoW/Turnstile challenge settings) and populates their parsed fields.
+func (c *config) normalizeGuard() error {
+	if c.maxQueuePerIP < 0 {
+		return fmt.Errorf("invalid -max-queue-per-ip %d: must be >= 0", c.maxQueuePerIP)
+	}
+	if c.allowMaxQueuePerIP < 0 {
+		return fmt.Errorf("invalid -allow-max-queue-per-ip %d: must be >= 0", c.allowMaxQueuePerIP)
+	}
+	if c.hostMaxMemMB < 0 {
+		return fmt.Errorf("invalid -host-max-mem-mb %d: must be >= 0", c.hostMaxMemMB)
+	}
+	if c.hostMaxFDs < 0 {
+		return fmt.Errorf("invalid -host-max-fds %d: must be >= 0", c.hostMaxFDs)
+	}
+	if c.hostMaxConns < 0 {
+		return fmt.Errorf("invalid -host-max-conns %d: must be >= 0", c.hostMaxConns)
+	}
+
+	rules, err := parseRateLimitSpecs(c.rateLimits, c.concertfileRateLimits)
+	if err != nil {
+		return err
+	}
+	c.parsedRateLimits = rules
+
+	asns, err := parseASNList(c.blockASN)
+	if err != nil {
+		return fmt.Errorf("invalid -block-asn: %w", err)
+	}
+	c.parsedBlockASNs = asns
+	c.parsedAllowCountries = parseCountryCodeList(c.allowCountries)
+	c.parsedBlockCountries = parseCountryCodeList(c.blockCountries)
+	if len(c.parsedBlockASNs) > 0 || len(c.parsedAllowCountries) > 0 || len(c.parsedBlockCountries) > 0 {
+		if _, err := guard.NewGeoASNPolicy(guard.GeoASNConfig{
+			AllowCountries: c.parsedAllowCountries,
+			DenyCountries:  c.parsedBlockCountries,
+			DenyASNs:       c.parsedBlockASNs,
+			FailOpen:       true,
+		}, nil); err != nil {
+			return fmt.Errorf("invalid geo/asn policy: %w", err)
+		}
+	}
+
+	mode := strings.ToLower(strings.TrimSpace(c.challengeMode))
+	if mode == "" {
+		mode = string(guard.ModeOff)
+	}
+	switch guard.ChallengeMode(mode) {
+	case guard.ModeOff:
+		c.challengeMode = string(guard.ModeOff)
+	case guard.ModePoW:
+		c.challengeMode = string(guard.ModePoW)
+		if c.challengePowBits == 0 {
+			c.challengePowBits = guard.DefaultPoWDifficulty
+		}
+		if c.challengePowBits < guard.MinPoWDifficulty || c.challengePowBits > guard.MaxPoWDifficulty {
+			return fmt.Errorf("invalid -challenge-pow-bits %d: must be between %d and %d",
+				c.challengePowBits, guard.MinPoWDifficulty, guard.MaxPoWDifficulty)
+		}
+	case guard.ModeTurnstile:
+		c.challengeMode = string(guard.ModeTurnstile)
+		if c.turnstileSecret.IsZero() {
+			return errors.New("CONCERT_TURNSTILE_SECRET or CONCERT_TURNSTILE_SECRET_FILE is required when -challenge-mode=turnstile")
+		}
+	default:
+		return fmt.Errorf("invalid -challenge-mode %q: must be off, pow, or turnstile", c.challengeMode)
+	}
+	return nil
+}
+
+// parseRateLimitSpecs parses comma-separated CLI/env route rate-limit entries
+// ("/path=rate/window[:burst]" or "/path rate/window[:burst]") and declarative
+// Concertfile directives into validated guard.Rule slices.
+func parseRateLimitSpecs(flagSpec string, fileSpecs []string) ([]guard.Rule, error) {
+	var rawEntries []string
+	for _, part := range strings.Split(flagSpec, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			rawEntries = append(rawEntries, p)
+		}
+	}
+	for _, part := range fileSpecs {
+		if p := strings.TrimSpace(part); p != "" {
+			rawEntries = append(rawEntries, p)
+		}
+	}
+	if len(rawEntries) == 0 {
+		return nil, nil
+	}
+	rules := make([]guard.Rule, 0, len(rawEntries))
+	for _, entry := range rawEntries {
+		var prefix, spec string
+		if p, s, ok := strings.Cut(entry, "="); ok {
+			prefix, spec = strings.TrimSpace(p), strings.TrimSpace(s)
+		} else {
+			fields := strings.Fields(entry)
+			if len(fields) != 2 {
+				return nil, fmt.Errorf("invalid rate limit %q: expected <path>=<rate>/<window> or <path> <rate>/<window>", entry)
+			}
+			prefix, spec = fields[0], fields[1]
+		}
+		r, err := guard.ParseRouteRule(prefix, spec)
+		if err != nil {
+			return nil, fmt.Errorf("invalid rate limit %q: %w", entry, err)
+		}
+		rules = append(rules, r)
+	}
+	if _, err := guard.NewRouteLimiter(rules, 0); err != nil {
+		return nil, fmt.Errorf("invalid rate limits: %w", err)
+	}
+	return rules, nil
+}
+
+// parseASNList parses comma-separated autonomous system numbers ("13335,AS15169").
+func parseASNList(spec string) ([]uint32, error) {
+	var out []uint32
+	for _, part := range strings.Split(spec, ",") {
+		p := strings.TrimSpace(part)
+		if p == "" {
+			continue
+		}
+		if len(p) >= 2 && strings.EqualFold(p[:2], "AS") {
+			p = p[2:]
+		}
+		n, err := strconv.ParseUint(p, 10, 32)
+		if err != nil || n == 0 {
+			return nil, fmt.Errorf("invalid ASN %q", strings.TrimSpace(part))
+		}
+		out = append(out, uint32(n))
+	}
+	return out, nil
+}
+
+// parseCountryCodeList splits a comma-separated list of ISO-3166-1 alpha-2 codes.
+func parseCountryCodeList(spec string) []string {
+	var out []string
+	for _, part := range strings.Split(spec, ",") {
+		if p := strings.ToUpper(strings.TrimSpace(part)); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // effectiveTokenTTL returns the active sliding token TTL: room.DefaultTokenTTL

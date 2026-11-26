@@ -4,7 +4,7 @@ BIN_DIR   := bin
 DIST_DIR  := dist
 PLATFORMS := linux/amd64 linux/arm64
 
-BINARIES      := concert wpconcert econcert bench-concert concert-client
+BINARIES      := concert wpconcert econcert bench-concert concert-client concert-kv concert-cache concert-watchdog
 FIPS_BINARIES := concert-fips wpconcert-fips econcert-fips
 
 GO_BUILD_FLAGS := -trimpath -buildvcs=false
@@ -23,12 +23,12 @@ img  = $(if $(IMAGE_PREFIX),$(IMAGE_PREFIX)/$(1),$(1))
 all: lint clean test test-race bench summary build sbom checksums
 
 test:
-	go test -count=1 ./internal/... ./cmd/concert ./cmd/bench-concert
+	go test -count=1 ./internal/... ./cmd/concert ./cmd/bench-concert ./cmd/concert-kv ./cmd/concert-cache ./cmd/concert-watchdog
 	go test -count=1 -tags wordpress ./internal/... ./cmd/wpconcert
 	go test -count=1 -tags "wordpress,enterprise" ./...
 
 test-race:
-	go test -race -count=1 ./internal/... ./cmd/concert ./cmd/bench-concert
+	go test -race -count=1 ./internal/... ./cmd/concert ./cmd/bench-concert ./cmd/concert-kv ./cmd/concert-cache ./cmd/concert-watchdog
 	go test -race -count=1 -tags wordpress ./internal/... ./cmd/wpconcert
 	go test -race -count=1 -tags "wordpress,enterprise" ./...
 
@@ -39,12 +39,12 @@ bench:
 	go test -bench=. -benchmem -tags "wordpress,enterprise" ./...
 
 lint:
-	go vet ./internal/... ./cmd/concert ./cmd/bench-concert
+	go vet ./internal/... ./cmd/concert ./cmd/bench-concert ./cmd/concert-kv ./cmd/concert-cache ./cmd/concert-watchdog
 	go vet -tags wordpress ./internal/... ./cmd/wpconcert
 	go vet -tags "wordpress,enterprise" ./...
 
 vulncheck:
-	govulncheck ./cmd/concert ./cmd/bench-concert
+	govulncheck ./cmd/concert ./cmd/bench-concert ./cmd/concert-kv ./cmd/concert-cache ./cmd/concert-watchdog
 	govulncheck -tags wordpress ./cmd/wpconcert
 	govulncheck -tags "wordpress,enterprise" ./...
 
@@ -147,3 +147,12 @@ $(PLATFORMS):
 	CGO_ENABLED=0 GOOS=$(call os,$@) GOARCH=$(call arch,$@) \
 		go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS)" \
 		-o $(BIN_DIR)/concert-client-$(call os,$@)-$(call arch,$@) ./cmd/concert-client
+	CGO_ENABLED=0 GOOS=$(call os,$@) GOARCH=$(call arch,$@) \
+		go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS)" \
+		-o $(BIN_DIR)/concert-kv-$(call os,$@)-$(call arch,$@) ./cmd/concert-kv
+	CGO_ENABLED=0 GOOS=$(call os,$@) GOARCH=$(call arch,$@) \
+		go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS)" \
+		-o $(BIN_DIR)/concert-cache-$(call os,$@)-$(call arch,$@) ./cmd/concert-cache
+	CGO_ENABLED=0 GOOS=$(call os,$@) GOARCH=$(call arch,$@) \
+		go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS)" \
+		-o $(BIN_DIR)/concert-watchdog-$(call os,$@)-$(call arch,$@) ./cmd/concert-watchdog

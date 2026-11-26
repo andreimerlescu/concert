@@ -1,0 +1,29 @@
+{
+  "name": "@concert/client",
+  "version": "0.3.0",
+  "description": "Zero-dependency TypeScript/ESM client for Concert virtual waiting rooms (priority middleware, stateless Ed25519 rm1 passes, queue signal parsing, active cache purge, and crypto-only AI agent bidding).",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "files": [
+    "src",
+    "docs",
+    "README.md",
+    "CHANGELIST.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test src/tests/concert.test.ts",
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {}
+}

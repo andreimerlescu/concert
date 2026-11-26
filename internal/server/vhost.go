@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	concertacme "github.com/andreimerlescu/concert/internal/acme"
 	"github.com/andreimerlescu/concert/internal/configfile"
 	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
@@ -43,10 +44,40 @@ type vhostSnapshot struct {
 	file        *configfile.File
 	sites       []*siteRuntime
 	byHost      map[string]*siteRuntime
+	byWildcard  map[string]*siteRuntime // suffix without "*." -> siteRuntime
 	defaultSite *siteRuntime
 	globalCert  *certReloader
 	acmeHosts   map[string]bool
 	hasTLS      bool
+}
+
+// matchSiteNoDefault resolves host against exact site hostnames first, then
+// single-label wildcard patterns ("*.example.com"), returning nil if unmatched.
+func (s *vhostSnapshot) matchSiteNoDefault(host string) *siteRuntime {
+	if s == nil || host == "" {
+		return nil
+	}
+	if sr, ok := s.byHost[host]; ok {
+		return sr
+	}
+	if label, rest, ok := strings.Cut(host, "."); ok && label != "" && rest != "" && !strings.Contains(label, ".") {
+		if sr, ok := s.byWildcard[rest]; ok {
+			return sr
+		}
+	}
+	return nil
+}
+
+// matchSite resolves host against exact hostnames, single-label wildcards, and
+// finally the catch-all "*" site if configured.
+func (s *vhostSnapshot) matchSite(host string) *siteRuntime {
+	if s == nil {
+		return nil
+	}
+	if sr := s.matchSiteNoDefault(host); sr != nil {
+		return sr
+	}
+	return s.defaultSite
 }
 
 type vhostManager struct {
@@ -163,9 +194,10 @@ func (vm *vhostManager) loadSnapshot(prev *vhostSnapshot) (*vhostSnapshot, error
 		return nil, err
 	}
 	snap := &vhostSnapshot{
-		file:      f,
-		byHost:    make(map[string]*siteRuntime),
-		acmeHosts: make(map[string]bool),
+		file:       f,
+		byHost:     make(map[string]*siteRuntime),
+		byWildcard: make(map[string]*siteRuntime),
+		acmeHosts:  make(map[string]bool),
 	}
 	fail := func(err error) (*vhostSnapshot, error) {
 		if prev != nil {
@@ -246,6 +278,11 @@ func (vm *vhostManager) loadSnapshot(prev *vhostSnapshot) (*vhostSnapshot, error
 		for _, h := range sc.Hosts {
 			if h == "*" {
 				snap.defaultSite = sr
+			} else if strings.HasPrefix(h, "*.") {
+				snap.byWildcard[strings.TrimPrefix(h, "*.")] = sr
+				if siteCert == nil && snap.globalCert == nil && isACMEEligibleHost(h) {
+					snap.acmeHosts[h] = true
+				}
 			} else {
 				snap.byHost[h] = sr
 				if siteCert == nil && snap.globalCert == nil && isACMEEligibleHost(h) {
@@ -266,10 +303,14 @@ func (vm *vhostManager) loadSnapshot(prev *vhostSnapshot) (*vhostSnapshot, error
 }
 
 func isACMEEligibleHost(h string) bool {
-	if h == "" || h == "*" || h == "localhost" || !strings.Contains(h, ".") {
+	if h == "" || h == "*" || h == "localhost" {
 		return false
 	}
-	if _, err := netip.ParseAddr(h); err == nil {
+	check := strings.TrimPrefix(h, "*.")
+	if !strings.Contains(check, ".") || check == "localhost" {
+		return false
+	}
+	if _, err := netip.ParseAddr(check); err == nil {
 		return false
 	}
 	return true
@@ -574,6 +615,9 @@ func buildSiteConfig(base config, gf configfile.GlobalConfig, sc configfile.Site
 	if sc.BanPaths != "" {
 		cfg.banPaths = sc.BanPaths
 	}
+	if len(sc.RateLimits) > 0 {
+		cfg.concertfileRateLimits = append([]string(nil), sc.RateLimits...)
+	}
 	if sc.RoomVerifyKeys != "" {
 		cfg.roomVerifyKeys = sc.RoomVerifyKeys
 	}
@@ -703,6 +747,24 @@ func buildSiteConfig(base config, gf configfile.GlobalConfig, sc configfile.Site
 	if sc.FastlaneLockDestinations != nil {
 		cfg.fastlaneLockDestinations = *sc.FastlaneLockDestinations
 	}
+	if len(sc.Routes) > 0 {
+		cfg.siteRoutes = append([]configfile.RouteConfig(nil), sc.Routes...)
+	}
+	if len(sc.Headers) > 0 {
+		cfg.siteHeaders = append([]configfile.HeaderRule(nil), sc.Headers...)
+	}
+	if len(sc.Redirects) > 0 {
+		cfg.siteRedirects = append([]configfile.RedirectRule(nil), sc.Redirects...)
+	}
+	if sc.DropEventID != "" {
+		cfg.dropEventID = sc.DropEventID
+	}
+	if sc.DropLobbyAt != "" {
+		cfg.dropLobbyAt = sc.DropLobbyAt
+	}
+	if sc.DropOpenAt != "" {
+		cfg.dropOpenAt = sc.DropOpenAt
+	}
 
 	// Apply edition preset (e.g., wordpress) after explicit fields so explicit
 	// overrides in the site block always win.
@@ -726,9 +788,8 @@ func (vm *vhostManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	host, ok := normalizeRedirectHost(r.Host)
 	var sr *siteRuntime
 	if ok {
-		sr = snap.byHost[host]
-	}
-	if sr == nil {
+		sr = snap.matchSite(host)
+	} else {
 		sr = snap.defaultSite
 	}
 	if sr == nil {
@@ -739,37 +800,79 @@ func (vm *vhostManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sr.app.handler.ServeHTTP(w, r)
 }
 
-func (vm *vhostManager) buildTLS() (*tls.Config, *autocert.Manager, error) {
+func (vm *vhostManager) buildTLS(ctx context.Context) (*tls.Config, *autocert.Manager, func(), error) {
 	snap := vm.current()
 	if snap == nil || !snap.hasTLS {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	gf := snap.file.Global
 	minVer, err := parseTLSMinVersion(gf.TLSMinVersion)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
-	var mgr *autocert.Manager
+	dnsProvider := strings.TrimSpace(gf.TLSDNSProvider)
+	if dnsProvider == "" {
+		dnsProvider = strings.TrimSpace(vm.baseCfg.tlsDNSProvider)
+	}
+	dnsWebhookURL := strings.TrimSpace(gf.TLSDNSWebhookURL)
+	if dnsWebhookURL == "" {
+		dnsWebhookURL = strings.TrimSpace(vm.baseCfg.tlsDNSWebhookURL)
+	}
+
+	var (
+		mgr     *autocert.Manager
+		dnsMgr  *concertacme.Manager
+		closeFn func()
+	)
 	if strings.TrimSpace(gf.TLSCache) != "" && len(snap.acmeHosts) > 0 {
-		if err := ensureWritableDir(gf.TLSCache); err != nil {
-			return nil, nil, err
-		}
-		mgr = &autocert.Manager{
-			Prompt: autocert.AcceptTOS,
-			Cache:  autocert.DirCache(gf.TLSCache),
-			Email:  gf.TLSEmail,
-			HostPolicy: func(_ context.Context, host string) error {
-				s := vm.current()
-				h := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
-				if s != nil && s.acmeHosts[h] {
-					return nil
+		if dnsProvider != "" {
+			domains := make([]string, 0, len(snap.acmeHosts))
+			for h := range snap.acmeHosts {
+				domains = append(domains, h)
+			}
+			dnsCfg := vm.baseCfg
+			dnsCfg.tlsEmail = gf.TLSEmail
+			dnsCfg.tlsCacheDir = gf.TLSCache
+			dnsCfg.tlsStaging = gf.TLSStaging
+			dnsCfg.tlsDNSProvider = dnsProvider
+			dnsCfg.tlsDNSWebhookURL = dnsWebhookURL
+			var kvSync concertacme.KVBundleSync
+			if pa := vm.primaryApp(); pa != nil {
+				kvSync = pa.acmeKVSync()
+				if len(dnsCfg.admitSecret) == 0 {
+					dnsCfg.admitSecret = pa.current().cfg.admitSecret
 				}
-				return fmt.Errorf("acme/autocert: host %q not configured in Concertfile", host)
-			},
-		}
-		if gf.TLSStaging {
-			mgr.Client = &acme.Client{DirectoryURL: letsEncryptStagingURL}
+			}
+			dnsMgr, err = buildDNS01Manager(dnsCfg, domains, kvSync)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			if err := dnsMgr.Start(ctx); err != nil {
+				_ = dnsMgr.Close()
+				return nil, nil, nil, err
+			}
+			closeFn = func() { _ = dnsMgr.Close() }
+		} else {
+			if err := ensureWritableDir(gf.TLSCache); err != nil {
+				return nil, nil, nil, err
+			}
+			mgr = &autocert.Manager{
+				Prompt: autocert.AcceptTOS,
+				Cache:  autocert.DirCache(gf.TLSCache),
+				Email:  gf.TLSEmail,
+				HostPolicy: func(_ context.Context, host string) error {
+					s := vm.current()
+					h := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+					if s != nil && s.acmeHosts[h] {
+						return nil
+					}
+					return fmt.Errorf("acme/autocert: host %q not configured in Concertfile", host)
+				},
+			}
+			if gf.TLSStaging {
+				mgr.Client = &acme.Client{DirectoryURL: letsEncryptStagingURL}
+			}
 		}
 	}
 
@@ -787,11 +890,14 @@ func (vm *vhostManager) buildTLS() (*tls.Config, *autocert.Manager, error) {
 				return nil, errors.New("no active configuration")
 			}
 			sn := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(hello.ServerName)), ".")
-			if sr, ok := s.byHost[sn]; ok && sr.cert != nil {
+			if sr := s.matchSiteNoDefault(sn); sr != nil && sr.cert != nil {
 				return sr.cert.getCertificate(hello)
 			}
 			if s.globalCert != nil {
 				return s.globalCert.getCertificate(hello)
+			}
+			if dnsMgr != nil {
+				return dnsMgr.GetCertificate(hello)
 			}
 			if mgr != nil {
 				return mgr.GetCertificate(hello)
@@ -802,7 +908,7 @@ func (vm *vhostManager) buildTLS() (*tls.Config, *autocert.Manager, error) {
 			return nil, fmt.Errorf("no TLS certificate configured for %q", hello.ServerName)
 		},
 	}
-	return tc, mgr, nil
+	return tc, mgr, closeFn, nil
 }
 
 func (vm *vhostManager) httpRedirectHandler(listenAddr string, mgr *autocert.Manager) http.Handler {
@@ -815,7 +921,7 @@ func (vm *vhostManager) httpRedirectHandler(listenAddr string, mgr *autocert.Man
 			return
 		}
 		s := vm.current()
-		if s == nil || (s.byHost[host] == nil && s.defaultSite == nil) {
+		if s == nil || s.matchSite(host) == nil {
 			http.Error(w, "host not configured for HTTPS", http.StatusMisdirectedRequest)
 			return
 		}
@@ -974,9 +1080,12 @@ func runVhost(ctx context.Context, baseCfg config) error {
 		listenAddr = ":8080"
 	}
 
-	tlsCfg, acmeMgr, err := vm.buildTLS()
+	tlsCfg, acmeMgr, tlsClose, err := vm.buildTLS(ctx)
 	if err != nil {
 		return err
+	}
+	if tlsClose != nil {
+		defer tlsClose()
 	}
 	if gf.HTTP3 && tlsCfg == nil {
 		return errors.New("http3 requires TLS (global tls_cert/tls_key, per-site tls_cert/tls_key, or tls_cache with ACME domains)")

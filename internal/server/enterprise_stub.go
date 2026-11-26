@@ -12,6 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/andreimerlescu/concert/internal/acme"
+	"github.com/andreimerlescu/concert/internal/bidding"
+	"github.com/andreimerlescu/concert/internal/drop"
 	"github.com/andreimerlescu/room"
 	"github.com/gin-gonic/gin"
 )
@@ -131,12 +134,23 @@ func registerHopControl(*gin.Engine, *generation) {}
 func registerConcertRoutes(r *gin.Engine, g *generation) {
 	r.Any("/_concert/*path", func(c *gin.Context) {
 		p := strings.TrimPrefix(c.Request.URL.Path, "/_concert")
+		if g.handleChallengeSubroute(c, p) {
+			return
+		}
+		if g.handleBiddingSubroute(c, p) {
+			return
+		}
 		if p == "/config" && c.Request.Method == http.MethodGet {
 			c.Header("Cache-Control", "no-store")
-			c.JSON(http.StatusOK, gin.H{
+			conf := gin.H{
 				"enabled":         false,
 				"legacy_skip_url": g.cfg.skipURL,
-			})
+			}
+			wrCfg := g.a.waitingRoomConfig()
+			if wrCfg.Broadcast.Message != "" {
+				conf["broadcast"] = wrCfg.Broadcast
+			}
+			c.JSON(http.StatusOK, conf)
 			return
 		}
 		var file, ct string
@@ -186,6 +200,9 @@ func (c *config) normalizeEnterprise() error {
 	if c.redisAddr != "" {
 		return fmt.Errorf("-redis-addr is provided by econcert")
 	}
+	if c.kvAddr != "" {
+		return fmt.Errorf("-kv-addr is provided by econcert")
+	}
 	if c.fastlaneFile != "" {
 		return fmt.Errorf("-fastlane-config is provided by econcert")
 	}
@@ -208,10 +225,16 @@ func (a *app) initEnterpriseServices(config)                                    
 func (a *app) startEnterpriseLoops()                                              {}
 func (a *app) closeEnterpriseOnStartupErr()                                       {}
 func (a *app) maybeBenchOnStart(context.Context, config)                          {}
-func (a *app) notifyAlert(alertEvent)                                             {}
+func (a *app) notifyAlert(ev alertEvent)                                          { a.dispatchChatOps(ev) }
 func (a *app) recordAudit(auditEvent)                                             {}
 func (a *app) publishClusterBan(banTarget, int64, int)                            {}
 func (a *app) publishClusterUnban(banTarget)                                      {}
+func (a *app) recordSharedQueueJoin(string, string, time.Duration)                {}
+func (a *app) purgeSharedQueue(context.Context, string)                           {}
+func (a *app) acmeKVSync() acme.KVBundleSync                                      { return nil }
+func (a *app) dropKVSync() drop.StateSync                                         { return nil }
+func (a *app) biddingClusterSync() bidding.ClusterSync                            { return nil }
+func (a *app) newBiddingSettler() bidding.PaymentSettler                          { return failClosedBiddingSettler{} }
 func (a *app) emailScopeLabel(scope netip.Prefix) string                          { return scope.String() }
 func (a *app) emailIPLabel(ip netip.Addr) string                                  { return ip.String() }
 func (a *app) eraseMailerIP(netip.Addr, string) int                               { return 0 }
@@ -262,6 +285,10 @@ func movedEnterpriseFlags() map[string]string {
 		"portal-trusted-proxies":     "econcert",
 		"enterprise-hardened":        "econcert",
 		"audit-log":                  "econcert",
+		"kv-addr":                    "econcert",
+		"kv-tls":                     "econcert",
+		"kv-prefix":                  "econcert",
+		"kv-shared-queue":            "econcert",
 		"redis-addr":                 "econcert",
 		"redis-tls":                  "econcert",
 		"redis-prefix":               "econcert",

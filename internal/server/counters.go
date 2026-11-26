@@ -48,4 +48,13 @@ type counters struct {
 	clusterSyncRecv     atomic.Int64
 	clusterSyncErrors   atomic.Int64
 	emailClusterDeduped atomic.Int64
+
+	guardQuotaRejected   atomic.Int64
+	guardShed            atomic.Int64
+	guardRateLimit       atomic.Int64
+	guardGeoBlocked      atomic.Int64
+	guardChallengePassed atomic.Int64
+	guardChallengeFailed atomic.Int64
+
+	biddingRejected atomic.Int64
 }

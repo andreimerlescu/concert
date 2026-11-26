@@ -3,14 +3,20 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
+	"errors"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/andreimerlescu/concert/internal/cache"
 	"github.com/andreimerlescu/concert/internal/fcgi"
 	"github.com/andreimerlescu/concert/internal/microcache"
 	"github.com/andreimerlescu/concert/internal/wp"
@@ -20,7 +26,28 @@ import (
 func hasWordPressEdition() bool { return true }
 
 type fcgiTransport = fcgi.Transport
-type pageMicroCache = microcache.Cache
+
+// pageMicroCache wraps either the in-process internal/microcache.Cache (for
+// small/single hosts) or a pooled external internal/cache.Client (when
+// -cache-addr is configured), exposing a uniform cache.PageCache purge port
+// with fail-open degradation on external daemon outage.
+type pageMicroCache struct {
+	local      *microcache.Cache
+	remote     *cache.Client
+	port       cache.PageCache
+	bypassGate *microcache.Cache
+	ttl        time.Duration
+	maxEntry   int64
+	stats      *counters
+
+	sfMu     sync.Mutex
+	inflight map[string]*remoteInflight
+}
+
+type remoteInflight struct {
+	done  chan struct{}
+	entry *cache.Entry
+}
 
 func isFastCGITarget(u *url.URL) bool {
 	return fcgi.IsFastCGI(u)
@@ -89,15 +116,50 @@ func withFastCGIStream(req *http.Request) *http.Request {
 	return req.WithContext(fcgi.WithStream(req.Context()))
 }
 
-func buildMicroCache(cfg config, stats *counters) *pageMicroCache {
+// buildMicroCache constructs the generation's page cache: an external pooled
+// concert-cache client when -cache-addr is configured, or the bounded
+// in-process microcache when -micro-cache-ttl > 0.
+func buildMicroCache(cfg config, stats *counters) (*pageMicroCache, error) {
+	if addr := strings.TrimSpace(cfg.cacheAddr); addr != "" {
+		var tlsCfg *tls.Config
+		if cfg.cacheTLS && !strings.HasPrefix(addr, "/") && !strings.HasPrefix(addr, "unix://") {
+			host, _, _ := net.SplitHostPort(addr)
+			tlsCfg = &tls.Config{
+				MinVersion: tls.VersionTLS12,
+				ServerName: host,
+			}
+		}
+		ttl := cfg.microCacheTTL
+		if ttl <= 0 {
+			ttl = 15 * time.Second
+		}
+		cli, err := cache.NewClient(cache.ClientConfig{
+			Address:    addr,
+			Secret:     cfg.cacheSecret,
+			TLSConfig:  tlsCfg,
+			FailClosed: false,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return &pageMicroCache{
+			remote:     cli,
+			port:       cli,
+			bypassGate: microcache.New(microcache.Config{TTL: ttl, MaxBytes: microcache.DefaultMaxEntryBytes}),
+			ttl:        ttl,
+			maxEntry:   microcache.DefaultMaxEntryBytes,
+			stats:      stats,
+			inflight:   make(map[string]*remoteInflight),
+		}, nil
+	}
 	if cfg.microCacheTTL <= 0 {
-		return nil
+		return nil, nil
 	}
 	maxBytes := int64(cfg.microCacheMaxMB) << 20
 	if maxBytes <= 0 {
 		maxBytes = microcache.DefaultMaxBytes
 	}
-	return microcache.New(microcache.Config{
+	mc := microcache.New(microcache.Config{
 		TTL:           cfg.microCacheTTL,
 		MaxBytes:      maxBytes,
 		MaxEntryBytes: microcache.DefaultMaxEntryBytes,
@@ -122,10 +184,260 @@ func buildMicroCache(cfg config, stats *counters) *pageMicroCache {
 			}
 		},
 	})
+	return &pageMicroCache{
+		local:    mc,
+		port:     mc.AsPageCache(),
+		ttl:      cfg.microCacheTTL,
+		maxEntry: microcache.DefaultMaxEntryBytes,
+		stats:    stats,
+	}, nil
 }
 
 func sameMicroCache(a, b config) bool {
-	return a.microCacheTTL == b.microCacheTTL && a.microCacheMaxMB == b.microCacheMaxMB
+	secEq := (a.cacheSecret.IsZero() && b.cacheSecret.IsZero()) ||
+		(!a.cacheSecret.IsZero() && !b.cacheSecret.IsZero() && a.cacheSecret.Equal([]byte(b.cacheSecret.Reveal())))
+	return a.microCacheTTL == b.microCacheTTL &&
+		a.microCacheMaxMB == b.microCacheMaxMB &&
+		a.cacheAddr == b.cacheAddr &&
+		a.cacheTLS == b.cacheTLS &&
+		secEq
+}
+
+func (p *pageMicroCache) close() {
+	if p == nil || p.port == nil {
+		return
+	}
+	_ = p.port.Close()
+}
+
+func (p *pageMicroCache) bytesUsed() int64 {
+	if p == nil {
+		return 0
+	}
+	if p.local != nil {
+		return p.local.BytesUsed()
+	}
+	if p.remote != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+		st, err := p.remote.Stats(ctx)
+		cancel()
+		if err == nil {
+			return st.UsedBytes
+		}
+	}
+	return 0
+}
+
+// purge removes entries from the active page cache (built-in microcache or
+// external concert-cache daemon) via the cache.PageCache port.
+func (p *pageMicroCache) purge(ctx context.Context, mode, host, target string) (int, error) {
+	if p == nil || p.port == nil {
+		return 0, errors.New("page cache is not enabled")
+	}
+	switch mode {
+	case "url":
+		return p.port.PurgeURL(ctx, host, target)
+	case "prefix":
+		return p.port.PurgePrefix(ctx, host, target)
+	case "tag":
+		return p.port.PurgeTag(ctx, target)
+	case "all":
+		return p.port.PurgeAll(ctx)
+	default:
+		return 0, errors.New(`mode must be "url", "prefix", "tag", or "all"`)
+	}
+}
+
+func (p *pageMicroCache) serve(w http.ResponseWriter, r *http.Request, fetch func(http.ResponseWriter, *http.Request)) bool {
+	if p == nil {
+		return false
+	}
+	if p.local != nil {
+		return p.local.Serve(w, r, fetch)
+	}
+	return p.serveRemote(w, r, fetch)
+}
+
+// serveRemote serves anonymous cacheable GET/HEAD requests against an external
+// concert-cache daemon with in-process singleflight stampede collapse and
+// fail-open fallback when the cache daemon is unavailable.
+func (p *pageMicroCache) serveRemote(w http.ResponseWriter, r *http.Request, fetch func(http.ResponseWriter, *http.Request)) bool {
+	if p.remote == nil || p.bypassGate.ShouldBypassRequest(r) {
+		if p.stats != nil {
+			p.stats.microCacheBypasses.Add(1)
+		}
+		w.Header().Set("X-Concert-Cache", "BYPASS")
+		return false
+	}
+
+	key := microcache.BuildKey(r)
+	if ent, ok, err := p.remote.Get(r.Context(), key); err == nil && ok {
+		if p.stats != nil {
+			p.stats.microCacheHits.Add(1)
+		}
+		writeCachedPageEntry(w, r.Method, ent, "HIT")
+		return true
+	}
+
+	p.sfMu.Lock()
+	if existing, ok := p.inflight[key]; ok {
+		p.sfMu.Unlock()
+		select {
+		case <-existing.done:
+		case <-r.Context().Done():
+			return false
+		}
+		if existing.entry != nil {
+			if p.stats != nil {
+				p.stats.microCacheCoalesced.Add(1)
+				p.stats.microCacheHits.Add(1)
+			}
+			writeCachedPageEntry(w, r.Method, *existing.entry, "HIT")
+			return true
+		}
+		return false
+	}
+	call := &remoteInflight{done: make(chan struct{})}
+	p.inflight[key] = call
+	p.sfMu.Unlock()
+
+	var stored *cache.Entry
+	defer func() {
+		call.entry = stored
+		p.sfMu.Lock()
+		delete(p.inflight, key)
+		p.sfMu.Unlock()
+		close(call.done)
+	}()
+
+	capW := &remoteCaptureWriter{
+		dst:      w,
+		hdr:      make(http.Header),
+		maxBytes: p.maxEntry,
+	}
+	fetch(capW, r)
+	if capW.passthrough {
+		// Response exceeded maxEntry or streamed directly; already written to dst.
+		if p.stats != nil {
+			p.stats.microCacheBypasses.Add(1)
+		}
+		return true
+	}
+	status := capW.status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	body := capW.buf.Bytes()
+	if microcache.ShouldCacheResponse(status, capW.hdr, int64(len(body)), p.maxEntry) {
+		ent := cache.Entry{
+			Key:     key,
+			Status:  status,
+			Headers: cloneCacheHeaders(capW.hdr),
+			Body:    append([]byte(nil), body...),
+			Tags:    microcache.ExtractTags(capW.hdr),
+			TTL:     p.ttl,
+		}
+		_ = p.remote.Put(r.Context(), ent) // fail-open client absorbs transport errors
+		stored = &ent
+		if p.stats != nil {
+			p.stats.microCacheMisses.Add(1)
+		}
+		writeCachedPageEntry(w, r.Method, ent, "MISS")
+		return true
+	}
+
+	if p.stats != nil {
+		p.stats.microCacheBypasses.Add(1)
+	}
+	dstH := w.Header()
+	for k, vs := range capW.hdr {
+		dstH[k] = append([]string(nil), vs...)
+	}
+	dstH.Set("X-Concert-Cache", "BYPASS")
+	w.WriteHeader(status)
+	if r.Method != http.MethodHead && len(body) > 0 {
+		_, _ = w.Write(body)
+	}
+	return true
+}
+
+func cloneCacheHeaders(src http.Header) http.Header {
+	dst := make(http.Header, len(src))
+	for k, vs := range src {
+		if strings.EqualFold(k, "Set-Cookie") {
+			continue
+		}
+		dst[k] = append([]string(nil), vs...)
+	}
+	return dst
+}
+
+func writeCachedPageEntry(w http.ResponseWriter, method string, ent cache.Entry, cacheStatus string) {
+	dst := w.Header()
+	for k, vs := range ent.Headers {
+		dst[k] = append([]string(nil), vs...)
+	}
+	dst.Set("X-Concert-Cache", cacheStatus)
+	status := ent.Status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	w.WriteHeader(status)
+	if method != http.MethodHead && len(ent.Body) > 0 {
+		_, _ = w.Write(ent.Body)
+	}
+}
+
+type remoteCaptureWriter struct {
+	dst         http.ResponseWriter
+	hdr         http.Header
+	buf         bytes.Buffer
+	status      int
+	maxBytes    int64
+	passthrough bool
+}
+
+func (w *remoteCaptureWriter) Header() http.Header {
+	if w.passthrough {
+		return w.dst.Header()
+	}
+	return w.hdr
+}
+
+func (w *remoteCaptureWriter) WriteHeader(code int) {
+	if w.passthrough {
+		w.dst.WriteHeader(code)
+		return
+	}
+	if w.status == 0 {
+		w.status = code
+	}
+}
+
+func (w *remoteCaptureWriter) Write(p []byte) (int, error) {
+	if w.passthrough {
+		return w.dst.Write(p)
+	}
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	if int64(w.buf.Len()+len(p)) > w.maxBytes {
+		w.passthrough = true
+		dstH := w.dst.Header()
+		for k, vs := range w.hdr {
+			dstH[k] = append([]string(nil), vs...)
+		}
+		dstH.Set("X-Concert-Cache", "BYPASS")
+		w.dst.WriteHeader(w.status)
+		if w.buf.Len() > 0 {
+			if _, err := w.dst.Write(w.buf.Bytes()); err != nil {
+				return 0, err
+			}
+			w.buf.Reset()
+		}
+		return w.dst.Write(p)
+	}
+	return w.buf.Write(p)
 }
 
 // admitOn200Writer issues or refreshes concert_admit on 200 OK micro-cache
@@ -170,9 +482,10 @@ func (w *admitOn200Writer) Flush() {
 func (w *admitOn200Writer) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // microCacheMiddleware serves eligible anonymous GET/HEAD page requests from
-// the bounded in-memory micro-cache (with singleflight stampede coalescing)
-// ahead of the waiting room. Logged-in, cart, checkout, POST, and private
-// responses bypass cleanly into the waiting room and priority lane.
+// the bounded in-memory micro-cache or external concert-cache daemon (with
+// singleflight stampede coalescing) ahead of the waiting room. Logged-in, cart,
+// checkout, POST, and private responses bypass cleanly into the waiting room
+// and priority lane.
 func (g *generation) microCacheMiddleware(c *gin.Context) {
 	if g.microCache == nil {
 		return
@@ -182,7 +495,7 @@ func (g *generation) microCacheMiddleware(c *gin.Context) {
 		return
 	}
 	aw := &admitOn200Writer{ResponseWriter: c.Writer, req: c.Request, admit: g.a.admit}
-	handled := g.microCache.Serve(aw, c.Request, func(w http.ResponseWriter, r *http.Request) {
+	handled := g.microCache.serve(aw, c.Request, func(w http.ResponseWriter, r *http.Request) {
 		// Ensure Concert-Priority grants can still bind if the leader hits a
 		// non-cacheable origin response carrying Concert-Priority.
 		req := selectBackendForRequest(r, g.upstreams)
@@ -210,7 +523,7 @@ func writeWordPressMetrics(b *strings.Builder, g *generation, stats *counters) {
 	writePromMetric(b, "concert_microcache_coalesced_total", "counter", "Concurrent cold-URL requests collapsed via singleflight onto one upstream fetch.", stats.microCacheCoalesced.Load())
 	var mcBytes int64
 	if g != nil && g.microCache != nil {
-		mcBytes = g.microCache.BytesUsed()
+		mcBytes = g.microCache.bytesUsed()
 	}
 	writePromMetric(b, "concert_microcache_bytes", "gauge", "Current byte footprint of the in-memory anonymous micro-cache.", mcBytes)
 }
@@ -229,6 +542,12 @@ func wordpressSettingDefs() []settingDef {
 		{key: "micro_cache_max_mb", flag: "micro-cache-max-mb", env: "CONCERT_MICRO_CACHE_MAX_MB", group: groupOrigin, label: "Micro-cache max memory (MiB)",
 			def: 64, usage: "maximum memory budget in MiB for the in-memory anonymous GET micro-cache (1-4096)",
 			ptr: func(c *config) any { return &c.microCacheMaxMB }, check: intBetween(1, 4096)},
+		{key: "cache_addr", flag: "cache-addr", env: "CONCERT_CACHE_ADDR", group: groupOrigin, label: "External concert-cache address", restart: true,
+			def: "", usage: "TCP host:port or Unix socket path of external concert-cache daemon (empty uses built-in in-process micro-cache; requires CONCERT_CACHE_SECRET[_FILE])",
+			ptr: func(c *config) any { return &c.cacheAddr }},
+		{key: "cache_tls", flag: "cache-tls", env: "CONCERT_CACHE_TLS", group: groupOrigin, label: "External concert-cache TLS", restart: true,
+			def: false, usage: "use TLS 1.2+ when connecting to external concert-cache over TCP",
+			ptr: func(c *config) any { return &c.cacheTLS }},
 		{key: "wp_preset", flag: "wp-preset", env: "CONCERT_WP_PRESET", group: groupOrigin, label: "WordPress security & asset preset", restart: true,
 			def: false, usage: "apply opinionated WordPress/WooCommerce asset gating, /xmlrpc.php denial, and uploads PHP execution block",
 			ptr: func(c *config) any { return &c.wpPreset }},

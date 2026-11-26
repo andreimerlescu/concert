@@ -18,6 +18,347 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// waitingRoomSignalHeaders wraps gated catch-all responses ahead of room so
+// every queued waiting-room response (HTML or JSON, regardless of whether the
+// status is 200, 429, or 503) carries explicit Concert queue signal headers
+// (X-Concert-Queue, Retry-After, X-Concert-Position, Cache-Control: no-store,
+// and X-Concert-Status-Url when non-default) and clears any incoming
+// concert_admit cookie.
+//
+// Registered routes (c.FullPath() != ""), admitted/proxied responses
+// (ctxAdmitted), capacity-breaker 503s (ctxRoomFull), and keyed agent
+// responses (handled in agent.go) pass through untouched without
+// X-Concert-Queue.
+//
+// # Parameters
+//
+//   - a: Owning *app providing room ticket lookup and admitter cookie clearing.
+//   - retryAfter: Positive Retry-After interval in seconds.
+//
+// # Returns
+//
+// A gin.HandlerFunc middleware attached ahead of apiQueueResponses and room.
+//
+// # Example
+//
+//	r.Use(waitingRoomSignalHeaders(g.a, cfg.retryAfter))
+//
+// # Used By
+//
+// Called by buildRouter in internal/server/router.go.
+func waitingRoomSignalHeaders(a *app, retryAfter int) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.FullPath() != "" || c.GetString(ctxAgentKey) != "" {
+			c.Next()
+			return
+		}
+		c.Writer = &waitingRoomHeaderWriter{
+			ResponseWriter: c.Writer,
+			a:              a,
+			c:              c,
+			retryAfter:     retryAfter,
+		}
+		c.Next()
+	}
+}
+
+// waitingRoomHeaderWriter intercepts the first header or body write on gated
+// catch-all requests and injects Concert's explicit waiting-room signal
+// headers exclusively when room emitted a queued waiting-room response.
+//
+// Admitted upstream responses (ctxAdmitted), room-full capacity-breaker 503s
+// (ctxRoomFull), and non-queued error responses pass through unmodified so
+// streaming, flushing, hijacking, and upstream 503 semantics are preserved.
+type waitingRoomHeaderWriter struct {
+	gin.ResponseWriter
+	a          *app
+	c          *gin.Context
+	retryAfter int
+	statusURL  string
+	decided    bool
+}
+
+// apply inspects status code and headers once before the first write and adds
+// waiting-room signal headers only when the response represents a queued
+// waiting-room response.
+//
+// # Parameters
+//
+//   - code: HTTP status code about to be written.
+//
+// # Example
+//
+//	w.apply(http.StatusOK)
+//
+// # Used By
+//
+// Called by waitingRoomHeaderWriter write methods in internal/server/api.go.
+func (w *waitingRoomHeaderWriter) apply(code int) {
+	if w.decided {
+		return
+	}
+	w.decided = true
+	if w.c == nil || w.c.GetBool(ctxWaitingHeadersApplied) || w.c.GetBool(ctxSkipWaitingHeaders) {
+		return
+	}
+	if !isQueuedWaitingRoomResponse(w.a, w.c, w.ResponseWriter.Header(), code) {
+		return
+	}
+	applyWaitingRoomHeaders(w.a, w.c, w.ResponseWriter, w.retryAfter, w.statusURL)
+}
+
+// WriteHeader applies waiting-room signal headers when appropriate, then
+// delegates to the underlying gin.ResponseWriter.
+//
+// # Parameters
+//
+//   - code: HTTP status code.
+//
+// # Example
+//
+//	w.WriteHeader(http.StatusOK)
+//
+// # Used By
+//
+// Implements http.ResponseWriter / gin.ResponseWriter.
+func (w *waitingRoomHeaderWriter) WriteHeader(code int) {
+	w.apply(code)
+	w.ResponseWriter.WriteHeader(code)
+}
+
+// WriteHeaderNow ensures waiting-room signal headers are evaluated before
+// flushing headers to the wire.
+//
+// # Parameters
+//
+// None.
+//
+// # Example
+//
+//	w.WriteHeaderNow()
+//
+// # Used By
+//
+// Implements gin.ResponseWriter.
+func (w *waitingRoomHeaderWriter) WriteHeaderNow() {
+	if !w.decided {
+		w.apply(w.ResponseWriter.Status())
+	}
+	w.ResponseWriter.WriteHeaderNow()
+}
+
+// Write ensures waiting-room signal headers are evaluated on implicit header
+// writes before writing b.
+//
+// # Parameters
+//
+//   - b: Response body bytes.
+//
+// # Returns
+//
+// Bytes written and any write error from the wrapped ResponseWriter.
+//
+// # Example
+//
+//	_, _ = w.Write([]byte("ok"))
+//
+// # Used By
+//
+// Implements io.Writer / http.ResponseWriter.
+func (w *waitingRoomHeaderWriter) Write(b []byte) (int, error) {
+	if !w.decided {
+		w.apply(w.ResponseWriter.Status())
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+// WriteString ensures waiting-room signal headers are evaluated on implicit
+// header writes before writing s.
+//
+// # Parameters
+//
+//   - s: Response body string.
+//
+// # Returns
+//
+// Bytes written and any write error from the wrapped ResponseWriter.
+//
+// # Example
+//
+//	_, _ = w.WriteString("ok")
+//
+// # Used By
+//
+// Implements gin.ResponseWriter.
+func (w *waitingRoomHeaderWriter) WriteString(s string) (int, error) {
+	if !w.decided {
+		w.apply(w.ResponseWriter.Status())
+	}
+	return w.ResponseWriter.WriteString(s)
+}
+
+// Flush ensures waiting-room signal headers are evaluated before flushing the
+// underlying writer.
+//
+// # Parameters
+//
+// None.
+//
+// # Example
+//
+//	w.Flush()
+//
+// # Used By
+//
+// Implements http.Flusher / gin.ResponseWriter.
+func (w *waitingRoomHeaderWriter) Flush() {
+	if !w.decided {
+		w.apply(w.ResponseWriter.Status())
+	}
+	w.ResponseWriter.Flush()
+}
+
+// Unwrap exposes the underlying http.ResponseWriter for http.ResponseController.
+//
+// # Parameters
+//
+// None.
+//
+// # Returns
+//
+// The wrapped gin.ResponseWriter as an http.ResponseWriter.
+//
+// # Example
+//
+//	rw := w.Unwrap()
+//
+// # Used By
+//
+// Used by net/http.ResponseController.
+func (w *waitingRoomHeaderWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// isQueuedWaitingRoomResponse reports whether a response with status code and
+// headers h on context c is a genuine queued waiting-room response (rather
+// than an admitted upstream response, capacity-breaker 503, ban/rate-limit
+// denial, or bare non-queued error).
+//
+// # Parameters
+//
+//   - a: Owning *app (may be nil in isolated unit tests).
+//   - c: Request *gin.Context (may be nil in isolated unit tests).
+//   - h: Response headers written so far (may be nil).
+//   - code: HTTP status code being written.
+//
+// # Returns
+//
+// true only when the response is a queued waiting-room page/payload.
+//
+// # Example
+//
+//	queued := isQueuedWaitingRoomResponse(a, c, w.Header(), http.StatusOK)
+//
+// # Used By
+//
+// Called by waitingRoomHeaderWriter.apply and apiQueueWriter.WriteHeader in
+// internal/server/api.go.
+func isQueuedWaitingRoomResponse(a *app, c *gin.Context, h http.Header, code int) bool {
+	if c == nil || c.FullPath() != "" || c.GetBool(ctxAdmitted) || c.GetBool(ctxRoomFull) {
+		return false
+	}
+	if c.GetString(ctxAgentKey) != "" {
+		return false
+	}
+	switch code {
+	case http.StatusOK, http.StatusTooManyRequests, http.StatusServiceUnavailable:
+	default:
+		return false
+	}
+	if h != nil && issuedTicket(h) != "" {
+		return true
+	}
+	if code == http.StatusOK {
+		return true
+	}
+	// For 429 or 503 (not ctxRoomFull), distinguish a queued waiting-room
+	// response from a bare timeout/error 503 or rate-limit 429 by verifying
+	// either HTML waiting-room content or an active queued room_ticket.
+	if h != nil && strings.HasPrefix(h.Get("Content-Type"), "text/html") {
+		return true
+	}
+	if c.Request != nil && a != nil && a.room != nil {
+		if ck, err := c.Request.Cookie("room_ticket"); err == nil && ck.Value != "" {
+			if _, ok := a.room.Ticket(ck.Value); ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// applyWaitingRoomHeaders sets Concert's explicit waiting-room headers
+// (X-Concert-Queue, Retry-After, Cache-Control: no-store, optional
+// X-Concert-Position and non-default X-Concert-Status-Url) and clears any
+// incoming concert_admit cookie with Max-Age=0.
+//
+// # Parameters
+//
+//   - a: Owning *app providing room ticket lookup and admitter clearing.
+//   - c: Request *gin.Context (may be nil).
+//   - w: Destination http.ResponseWriter; must be non-nil.
+//   - retryAfter: Positive retry interval in seconds (clamped to >= 1).
+//   - statusURL: Optional status endpoint path; omitted when empty or "/queue/status".
+//
+// # Example
+//
+//	applyWaitingRoomHeaders(a, c, w, 5, "")
+//
+// # Used By
+//
+// Called by waitingRoomHeaderWriter.apply and apiQueueWriter.WriteHeader in
+// internal/server/api.go.
+func applyWaitingRoomHeaders(a *app, c *gin.Context, w http.ResponseWriter, retryAfter int, statusURL string) {
+	if w == nil {
+		return
+	}
+	if retryAfter < 1 {
+		retryAfter = 1
+	}
+	h := w.Header()
+	h.Set(headerConcertQueue, "1")
+	h.Set("Retry-After", strconv.Itoa(retryAfter))
+	h.Set("Cache-Control", "no-store")
+
+	tok := issuedTicket(h)
+	if tok == "" && c != nil && c.Request != nil {
+		if ck, err := c.Request.Cookie("room_ticket"); err == nil {
+			tok = ck.Value
+		}
+	}
+	if tok != "" && a != nil && a.room != nil {
+		if ti, ok := a.room.Ticket(tok); ok {
+			pos := max(ti.Position, 0)
+			h.Set(headerConcertPosition, strconv.FormatInt(pos, 10))
+		}
+	}
+
+	if statusURL != "" && statusURL != defaultQueueStatusURL {
+		h.Set(headerConcertStatusURL, statusURL)
+	} else {
+		h.Del(headerConcertStatusURL)
+	}
+
+	// Never leave a dead, forged, or re-queued concert_admit cookie alongside
+	// a waiting-room response carrying room_ticket.
+	if a != nil && a.admit != nil && c != nil && c.Request != nil {
+		if _, err := c.Request.Cookie(admitCookie); err == nil {
+			a.admit.clear(w)
+		}
+	}
+	if c != nil {
+		c.Set(ctxWaitingHeadersApplied, true)
+	}
+}
+
 // apiQueueResponses rewrites room's own responses (waiting-room HTML, breaker
 // 503) into JSON for clients that did not ask for HTML. It applies only to
 // gated catch-all requests: registered routes (/queue/status, /_room/*,
@@ -25,7 +366,7 @@ import (
 //
 // Keyed requests (agents; see agent.go) are not cookie clients: agentGate
 // shapes their responses, with no cookies, whatever -api-json says.
-func apiQueueResponses(_ *app, retryAfter int) gin.HandlerFunc {
+func apiQueueResponses(a *app, retryAfter int) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c.FullPath() != "" || wantsHTML(c.Request) || c.GetString(ctxAgentKey) != "" {
 			c.Next()
@@ -33,6 +374,7 @@ func apiQueueResponses(_ *app, retryAfter int) gin.HandlerFunc {
 		}
 		c.Writer = &apiQueueWriter{
 			ResponseWriter: c.Writer,
+			a:              a,
 			c:              c,
 			retryAfter:     retryAfter,
 		}
@@ -50,6 +392,7 @@ func wantsHTML(r *http.Request) bool {
 // untouched, including streaming, flushing, and connection hijacking for upgrades.
 type apiQueueWriter struct {
 	gin.ResponseWriter
+	a          *app
 	c          *gin.Context
 	retryAfter int
 	decided    bool
@@ -73,14 +416,30 @@ func (w *apiQueueWriter) WriteHeader(code int) {
 	// room is answering this request itself. Keep its Set-Cookie headers so
 	// clients with a cookie jar hold their place, replace everything else.
 	w.swallow = true
-	status, body := w.translate(code)
-
 	h := w.ResponseWriter.Header()
+	queued := (code == http.StatusOK || code == http.StatusServiceUnavailable || code == http.StatusTooManyRequests) &&
+		isQueuedWaitingRoomResponse(w.a, w.c, h, code)
+
+	var status int
+	var body []byte
+	if queued {
+		status, body = w.translateQueued()
+	} else {
+		status, body = w.translate(code)
+	}
+
 	h.Del("Content-Length")
 	h.Set("Content-Type", "application/json; charset=utf-8")
-	h.Set("Cache-Control", "no-store")
-	if status == http.StatusTooManyRequests || status == http.StatusServiceUnavailable {
-		h.Set("Retry-After", strconv.Itoa(w.retryAfter))
+	if queued {
+		applyWaitingRoomHeaders(w.a, w.c, w.ResponseWriter, w.retryAfter, defaultQueueStatusURL)
+	} else {
+		if w.c != nil {
+			w.c.Set(ctxSkipWaitingHeaders, true)
+		}
+		h.Set("Cache-Control", "no-store")
+		if status == http.StatusTooManyRequests || status == http.StatusServiceUnavailable {
+			h.Set("Retry-After", strconv.Itoa(w.retryAfter))
+		}
 	}
 
 	w.ResponseWriter.WriteHeader(status)
@@ -126,16 +485,47 @@ func (w *apiQueueWriter) Flush() {
 
 func (w *apiQueueWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
+// translateQueued formats Concert's backward-compatible queued JSON payload
+// returned to non-HTML clients under -api-json.
+//
+// # Parameters
+//
+// None.
+//
+// # Returns
+//
+// HTTP 429 Too Many Requests and JSON bytes with queued=true.
+//
+// # Example
+//
+//	status, body := w.translateQueued()
+//
+// # Used By
+//
+// Called by apiQueueWriter.WriteHeader and apiQueueWriter.translate in
+// internal/server/api.go.
+func (w *apiQueueWriter) translateQueued() (int, []byte) {
+	payload := gin.H{
+		"queued":              true,
+		"status_url":          defaultQueueStatusURL,
+		"retry_after_seconds": w.retryAfter,
+		"hint":                "keep the room_ticket cookie and retry to hold your position",
+	}
+	if w.a != nil {
+		if g := w.a.current(); g != nil && g.biddingEnabledForRequest(w.c) {
+			if auctionOffer, ok := g.biddingOfferForRequest(w.c); ok {
+				payload["auction"] = auctionOffer
+			}
+		}
+	}
+	return http.StatusTooManyRequests, mustJSON(payload)
+}
+
 func (w *apiQueueWriter) translate(code int) (int, []byte) {
 	switch code {
 	case http.StatusOK:
 		// The waiting-room page. The client is queued.
-		return http.StatusTooManyRequests, mustJSON(gin.H{
-			"queued":              true,
-			"status_url":          "/queue/status",
-			"retry_after_seconds": w.retryAfter,
-			"hint":                "keep the room_ticket cookie and retry to hold your position",
-		})
+		return w.translateQueued()
 	case http.StatusServiceUnavailable:
 		// Admission timed out or room fell back to a bare 503. Queue-full
 		// rejections are handled and alerted solely via FullResponder / EventReject.

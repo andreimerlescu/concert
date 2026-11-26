@@ -442,23 +442,14 @@ func main() {
 	}
 }
 
-const usage = "usage: concert-client [--nft | --direct | --wait PATH]"
+const usage = "usage: concert-client [--nft | --direct | --wait PATH [-bid -max-bid USD [-bid-chain xrpl|stellar|hedera|solana] [-bid-asset ASSET] [-bid-poll-interval 1s]]]"
 
 func run(ctx context.Context, args []string, getenv func(string) string) error {
-	nft, direct, waitPath := false, false, ""
-	for i := 0; i < len(args); i++ {
-		switch {
-		case args[i] == "--nft" && !nft && !direct && waitPath == "":
-			nft = true
-		case args[i] == "--direct" && !nft && !direct && waitPath == "":
-			direct = true
-		case args[i] == "--wait" && !nft && !direct && waitPath == "" && i+1 < len(args) && strings.HasPrefix(args[i+1], "/"):
-			waitPath = args[i+1]
-			i++
-		default:
-			return errors.New(usage)
-		}
+	opts, err := parseCLIArgs(args)
+	if err != nil {
+		return err
 	}
+	nft, direct, waitPath := opts.nft, opts.direct, opts.waitPath
 	origin := strings.TrimRight(env("CONCERT_ORIGIN", "http://127.0.0.1:8080"), "/")
 	if err := checkOrigin(origin); err != nil {
 		return err
@@ -472,7 +463,7 @@ func run(ctx context.Context, args []string, getenv func(string) string) error {
 		return err
 	}
 	if waitPath != "" {
-		return waitInLine(ctx, origin, network, file, waitPath, getenv, os.Stdout)
+		return waitInLineWithBidding(ctx, origin, network, file, opts, getenv, os.Stdout)
 	}
 	unlock, err := lockState(file)
 	if err != nil {
@@ -541,7 +532,71 @@ func lockState(file string) (func(), error) {
 // waitInLine renews the saved session under the state lock, releases the
 // lock, and waits in line for path with it, writing progress and then the
 // admitted response to out.
+//
+// # Parameters
+//
+//   - ctx: Controls cancellation and deadlines.
+//   - origin: Validated Concert origin URL.
+//   - network: Configured CAIP-2 network string.
+//   - file: Absolute path to the client state file.
+//   - path: Target path starting with "/".
+//   - getenv: Environment variable lookup function.
+//   - out: Output writer for progress and admitted response body.
+//
+// # Returns
+//
+// nil on admission, or an error on failure or cancellation.
+//
+// # Example
+//
+//	// Internal CLI helper called by run when --wait is used without -bid.
+//
+// # Used By
+//
+// Generated from verified repository symbol references; do not hand-edit.
+//
+// No statically resolvable in-repo references found in the stated scope.
+//
+// Scope: cmd/concert-client package and tests; darwin/arm64, default tags.
+// Interface, callback, and external callers are not exhaustive.
 func waitInLine(ctx context.Context, origin, network, file, path string, getenv func(string) string, out io.Writer) error {
+	return waitInLineWithBidding(ctx, origin, network, file, cliOptions{waitPath: path}, getenv, out)
+}
+
+// waitInLineWithBidding renews the saved session under the state lock,
+// optionally initializes the local crypto bid signer when -bid is enabled,
+// releases the state lock, and runs the waiting-room + bidding loop.
+//
+// # Parameters
+//
+//   - ctx: Controls cancellation and deadlines.
+//   - origin: Validated Concert origin URL.
+//   - network: Configured CAIP-2 network string.
+//   - file: Absolute path to the client state file.
+//   - opts: Parsed CLI options including waitPath and optional bidding flags.
+//   - getenv: Environment variable lookup function.
+//   - out: Output writer for progress and admitted response body.
+//
+// # Returns
+//
+// nil on admission, or an error on configuration, bidding, or wait failure.
+//
+// # Example
+//
+//	// Internal CLI helper called by run when --wait is supplied.
+//
+// # Used By
+//
+// Generated from verified repository symbol references; do not hand-edit.
+//
+//   - cmd/concert-client/main.go:466 (direct call)
+//   - cmd/concert-client/main.go:466 (function value)
+//   - cmd/concert-client/main.go:563 (direct call)
+//   - cmd/concert-client/main.go:563 (function value)
+//
+// Scope: cmd/concert-client package and tests; darwin/arm64, default tags.
+// Interface, callback, and external callers are not exhaustive.
+func waitInLineWithBidding(ctx context.Context, origin, network, file string, opts cliOptions, getenv func(string) string, out io.Writer) error {
 	maxWait := time.Hour
 	if v := getenv("CONCERT_CLIENT_MAX_WAIT"); v != "" {
 		d, err := time.ParseDuration(v)
@@ -549,6 +604,14 @@ func waitInLine(ctx context.Context, origin, network, file, path string, getenv 
 			return errors.New("CONCERT_CLIENT_MAX_WAIT must be a positive duration, for example 30m")
 		}
 		maxWait = d
+	}
+	var bcfg bidConfig
+	if opts.bidEnabled {
+		var err error
+		bcfg, err = buildWaitBidConfig(opts, network, getenv)
+		if err != nil {
+			return err
+		}
 	}
 	unlock, err := lockState(file)
 	if err != nil {
@@ -565,17 +628,18 @@ func waitInLine(ctx context.Context, origin, network, file, path string, getenv 
 	}
 	ctx, cancel := context.WithTimeout(ctx, maxWait)
 	defer cancel()
-	return c.wait(ctx, path, st.Session, out)
+	return c.waitWithBidding(ctx, opts.waitPath, st.Session, bcfg, out)
 }
 
 // queued is Concert's answer to a client waiting in line.
 type queued struct {
-	Queued     bool   `json:"queued"`
-	Error      string `json:"error"`
-	Position   int64  `json:"position"`
-	QueueDepth int64  `json:"queue_depth"`
-	StatusURL  string `json:"status_url"`
-	RetryAfter int    `json:"retry_after_seconds"`
+	Queued     bool          `json:"queued"`
+	Error      string        `json:"error"`
+	Position   int64         `json:"position"`
+	QueueDepth int64         `json:"queue_depth"`
+	StatusURL  string        `json:"status_url"`
+	RetryAfter int           `json:"retry_after_seconds"`
+	Auction    *auctionOffer `json:"auction,omitempty"`
 	FastLane   *struct {
 		PaymentURL  string `json:"payment_url"`
 		PassSeconds int    `json:"pass_seconds"`
@@ -606,14 +670,67 @@ func retryDelay(h http.Header, q queued) time.Duration {
 }
 
 func (c *client) wait(ctx context.Context, path, session string, out io.Writer) error {
+	return c.waitWithBidding(ctx, path, session, bidConfig{}, out)
+}
+
+// waitWithBidding polls path holding session until admitted; when bidCfg.Enabled
+// is true and a 429 response includes an auction offer, it evaluates -max-bid,
+// submits a signed crypto bid, polls bid status, and either retries immediately
+// with the settled pass credentials or seamlessly continues waiting in line.
+//
+// # Parameters
+//
+//   - ctx: Controls cancellation and overall wait deadline.
+//   - path: Protected Concert path starting with "/".
+//   - session: Active Concert-Session token.
+//   - bidCfg: Agent bidding configuration (disabled when Enabled is false).
+//   - out: Output writer for progress logs and the admitted response body.
+//
+// # Returns
+//
+// nil once Concert returns a non-429 2xx/3xx response, or an error on refusal,
+// cancellation, transport failure, or fatal bidding error.
+//
+// # Example
+//
+//	// Internal client wait loop invoked by waitInLineWithBidding and tests.
+//
+// # Used By
+//
+// Generated from verified repository symbol references; do not hand-edit.
+//
+//   - cmd/concert-client/bidding_test.go:321 (direct call)
+//   - cmd/concert-client/bidding_test.go:321 (function value)
+//   - cmd/concert-client/bidding_test.go:404 (direct call)
+//   - cmd/concert-client/bidding_test.go:404 (function value)
+//   - cmd/concert-client/bidding_test.go:477 (direct call)
+//   - cmd/concert-client/bidding_test.go:477 (function value)
+//   - cmd/concert-client/bidding_test.go:546 (direct call)
+//   - cmd/concert-client/bidding_test.go:546 (function value)
+//   - cmd/concert-client/bidding_test.go:616 (direct call)
+//   - cmd/concert-client/bidding_test.go:616 (function value)
+//   - cmd/concert-client/bidding_test.go:633 (direct call)
+//   - cmd/concert-client/bidding_test.go:633 (function value)
+//   - cmd/concert-client/bidding_test.go:660 (direct call)
+//   - cmd/concert-client/bidding_test.go:660 (function value)
+//   - cmd/concert-client/main.go:631 (direct call)
+//   - cmd/concert-client/main.go:631 (function value)
+//   - cmd/concert-client/main.go:673 (direct call)
+//   - cmd/concert-client/main.go:673 (function value)
+//
+// Scope: cmd/concert-client package and tests; darwin/arm64, default tags.
+// Interface, callback, and external callers are not exhaustive.
+func (c *client) waitWithBidding(ctx context.Context, path, session string, bidCfg bidConfig, out io.Writer) error {
 	offered := false
+	var creds passCredentials
+	attemptedAuctions := make(map[string]struct{})
 	for {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.origin+path, nil)
 		if err != nil {
 			return err
 		}
 		req.Header.Set("Accept", "application/json")
-		req.Header.Set("Concert-Session", session)
+		attachPassCredentials(req, session, creds)
 		res, err := c.http.Do(req)
 		if err != nil {
 			return err
@@ -646,6 +763,26 @@ func (c *client) wait(ctx context.Context, path, session string, out io.Writer) 
 			}
 			fmt.Fprintln(out, " this client does not pay; run concert-client with CONCERT_ACCEPT_TERMS=yes to pay with this session.")
 		}
+
+		if bidCfg.Enabled && q.Auction != nil {
+			auctionKey := or(strings.TrimSpace(q.Auction.AuctionID), q.Auction.Mode)
+			if _, tried := attemptedAuctions[auctionKey]; !tried {
+				if len(attemptedAuctions) >= maxAttemptedAuctions {
+					clear(attemptedAuctions)
+				}
+				attemptedAuctions[auctionKey] = struct{}{}
+				outcome, berr := c.attemptAuctionBid(ctx, session, *q.Auction, bidCfg, out)
+				if berr != nil {
+					return berr
+				}
+				if outcome.settled {
+					creds = outcome.creds
+					// Immediately retry the target URL with the settled pass credentials.
+					continue
+				}
+			}
+		}
+
 		if err := c.pause(ctx, retryDelay(res.Header, q)); err != nil {
 			return fmt.Errorf("stopped waiting at position %d: %w", q.Position, err)
 		}

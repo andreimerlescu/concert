@@ -16,6 +16,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/andreimerlescu/concert/internal/bidding"
+	"github.com/andreimerlescu/concert/internal/drop"
+	"github.com/andreimerlescu/concert/internal/notify"
+	"github.com/andreimerlescu/concert/internal/telemetry"
+	"github.com/andreimerlescu/concert/internal/waitingroom"
 	"github.com/andreimerlescu/room"
 	"github.com/gin-gonic/gin"
 )
@@ -52,6 +57,16 @@ type app struct {
 	// ipinfo.go. Always present; it reports "off" when neither NADDR_DATA
 	// nor NADDR_ADDR is usable.
 	ipinfo *ipLookup
+
+	// Wave 2 subsystems: Waiting Room Studio, live ETA, Scheduled Drops,
+	// Hybrid AI Agent Pass Bidding, ChatOps Alerting, and OTLP Tracing.
+	wr       *waitingRoomRuntime
+	eta      *waitingroom.ETAEstimator
+	dropMu   sync.RWMutex
+	drop     *drop.Drop
+	bidding  *bidding.Engine
+	notifier *notify.Dispatcher
+	tracer   *telemetry.Tracer
 
 	// history is the portal's request history, set by newPortal; nil when
 	// the portal is off. See history.go.
@@ -106,6 +121,12 @@ func newApp(cfg config) (*app, error) {
 		stop:   make(chan struct{}),
 	}
 	a.admit.setPrevSecret(cfg.admitSecretPrev)
+	wrRuntime, err := newWaitingRoomRuntime(cfg.dataDir)
+	if err != nil {
+		return nil, err
+	}
+	a.wr = wrRuntime
+	a.eta = waitingroom.NewETAEstimator(0.25)
 	if err := a.initEnterpriseEarly(cfg); err != nil {
 		return nil, err
 	}
@@ -138,30 +159,54 @@ func newApp(cfg config) (*app, error) {
 	wr.SetFullResponder(a.handleRoomFull)
 	registerRoomEvents(wr, a)
 
+	if err := a.initObservability(cfg); err != nil {
+		a.closeStartupClosers()
+		wr.Stop()
+		return nil, err
+	}
+
 	g, err := a.buildGeneration(cfg, nil)
 	if err != nil {
+		a.closeStartupClosers()
 		wr.Stop()
 		return nil, err
 	}
 	if err := a.commit(g, nil); err != nil {
 		g.assets.users.close()
+		g.routes.close()
+		a.closeStartupClosers()
 		wr.Stop()
 		return nil, fmt.Errorf("room config: %w", err)
 	}
 	if err := a.initEnterpriseFastlane(cfg, wr); err != nil {
 		g.assets.users.close()
+		g.routes.close()
+		a.closeStartupClosers()
 		wr.Stop()
 		return nil, err
 	}
-	// All startup errors after this point close enterprise services cleanly.
+	// All startup errors after this point close enterprise & Wave 2 services cleanly.
 	started := false
 	defer func() {
 		if !started {
+			a.closeStartupClosers()
 			a.closeEnterpriseOnStartupErr()
 		}
 	}()
 	a.handler = http.HandlerFunc(a.serveHTTP)
 	a.initEnterpriseServices(cfg)
+	if err := a.initDrop(cfg); err != nil {
+		g.assets.users.close()
+		g.routes.close()
+		wr.Stop()
+		return nil, err
+	}
+	if err := a.initBidding(cfg); err != nil {
+		g.assets.users.close()
+		g.routes.close()
+		wr.Stop()
+		return nil, err
+	}
 
 	if cfg.dataDir != "" {
 		a.bansPath = bansFilePath(cfg.dataDir)
@@ -267,6 +312,18 @@ func (a *app) onClose(f func()) {
 	a.closeMu.Unlock()
 }
 
+// closeStartupClosers runs any closers registered before newApp returned an
+// error so background workers (bidding, notifier, tracer, cluster) never leak.
+func (a *app) closeStartupClosers() {
+	a.closeMu.Lock()
+	closers := a.closers
+	a.closers = nil
+	a.closeMu.Unlock()
+	for i := len(closers) - 1; i >= 0; i-- {
+		closers[i]()
+	}
+}
+
 // attachHistory records the portal's history so the settings view can
 // describe it, and closes it with the app, which flushes the history log.
 func (a *app) attachHistory(h *history) {
@@ -304,8 +361,15 @@ func (a *app) Close() {
 		if g := a.current(); g != nil {
 			g.assets.users.close()
 			g.upstreams.close()
+			g.routes.close()
 			if g.static != nil {
 				_ = g.static.Close()
+			}
+			if g.microCache != nil {
+				g.microCache.close()
+			}
+			if g.guard != nil && g.guard.shedder != nil {
+				g.guard.shedder.Stop()
 			}
 		}
 		a.ipinfo.close()
@@ -354,6 +418,9 @@ func registerRoomEvents(wr *room.WaitingRoom, a *app) {
 	})
 	wr.On(room.EventQueue, func(s room.Snapshot) {
 		stats.queued.Add(1)
+		if s.Token != "" {
+			a.recordSharedQueueJoin(s.Token, s.ClientKey, wr.TokenTTL())
+		}
 		// A visitor who arrived with no room_ticket at all took a fresh
 		// place in line: a script discarding cookies does this on every
 		// retry. An unrecognised ticket (StaleTicket) is a browser whose old
@@ -364,10 +431,19 @@ func registerRoomEvents(wr *room.WaitingRoom, a *app) {
 			a.churnStrike(s.ClientKey)
 		}
 	})
-	wr.On(room.EventEvict, func(room.Snapshot) { stats.evicted.Add(1) })
-	wr.On(room.EventTimeout, func(room.Snapshot) { stats.timeouts.Add(1) })
+	wr.On(room.EventEvict, func(s room.Snapshot) {
+		stats.evicted.Add(1)
+		a.releaseQuotaTicket(s.ClientKey, s.Token)
+	})
+	wr.On(room.EventTimeout, func(s room.Snapshot) {
+		stats.timeouts.Add(1)
+		a.releaseQuotaTicket(s.ClientKey, s.Token)
+	})
 	wr.On(room.EventPromote, func(room.Snapshot) { stats.promoted.Add(1) })
-	wr.On(room.EventRemove, func(room.Snapshot) { stats.removed.Add(1) })
+	wr.On(room.EventRemove, func(s room.Snapshot) {
+		stats.removed.Add(1)
+		a.releaseQuotaTicket(s.ClientKey, s.Token)
+	})
 	wr.On(room.EventReject, func(s room.Snapshot) {
 		stats.rejected503.Add(1)
 		live := wr.LiveQueueDepth()
@@ -518,10 +594,13 @@ func run(ctx context.Context, cfg config) error {
 	c := g.cfg
 
 	// Built before binding, so a bad certificate cache fails fast.
-	tlsCfg, acmeMgr, err := newACMETLSConfigWithManager(c)
+	tlsCfg, acmeMgr, tlsClose, err := newACMETLSConfigWithLifecycle(ctx, c, a.acmeKVSync())
 	if err != nil {
 		p.closeListener()
 		return err
+	}
+	if tlsClose != nil {
+		defer tlsClose()
 	}
 	if c.http3 && tlsCfg != nil {
 		handler = altSvcMiddleware(c.listen, handler)

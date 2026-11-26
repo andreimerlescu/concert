@@ -461,9 +461,26 @@ func (g *generation) writeAgentWait(c *gin.Context, key string, roomBody []byte)
 		body["fast_lane"] = offer.body
 		h.Set("Link", "<"+offer.paymentURL+`>; rel="payment"`)
 	}
+	if g.biddingEnabledForRequest(c) {
+		if auctionOffer, ok := g.biddingOfferForRequest(c); ok {
+			body["auction"] = auctionOffer
+		}
+	}
 	h.Del("Content-Length")
+	h.Set(headerConcertQueue, "1")
+	if position >= 0 {
+		h.Set(headerConcertPosition, strconv.FormatInt(position, 10))
+	}
+	if statusURL != "" && statusURL != defaultQueueStatusURL {
+		h.Set(headerConcertStatusURL, statusURL)
+	}
 	h.Set("Retry-After", strconv.Itoa(secs))
 	h.Set("Cache-Control", "no-store")
+	if g.a.admit != nil && c.Request != nil {
+		if _, err := c.Request.Cookie(admitCookie); err == nil {
+			g.a.admit.clear(c.Writer)
+		}
+	}
 	c.Data(http.StatusTooManyRequests, "application/json; charset=utf-8", mustJSON(body))
 }
 

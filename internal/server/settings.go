@@ -16,6 +16,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/andreimerlescu/concert/internal/guard"
+	"github.com/andreimerlescu/concert/internal/notify"
 	"github.com/andreimerlescu/goenv/env"
 )
 
@@ -171,6 +173,21 @@ var settingDefs = []settingDef{
 	{key: "agent_places", flag: "agent-places", env: "CONCERT_AGENT_PLACES", group: groupSkip, label: "Agent places per address",
 		def: defaultAgentPlaces, usage: "keyed places one client address (IPv6: its /64) may hold in line; past it, 429 and a strike",
 		ptr: func(c *config) any { return &c.agentPlaces }, check: intBetween(1, maxAgentPlaces)},
+	{key: "agent_bidding", flag: "agent-bidding", env: "CONCERT_AGENT_BIDDING", group: groupSkip, label: "AI agent pass bidding", restart: true,
+		def: false, usage: "enable non-custodial crypto-only (XRPL, Stellar, Hedera, Solana) hybrid instant-buy and sealed-bid auction offers for queued AI agents",
+		ptr: func(c *config) any { return &c.agentBidding }},
+	{key: "agent_bidding_floor", flag: "agent-bidding-floor", env: "CONCERT_AGENT_BIDDING_FLOOR", group: groupSkip, label: "Agent bid floor (micro-USD)", restart: true,
+		def: defaultBiddingFloor, usage: "minimum accepted crypto bid and instant-buy floor price in micro-USD (1000000 = $1.00)",
+		ptr: func(c *config) any { return &c.agentBiddingFloorMicroUSD }, check: int64AtLeast(1)},
+	{key: "agent_bidding_epoch", flag: "agent-bidding-epoch", env: "CONCERT_AGENT_BIDDING_EPOCH", group: groupSkip, label: "Agent auction epoch duration", restart: true,
+		def: 10 * time.Second, usage: "sealed-bid auction clearing epoch window when saturated (e.g. 10s)",
+		ptr: func(c *config) any { return &c.agentBiddingEpoch }, check: durationBetween(time.Second, 10*time.Minute)},
+	{key: "agent_bidding_slots", flag: "agent-bidding-slots", env: "CONCERT_AGENT_BIDDING_SLOTS", group: groupSkip, label: "Agent auction slots per epoch", restart: true,
+		def: 1, usage: "maximum winning agent bids settled per clearing epoch",
+		ptr: func(c *config) any { return &c.agentBiddingSlots }, check: intBetween(1, 1000)},
+	{key: "agent_bidding_min_wait", flag: "agent-bidding-min-wait", env: "CONCERT_AGENT_BIDDING_MIN_WAIT", group: groupSkip, label: "Agent minimum wait before bidding", restart: true,
+		def: time.Duration(0), usage: "minimum queue wait duration required before an agent may submit a bid (0 disables)",
+		ptr: func(c *config) any { return &c.agentBiddingMinWait }, check: durationAtLeast(0)},
 	// ---- Skip the line ----
 	{key: "rate", flag: "rate", env: "CONCERT_RATE", group: groupSkip, label: "Price per position",
 		def: 0.0, usage: "base cost per queue position (0 with -surge 0 turns paid skip-the-line off)",
@@ -275,6 +292,9 @@ var settingDefs = []settingDef{
 	{key: "admit_ttl", flag: "admit-ttl", env: "CONCERT_ADMIT_TTL", group: groupAssets, label: "Admission pass TTL",
 		def: 10 * time.Minute, usage: "sliding lifetime of the admission pass (min 30s)",
 		ptr: func(c *config) any { return &c.admitTTL }},
+	{key: "admit_session_continuity", flag: "admit-session-continuity", env: "CONCERT_ADMIT_SESSION_CONTINUITY", group: groupAssets, label: "Admitted session continuity",
+		def: true, usage: "allow visitors with a valid, unexpired concert_admit cookie to bypass queue re-entry during active browsing (bounded per pass)",
+		ptr: func(c *config) any { return &c.admitSessionContinuity }},
 	{key: "client_proto_header", flag: "client-proto-header", env: "CONCERT_CLIENT_PROTO_HEADER", group: groupAssets, label: "Client protocol header",
 		def: "", usage: "header set by a trusted TLS terminator carrying the client's HTTP protocol",
 		ptr: func(c *config) any { return &c.clientProtoHeader }},
@@ -328,6 +348,44 @@ var settingDefs = []settingDef{
 		def: "", usage: "comma-separated CIDRs that are never struck or banned",
 		ptr: func(c *config) any { return &c.abuseAllow }, check: checkCIDRList, list: listCIDRs},
 
+	// ---- Host-protection guardrails; see internal/guard and guard_wiring.go ----
+	{key: "max_queue_per_ip", flag: "max-queue-per-ip", env: "CONCERT_MAX_QUEUE_PER_IP", group: groupAbuse, label: "Max queued tickets per IP",
+		def: guard.DefaultMaxPerIP, usage: "maximum concurrent waiting-room tickets per IPv4 /32 or IPv6 /64 (0 disables)",
+		ptr: func(c *config) any { return &c.maxQueuePerIP }, check: intAtLeast(0)},
+	{key: "allow_max_queue_per_ip", flag: "allow-max-queue-per-ip", env: "CONCERT_ALLOW_MAX_QUEUE_PER_IP", group: groupAbuse, label: "Max queued tickets per allowlisted IP",
+		def: guard.DefaultAllowMaxPerIP, usage: "maximum concurrent waiting-room tickets per allowlisted IP (-abuse-allow); disabled only when explicitly 0",
+		ptr: func(c *config) any { return &c.allowMaxQueuePerIP }, check: intAtLeast(0)},
+	{key: "host_max_mem_mb", flag: "host-max-mem-mb", env: "CONCERT_HOST_MAX_MEM_MB", group: groupAbuse, label: "Host memory shed ceiling (MiB)",
+		def: 0, usage: "shed non-admitted arrivals with 503 when process RSS/heap reaches this MiB ceiling (0 disables)",
+		ptr: func(c *config) any { return &c.hostMaxMemMB }, check: intAtLeast(0)},
+	{key: "host_max_fds", flag: "host-max-fds", env: "CONCERT_HOST_MAX_FDS", group: groupAbuse, label: "Host open FD shed ceiling",
+		def: 0, usage: "shed non-admitted arrivals with 503 when open file descriptors reach this ceiling (0 disables)",
+		ptr: func(c *config) any { return &c.hostMaxFDs }, check: intAtLeast(0)},
+	{key: "host_max_conns", flag: "host-max-conns", env: "CONCERT_HOST_MAX_CONNS", group: groupAbuse, label: "Host active connections shed ceiling",
+		def: int64(0), usage: "shed non-admitted arrivals with 503 when active connections reach this ceiling (0 disables)",
+		ptr: func(c *config) any { return &c.hostMaxConns }, check: int64AtLeast(0)},
+	{key: "rate_limits", flag: "rate-limit", env: "CONCERT_RATE_LIMIT", group: groupAbuse, label: "Per-route rate limits",
+		def: "", usage: "comma-separated per-route token-bucket rules: /path=rate/window[:burst] (e.g. /wp-login.php=5/1m,/api/=60/1m)",
+		ptr: func(c *config) any { return &c.rateLimits }},
+	{key: "block_asn", flag: "block-asn", env: "CONCERT_BLOCK_ASN", group: groupAbuse, label: "Blocked ASNs",
+		def: "", usage: "comma-separated autonomous system numbers to block with 403 (e.g. 13335,AS15169; requires IP database)",
+		ptr: func(c *config) any { return &c.blockASN }},
+	{key: "allow_countries", flag: "allow-countries", env: "CONCERT_ALLOW_COUNTRIES", group: groupAbuse, label: "Allowed countries",
+		def: "", usage: "comma-separated ISO-3166-1 alpha-2 country codes allowed to access (e.g. US,CA; empty allows all)",
+		ptr: func(c *config) any { return &c.allowCountries }},
+	{key: "block_countries", flag: "block-countries", env: "CONCERT_BLOCK_COUNTRIES", group: groupAbuse, label: "Blocked countries",
+		def: "", usage: "comma-separated ISO-3166-1 alpha-2 country codes blocked with 403 (deny overrides allow)",
+		ptr: func(c *config) any { return &c.blockCountries }},
+	{key: "challenge_mode", flag: "challenge-mode", env: "CONCERT_CHALLENGE_MODE", group: groupAbuse, label: "Pre-ticket bot challenge",
+		def: string(guard.ModeOff), usage: "pre-ticket bot challenge mode: off, pow (zero-dep SHA-256 Proof-of-Work), or turnstile (requires CONCERT_TURNSTILE_SECRET[_FILE])",
+		ptr: func(c *config) any { return &c.challengeMode }},
+	{key: "challenge_pow_bits", flag: "challenge-pow-bits", env: "CONCERT_CHALLENGE_POW_BITS", group: groupAbuse, label: "PoW challenge difficulty (bits)",
+		def: guard.DefaultPoWDifficulty, usage: "leading zero bits required for SHA-256 Proof-of-Work challenges (8-24)",
+		ptr: func(c *config) any { return &c.challengePowBits }, check: intBetween(guard.MinPoWDifficulty, guard.MaxPoWDifficulty)},
+	{key: "challenge_turnstile_site_key", flag: "challenge-turnstile-site-key", env: "CONCERT_TURNSTILE_SITE_KEY", group: groupAbuse, label: "Turnstile site key",
+		def: "", usage: "public Cloudflare Turnstile site key rendered on challenge pages when -challenge-mode=turnstile",
+		ptr: func(c *config) any { return &c.challengeTurnstileSiteKey }},
+
 	// ---- TLS; see tls.go ----
 	{key: "tls_domains", flag: "tls-domains", env: "CONCERT_TLS_DOMAINS", group: groupTLS, label: "Certificate hostnames",
 		def: "", usage: "comma-separated hostnames to get Let's Encrypt certificates for; enables TLS on -listen",
@@ -359,6 +417,12 @@ var settingDefs = []settingDef{
 	{key: "http3", flag: "http3", env: "CONCERT_HTTP3", group: groupTLS, label: "Enable HTTP/3 (QUIC)", restart: true,
 		def: false, usage: "serve HTTP/3 over QUIC on UDP -listen alongside TCP HTTPS and advertise Alt-Svc (requires TLS; restart to change)",
 		ptr: func(c *config) any { return &c.http3 }},
+	{key: "tls_dns_provider", flag: "tls-dns-provider", env: "CONCERT_TLS_DNS_PROVIDER", group: groupTLS, label: "ACME DNS-01 provider", restart: true,
+		def: "", usage: "ACME DNS-01 provider for wildcard certificates: empty (off), cloudflare (CONCERT_DNS_API_TOKEN[_FILE]), or webhook (-tls-dns-webhook-url)",
+		ptr: func(c *config) any { return &c.tlsDNSProvider }},
+	{key: "tls_dns_webhook_url", flag: "tls-dns-webhook-url", env: "CONCERT_TLS_DNS_WEBHOOK_URL", group: groupTLS, label: "ACME DNS-01 webhook URL", restart: true,
+		def: "", usage: "HTTPS endpoint for -tls-dns-provider webhook (optional bearer token via CONCERT_DNS_WEBHOOK_TOKEN[_FILE])",
+		ptr: func(c *config) any { return &c.tlsDNSWebhookURL }},
 
 	// ---- Upstream resilience & mTLS; see upstream.go ----
 	{key: "upstream_health_path", flag: "upstream-health-path", env: "CONCERT_UPSTREAM_HEALTH_PATH", group: groupOrigin, label: "Upstream health path",
@@ -422,6 +486,27 @@ var settingDefs = []settingDef{
 	{key: "log_level", flag: "log-level", env: "CONCERT_LOG_LEVEL", group: groupEnterprise, label: "Log level", restart: true,
 		def: "info", usage: "structured log level: debug, info, warn, error",
 		ptr: func(c *config) any { return &c.logLevel }},
+	{key: "otlp_endpoint", flag: "otlp-endpoint", env: "CONCERT_OTLP_ENDPOINT", group: groupEnterprise, label: "OTLP/HTTP trace endpoint", restart: true,
+		def: "", usage: "pure-stdlib OTLP/HTTP JSON collector HTTPS URL (e.g. https://otel.example.com/v1/traces; auth header via CONCERT_OTLP_AUTH_HEADER[_FILE])",
+		ptr: func(c *config) any { return &c.otlpEndpoint }},
+	{key: "otlp_sample_rate", flag: "otlp-sample-rate", env: "CONCERT_OTLP_SAMPLE_RATE", group: groupEnterprise, label: "OTLP trace sample rate", restart: true,
+		def: 0.1, usage: "root span sampling probability in [0.0, 1.0]",
+		ptr: func(c *config) any { return &c.otlpSampleRate }, check: floatBetween(0, 1)},
+	{key: "notify_slack_url", flag: "notify-slack-url", env: "CONCERT_NOTIFY_SLACK_URL", group: groupEnterprise, label: "Slack webhook URL", restart: true,
+		def: "", usage: "Slack incoming webhook HTTPS URL (prefer CONCERT_NOTIFY_SLACK_URL or CONCERT_NOTIFY_SLACK_URL_FILE; redacted in API/logs)",
+		ptr: func(c *config) any { return &c.notifySlackURL }},
+	{key: "notify_discord_url", flag: "notify-discord-url", env: "CONCERT_NOTIFY_DISCORD_URL", group: groupEnterprise, label: "Discord webhook URL", restart: true,
+		def: "", usage: "Discord webhook HTTPS URL (prefer CONCERT_NOTIFY_DISCORD_URL or CONCERT_NOTIFY_DISCORD_URL_FILE; redacted in API/logs)",
+		ptr: func(c *config) any { return &c.notifyDiscordURL }},
+	{key: "notify_teams_url", flag: "notify-teams-url", env: "CONCERT_NOTIFY_TEAMS_URL", group: groupEnterprise, label: "Teams webhook URL", restart: true,
+		def: "", usage: "Microsoft Teams webhook HTTPS URL (prefer CONCERT_NOTIFY_TEAMS_URL or CONCERT_NOTIFY_TEAMS_URL_FILE; redacted in API/logs)",
+		ptr: func(c *config) any { return &c.notifyTeamsURL }},
+	{key: "notify_webhook_url", flag: "notify-webhook-url", env: "CONCERT_NOTIFY_WEBHOOK_URL", group: groupEnterprise, label: "Generic webhook URL", restart: true,
+		def: "", usage: "generic signed webhook HTTPS URL (prefer CONCERT_NOTIFY_WEBHOOK_URL or CONCERT_NOTIFY_WEBHOOK_URL_FILE; redacted in API/logs)",
+		ptr: func(c *config) any { return &c.notifyWebhookURL }},
+	{key: "notify_pagerduty_key", flag: "notify-pagerduty-key", env: "CONCERT_NOTIFY_PAGERDUTY_KEY", group: groupEnterprise, label: "PagerDuty routing key", restart: true,
+		def: "", usage: "PagerDuty Events API v2 routing key (prefer CONCERT_NOTIFY_PAGERDUTY_KEY or CONCERT_NOTIFY_PAGERDUTY_KEY_FILE; redacted in API/logs)",
+		ptr: func(c *config) any { return &c.notifyPagerDutyKey }},
 
 	// ---- Privacy & retention; see privacy.go ----
 	{key: "privacy_scrub_query", flag: "privacy-scrub-query", env: "CONCERT_PRIVACY_SCRUB_QUERY", group: groupPrivacy, label: "Scrub sensitive query params",
@@ -462,7 +547,7 @@ func init() {
 
 func kindOf(ptr any) string {
 	switch ptr.(type) {
-	case *string:
+	case *string, *notify.Secret:
 		return kindString
 	case *int, *int64:
 		return kindInt
@@ -476,11 +561,17 @@ func kindOf(ptr any) string {
 	return ""
 }
 
-// get returns the setting's current value in c.
+// get returns the setting's current value in c. Redacting secrets return ""
+// when unset and "[REDACTED]" when set so raw credentials never leave config.
 func (d *settingDef) get(c *config) any {
 	switch p := d.ptr(c).(type) {
 	case *string:
 		return *p
+	case *notify.Secret:
+		if p.IsZero() {
+			return ""
+		}
+		return p.String()
 	case *int:
 		return *p
 	case *int64:
@@ -500,6 +591,13 @@ func (d *settingDef) set(c *config, v any) {
 	switch p := d.ptr(c).(type) {
 	case *string:
 		*p = v.(string)
+	case *notify.Secret:
+		s := strings.TrimSpace(v.(string))
+		if s == "" {
+			*p = notify.Secret{}
+		} else {
+			*p = notify.NewSecret(s)
+		}
 	case *int:
 		*p = v.(int)
 	case *int64:
@@ -725,6 +823,29 @@ func checkHostList(v any) error {
 
 // ─── loading ─────────────────────────────────────────────────────────────────
 
+// notifySecretFlagValue binds a CLI flag to a redacting notify.Secret without
+// ever exposing the secret value in FlagSet help/defaults output (S5/S6).
+type notifySecretFlagValue struct {
+	dst *notify.Secret
+}
+
+func (f *notifySecretFlagValue) String() string {
+	if f == nil || f.dst == nil || f.dst.IsZero() {
+		return ""
+	}
+	return f.dst.String()
+}
+
+func (f *notifySecretFlagValue) Set(raw string) error {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		*f.dst = notify.Secret{}
+		return nil
+	}
+	*f.dst = notify.NewSecret(trimmed)
+	return nil
+}
+
 // registerSettingFlags declares one flag per setting, each defaulting to its
 // environment variable and then its built-in default.
 func registerSettingFlags(fs *flag.FlagSet, cfg *config) {
@@ -733,6 +854,11 @@ func registerSettingFlags(fs *flag.FlagSet, cfg *config) {
 		switch p := d.ptr(cfg).(type) {
 		case *string:
 			fs.StringVar(p, d.flag, env.String(d.env, d.def.(string)), d.usage)
+		case *notify.Secret:
+			if v := strings.TrimSpace(envOrFile(d.env, "")); v != "" {
+				*p = notify.NewSecret(v)
+			}
+			fs.Var(&notifySecretFlagValue{dst: p}, d.flag, d.usage)
 		case *int:
 			fs.IntVar(p, d.flag, env.Int(d.env, d.def.(int)), d.usage)
 		case *int64:
@@ -748,6 +874,9 @@ func registerSettingFlags(fs *flag.FlagSet, cfg *config) {
 }
 
 func envIsSet(name string) bool {
+	if v, ok := os.LookupEnv(name + "_FILE"); ok && strings.TrimSpace(v) != "" {
+		return true
+	}
 	v, ok := os.LookupEnv(name)
 	return ok && strings.TrimSpace(v) != ""
 }

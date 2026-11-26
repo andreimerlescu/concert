@@ -2,6 +2,19 @@
 declare(strict_types=1);
 
 /**
+ * @deprecated Since Concert v0.3.0. This standalone reference snippet is kept
+ *             at the repository root for backward compatibility with existing
+ *             links and examples.
+ *
+ *             - WordPress & WooCommerce users: install the full plugin in
+ *               {@see clients/wordpress/} (auto-priority, WooCommerce checkout
+ *               protection, and authenticated cache purging).
+ *             - PHP framework & vanilla PHP users: install the Composer-ready
+ *               PSR-7/PSR-15 SDK in {@see clients/php/} (Concert-Priority,
+ *               Ed25519 rm1 token signing, cache purge, waiting-room signals,
+ *               crypto-only agent bidding, and Slim/CakePHP/Laminas/IPB/phpBB
+ *               adapters).
+ *
  * concert.php: tell Concert who this visitor is.
  *
  * Concert reads one response header, on any page response:

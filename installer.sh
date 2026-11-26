@@ -89,11 +89,23 @@
 #
 # Other knobs:
 #   CONCERT_BINARY=/path/to/concert   binary to install (default: /home/rocky/concert-linux-amd64,
-#                                     then the installed copy)
+#                                     then the installed copy; also works with wpconcert/econcert)
 #   CONCERT_SHA256=<sum>              refuse to install a binary with a different checksum
 #   CONCERT_PORTAL_LISTEN / CONCERT_PORTAL_ALLOW   admin portal address and CIDRs
 #   INSTALL_DEPS=0                    don't dnf-install missing SELinux tooling
 #   FORCE_RESTART=1                   restart even when nothing that needs it changed
+#
+# Optional health & recovery supervisor (concert-watchdog):
+#   CONCERT_WATCHDOG=1                install concert-watchdog and supervise concert inside the
+#                                     hardened concert.service unit (remembered in installer.env)
+#   CONCERT_WATCHDOG_BINARY=/path     watchdog binary (default: /home/rocky/concert-watchdog-linux-amd64,
+#                                     then the installed copy at /usr/local/bin/concert-watchdog)
+#   CONCERT_WATCHDOG_SHA256=<sum>     refuse a watchdog binary with a different checksum
+#   CONCERT_WATCHDOG_BASE_URL=<url>   override local probe base URL (default derived from CONCERT_LISTEN)
+#   CONCERT_WATCHDOG_INTERVAL=10s     probe interval (also TIMEOUT, MAX_RSS_MB, MAX_FDS, MAX_5XX_RATIO,
+#                                     FAIL_THRESHOLD, MAX_RESTARTS, RESTART_WINDOW, DRAIN_TIMEOUT,
+#                                     ALERT_WEBHOOK). Operator/webhook bearer tokens belong ONLY in
+#                                     /etc/concert/watchdog.env via *_TOKEN_FILE, never CLI flags.
 #
 # What it does:
 #   1. verifies the binary and installs a root-owned copy
@@ -133,8 +145,11 @@ set -euo pipefail
 
 DEFAULT_BINARY=/home/rocky/concert-linux-amd64
 BIN=/usr/local/bin/concert
+DEFAULT_WATCHDOG_BINARY=/home/rocky/concert-watchdog-linux-amd64
+WATCHDOG_BIN=/usr/local/bin/concert-watchdog
 ETC=/etc/concert
 ENV_FILE="$ETC/concert.env"
+WATCHDOG_ENV_FILE="$ETC/watchdog.env"
 INSTALLER_ENV="$ETC/installer.env"
 ENV_SUM="$ETC/.installer-envsum"
 STATE="$ETC/.installer-state"
@@ -189,6 +204,23 @@ EXTRA_PORTS_GIVEN="${CONCERT_EXTRA_PORTS+1}"
 LOW_PORTS="${ALLOW_LOW_PORTS-}"
 LOW_PORTS_GIVEN="${ALLOW_LOW_PORTS+1}"
 ANY_PORT="${SELINUX_ANY_PORT-}"
+
+WATCHDOG_ENABLED="${CONCERT_WATCHDOG-}"
+WATCHDOG_ENABLED_GIVEN="${CONCERT_WATCHDOG+1}"
+WATCHDOG_SRC="${CONCERT_WATCHDOG_BINARY:-}"
+WATCHDOG_SHA256="${CONCERT_WATCHDOG_SHA256:-}"
+WATCHDOG_BASE_URL="${CONCERT_WATCHDOG_BASE_URL:-}"
+WATCHDOG_INTERVAL="${CONCERT_WATCHDOG_INTERVAL:-10s}"
+WATCHDOG_TIMEOUT="${CONCERT_WATCHDOG_TIMEOUT:-3s}"
+WATCHDOG_MAX_RSS_MB="${CONCERT_WATCHDOG_MAX_RSS_MB:-0}"
+WATCHDOG_MAX_FDS="${CONCERT_WATCHDOG_MAX_FDS:-0}"
+WATCHDOG_MAX_5XX_RATIO="${CONCERT_WATCHDOG_MAX_5XX_RATIO:-0.5}"
+WATCHDOG_FAIL_THRESHOLD="${CONCERT_WATCHDOG_FAIL_THRESHOLD:-3}"
+WATCHDOG_MAX_RESTARTS="${CONCERT_WATCHDOG_MAX_RESTARTS:-5}"
+WATCHDOG_RESTART_WINDOW="${CONCERT_WATCHDOG_RESTART_WINDOW:-15m}"
+WATCHDOG_DRAIN_TIMEOUT="${CONCERT_WATCHDOG_DRAIN_TIMEOUT:-30s}"
+WATCHDOG_ALERT_WEBHOOK="${CONCERT_WATCHDOG_ALERT_WEBHOOK:-}"
+WATCHDOG_SUM=""
 
 # Read from concert.env once it exists.
 NADDR_PATH=""
@@ -351,6 +383,67 @@ preflight_exec() {
     ok "$SVC_USER can execute $BIN (version ${BOLD}${version}${RESET})"
 }
 
+# Optional concert-watchdog binary resolution, installation, and preflight.
+resolve_watchdog_binary() {
+    [[ "$WATCHDOG_ENABLED" == "1" ]] || return 0
+    if [[ -z "$WATCHDOG_SRC" ]]; then
+        if [[ -f "$DEFAULT_WATCHDOG_BINARY" ]]; then
+            WATCHDOG_SRC="$DEFAULT_WATCHDOG_BINARY"
+        elif [[ -f "$WATCHDOG_BIN" ]]; then
+            WATCHDOG_SRC="$WATCHDOG_BIN"
+            warn "$DEFAULT_WATCHDOG_BINARY not found; reinstalling the copy already at $WATCHDOG_BIN"
+        else
+            die "CONCERT_WATCHDOG=1 but no watchdog binary found: upload it to $DEFAULT_WATCHDOG_BINARY or set CONCERT_WATCHDOG_BINARY=/path/to/concert-watchdog"
+        fi
+    fi
+
+    [[ -f "$WATCHDOG_SRC" && -r "$WATCHDOG_SRC" ]] || die "$WATCHDOG_SRC is not a readable file"
+    [[ "$(head -c 4 "$WATCHDOG_SRC" | od -An -tx1 | tr -d ' \n')" == "7f454c46" ]] \
+        || die "$WATCHDOG_SRC is not an ELF executable"
+
+    WATCHDOG_SUM=$(sha256sum "$WATCHDOG_SRC" | awk '{print $1}')
+    if [[ -n "$WATCHDOG_SHA256" && "$WATCHDOG_SUM" != "$WATCHDOG_SHA256" ]]; then
+        die "sha256 mismatch for $WATCHDOG_SRC: got $WATCHDOG_SUM, expected $WATCHDOG_SHA256"
+    fi
+    ok "Using watchdog $WATCHDOG_SRC (sha256 $WATCHDOG_SUM)"
+}
+
+install_watchdog_binary() {
+    [[ "$WATCHDOG_ENABLED" == "1" ]] || return 0
+    local installed=""
+    [[ -f "$WATCHDOG_BIN" ]] && installed=$(sha256sum "$WATCHDOG_BIN" | awk '{print $1}')
+
+    if [[ "$installed" == "$WATCHDOG_SUM" ]]; then
+        ok "$WATCHDOG_BIN is already this build"
+    else
+        install -m 0755 -o root -g root "$WATCHDOG_SRC" "$WATCHDOG_BIN.new"
+        mv -f -- "$WATCHDOG_BIN.new" "$WATCHDOG_BIN"
+        need_restart "new watchdog binary"
+    fi
+
+    if selinux_active; then
+        restorecon -F "$WATCHDOG_BIN"
+        [[ "$(stat -c %C "$WATCHDOG_BIN")" == *concert_exec_t* ]] \
+            || die "$WATCHDOG_BIN is $(stat -c %C "$WATCHDOG_BIN"), expected concert_exec_t"
+        ok "Installed $WATCHDOG_BIN ($(stat -c %C "$WATCHDOG_BIN"))"
+    else
+        ok "Installed $WATCHDOG_BIN"
+    fi
+}
+
+preflight_watchdog_exec() {
+    [[ "$WATCHDOG_ENABLED" == "1" ]] || return 0
+    local version
+    if ! runuser -u "$SVC_USER" -- test -x "$WATCHDOG_BIN"; then
+        die "user $SVC_USER cannot execute $WATCHDOG_BIN"
+    fi
+    if ! version=$(runuser -u "$SVC_USER" -- "$WATCHDOG_BIN" -version 2>&1); then
+        echo "$version" >&2
+        die "$WATCHDOG_BIN failed to run as $SVC_USER (wrong architecture or a corrupt upload?)"
+    fi
+    ok "$SVC_USER can execute $WATCHDOG_BIN (version ${BOLD}${version}${RESET})"
+}
+
 # ── SELinux: tooling ─────────────────────────────────────────────────
 
 ensure_selinux_tooling() {
@@ -376,7 +469,7 @@ write_policy() {
     mkdir -p "$dir"
 
     cat > "$dir/$MODULE.te" <<'EOF'
-policy_module(concert, 1.2.0)
+policy_module(concert, 1.3.0)
 
 ########################################
 # Declarations
@@ -428,6 +521,7 @@ allow init_t concert_t:process2 { nnp_transition nosuid_transition };
 
 allow concert_t self:capability net_bind_service;
 allow concert_t self:process { getsched setsched signal_perms };
+can_exec(concert_t, concert_exec_t)
 allow concert_t self:fifo_file rw_fifo_file_perms;
 allow concert_t self:unix_stream_socket create_stream_socket_perms;
 allow concert_t self:unix_dgram_socket create_socket_perms;
@@ -453,9 +547,9 @@ tunable_policy(`concert_bind_any_port',`
 	corenet_tcp_bind_all_unreserved_ports(concert_t)
 ')
 
-# Upstream origin, a naddr service, chain endpoints, a policy service, and
-# HTTPS on 443 (http_port_t): Let's Encrypt and chain RPC
-allow concert_t { concert_upstream_port_t http_port_t http_cache_port_t }:tcp_socket name_connect;
+# Upstream origin, a naddr service, chain endpoints, a policy service,
+# local watchdog health probes, and HTTPS on 443 (http_port_t): Let's Encrypt and chain RPC
+allow concert_t { concert_port_t concert_upstream_port_t http_port_t http_cache_port_t }:tcp_socket name_connect;
 
 # Name resolution, /etc/hosts, CA roots for Let's Encrypt and https upstreams,
 # time zones
@@ -480,7 +574,8 @@ allow concert_t syslogd_t:unix_stream_socket { getattr ioctl read write };
 EOF
 
     cat > "$dir/$MODULE.fc" <<'EOF'
-/usr/local/bin/concert	--	gen_context(system_u:object_r:concert_exec_t,s0)
+/usr/local/bin/concert		--	gen_context(system_u:object_r:concert_exec_t,s0)
+/usr/local/bin/concert-watchdog	--	gen_context(system_u:object_r:concert_exec_t,s0)
 /etc/concert(/.*)?		gen_context(system_u:object_r:concert_etc_t,s0)
 /var/lib/concert(/.*)?		gen_context(system_u:object_r:concert_var_lib_t,s0)
 EOF
@@ -555,20 +650,30 @@ label_port() {
 
 # ── Installer choices ────────────────────────────────────────────────
 
-# Loads CONCERT_EXTRA_PORTS and ALLOW_LOW_PORTS from $INSTALLER_ENV unless
-# this run set them, validates them, and saves them back.
+# Loads CONCERT_EXTRA_PORTS, ALLOW_LOW_PORTS, and CONCERT_WATCHDOG from
+# $INSTALLER_ENV unless this run set them, validates them, and saves them back.
 load_installer_settings() {
-    local saved_extra="" saved_low="" p
+    local saved_extra="" saved_low="" saved_watchdog="" p
     if [[ -f "$INSTALLER_ENV" ]]; then
         saved_extra=$(sed -n 's/^EXTRA_PORTS=//p' "$INSTALLER_ENV" | tail -n 1)
         saved_low=$(sed -n 's/^ALLOW_LOW_PORTS=//p' "$INSTALLER_ENV" | tail -n 1)
+        saved_watchdog=$(sed -n 's/^CONCERT_WATCHDOG=//p' "$INSTALLER_ENV" | tail -n 1)
     fi
     [[ -n "$EXTRA_PORTS_GIVEN" ]] || EXTRA_PORTS="$saved_extra"
     [[ -n "$LOW_PORTS_GIVEN" ]]   || LOW_PORTS="$saved_low"
+    if [[ -z "$WATCHDOG_ENABLED_GIVEN" ]]; then
+        if [[ -n "$WATCHDOG_SRC" ]]; then
+            WATCHDOG_ENABLED=1
+        else
+            WATCHDOG_ENABLED="$saved_watchdog"
+        fi
+    fi
 
     EXTRA_PORTS="${EXTRA_PORTS// /}"
     LOW_PORTS="${LOW_PORTS:-0}"
+    WATCHDOG_ENABLED="${WATCHDOG_ENABLED:-0}"
     [[ "$LOW_PORTS" == "0" || "$LOW_PORTS" == "1" ]] || die "ALLOW_LOW_PORTS must be 0 or 1"
+    [[ "$WATCHDOG_ENABLED" == "0" || "$WATCHDOG_ENABLED" == "1" ]] || die "CONCERT_WATCHDOG must be 0 or 1"
     for p in ${EXTRA_PORTS//,/ }; do
         valid_port "$p" || die "invalid port '$p' in CONCERT_EXTRA_PORTS"
     done
@@ -578,6 +683,7 @@ load_installer_settings() {
 # Choices made by installer.sh, kept for later runs. Not read by concert.
 EXTRA_PORTS=$EXTRA_PORTS
 ALLOW_LOW_PORTS=$LOW_PORTS
+CONCERT_WATCHDOG=$WATCHDOG_ENABLED
 EOF
     )
     chown root:root "$INSTALLER_ENV"
@@ -803,7 +909,51 @@ config_sum() {
     for f in "$FASTLANE_FILE" "$NETWORKS_FILE"; do
         [[ -f "$f" ]] && files+=("$f")
     done
+    if [[ "$WATCHDOG_ENABLED" == "1" && -f "$WATCHDOG_ENV_FILE" ]]; then
+        files+=("$WATCHDOG_ENV_FILE")
+    fi
     cat -- "${files[@]}" | sha256sum | awk '{print $1}'
+}
+
+write_watchdog_env() {
+    [[ "$WATCHDOG_ENABLED" == "1" ]] || return 0
+    if [[ -f "$WATCHDOG_ENV_FILE" ]]; then
+        ok "Keeping existing $WATCHDOG_ENV_FILE"
+    else
+        ( umask 077
+          cat > "$WATCHDOG_ENV_FILE" <<'EOF'
+# Optional environment variables for concert-watchdog.
+# Supply bearer tokens via 0600 files (never CLI flags or world-readable files):
+#   CONCERT_WATCHDOG_TOKEN_FILE=/etc/concert/watchdog.token
+#   CONCERT_WATCHDOG_WEBHOOK_TOKEN_FILE=/etc/concert/watchdog-webhook.token
+EOF
+        )
+        chown root:root "$WATCHDOG_ENV_FILE"
+        chmod 0600 "$WATCHDOG_ENV_FILE"
+        ok "Wrote $WATCHDOG_ENV_FILE"
+    fi
+    selinux_active && restorecon -F "$WATCHDOG_ENV_FILE"
+    return 0
+}
+
+watchdog_base_url() {
+    if [[ -n "$WATCHDOG_BASE_URL" ]]; then
+        echo "${WATCHDOG_BASE_URL%/}"
+        return
+    fi
+    local port host domain
+    port=$(port_of_addr "$LISTEN")
+    domain=$(env_get CONCERT_TLS_DOMAINS)
+    settings_override tls_domains domain >/dev/null
+    domain="${domain%%,*}"
+    domain="${domain// /}"
+    if [[ -n "$domain" ]]; then
+        echo "https://${domain}:${port}"
+    else
+        host="${LISTEN%:*}"
+        [[ -z "$host" || "$host" == "0.0.0.0" || "$host" == "[::]" ]] && host=127.0.0.1
+        echo "http://${host}:${port}"
+    fi
 }
 
 env_changed() {
@@ -1091,8 +1241,18 @@ write_examples() {
 
 write_unit() {
     local caps="" new="$WORK/concert.service"
+    local exec_start="$BIN" extra_env_line=""
     if needs_low_port_cap; then
         caps="CAP_NET_BIND_SERVICE"
+    fi
+    if [[ "$WATCHDOG_ENABLED" == "1" ]]; then
+        local base webhook_arg=""
+        base=$(watchdog_base_url)
+        if [[ -n "$WATCHDOG_ALERT_WEBHOOK" ]]; then
+            webhook_arg=" -alert-webhook $WATCHDOG_ALERT_WEBHOOK"
+        fi
+        extra_env_line=$'\n'"EnvironmentFile=-$WATCHDOG_ENV_FILE"
+        exec_start="$WATCHDOG_BIN -health-url ${base}/_room/healthz -ready-url ${base}/_room/readyz -metrics-url ${base}/_room/metrics -clear-url ${base}/_room/queue/clear -interval $WATCHDOG_INTERVAL -timeout $WATCHDOG_TIMEOUT -max-rss-mb $WATCHDOG_MAX_RSS_MB -max-fds $WATCHDOG_MAX_FDS -max-5xx-ratio $WATCHDOG_MAX_5XX_RATIO -fail-threshold $WATCHDOG_FAIL_THRESHOLD -max-restarts $WATCHDOG_MAX_RESTARTS -restart-window $WATCHDOG_RESTART_WINDOW -drain-timeout $WATCHDOG_DRAIN_TIMEOUT${webhook_arg} -- $BIN"
     fi
 
     cat > "$new" <<EOF
@@ -1106,8 +1266,8 @@ Wants=network-online.target
 Type=simple
 User=$SVC_USER
 Group=$SVC_USER
-EnvironmentFile=$ENV_FILE
-ExecStart=$BIN
+EnvironmentFile=$ENV_FILE$extra_env_line
+ExecStart=$exec_start
 Restart=on-failure
 RestartSec=2
 LimitNOFILE=65536
@@ -1307,6 +1467,7 @@ do_install() {
     ensure_user
     write_env_file
     load_installer_settings
+    resolve_watchdog_binary
 
     for p in "$(port_of_addr "$LISTEN")" "$(port_of_url "$UPSTREAM")" "$(port_of_addr "$PORTAL_LISTEN")"; do
         valid_port "$p" || die "invalid port '$p' in $ENV_FILE or $DATA_DIR/settings.json"
@@ -1338,6 +1499,9 @@ do_install() {
     install_naddr_data
     install_binary
     preflight_exec
+    write_watchdog_env
+    install_watchdog_binary
+    preflight_watchdog_exec
     write_examples
     write_unit
     open_firewall
@@ -1359,6 +1523,9 @@ do_install() {
     echo
     echo "${BOLD}concert is installed.${RESET}"
     echo "  binary:   $BIN  (from $BINARY_SRC)"
+    if [[ "$WATCHDOG_ENABLED" == "1" ]]; then
+        echo "  watchdog: $WATCHDOG_BIN  (config: $WATCHDOG_ENV_FILE)"
+    fi
     echo "  listen:   $LISTEN  ->  $UPSTREAM"
     echo "  portal:   $PORTAL_LISTEN"
     echo "  ports:    $(listen_ports | paste -sd, -) may be listened on${EXTRA_PORTS:+ (extra: $EXTRA_PORTS)}"
@@ -1419,8 +1586,8 @@ do_uninstall() {
         semodule -r "$MODULE" && ok "Removed SELinux module $MODULE"
     fi
 
-    rm -f -- "$BIN"
-    ok "Removed $BIN and the IPtoASN refresh timer"
+    rm -f -- "$BIN" "$WATCHDOG_BIN"
+    ok "Removed $BIN, $WATCHDOG_BIN (if installed), and the IPtoASN refresh timer"
 
     if [[ "$PURGE" == "1" ]]; then
         rm -rf -- "$ETC" "$STATE_DIR"

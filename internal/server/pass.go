@@ -145,14 +145,66 @@ func (a *admitter) verify(value string, now time.Time) (passID, time.Time, passS
 	return id, exp, st
 }
 
+// set mints a signed concert_admit cookie for id at time now with Max-Age
+// aligned to the current server-side admitTTL.
+//
+// # Parameters
+//
+//   - w: Destination HTTP response writer; must be non-nil.
+//   - id: Admission pass identifier to encode.
+//   - now: Current timestamp used to compute the token expiry.
+//
+// # Example
+//
+//	a.set(w, id, time.Now())
+//
+// # Used By
+//
+// Called by admitter.refresh and admitter.check in internal/server/pass.go.
 func (a *admitter) set(w http.ResponseWriter, id passID, now time.Time) {
 	o := a.opts.Load()
+	maxAge := max(int(o.ttl/time.Second), 1)
 	http.SetCookie(w, &http.Cookie{
 		Name:     admitCookie,
 		Value:    a.mint(id, now),
 		Path:     o.path,
 		Domain:   o.domain,
-		MaxAge:   int(o.ttl / time.Second),
+		MaxAge:   maxAge,
+		Secure:   o.secure,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// clear emits an expiring Set-Cookie header (`concert_admit=; Max-Age=0`) so
+// clients receiving a waiting-room response discard any expired, stale, forged,
+// or re-queued concert_admit cookie alongside room_ticket.
+//
+// # Parameters
+//
+//   - w: Destination HTTP response writer; nil is ignored.
+//
+// # Example
+//
+//	a.clear(w)
+//
+// # Used By
+//
+// Called by applyWaitingRoomHeaders in internal/server/api.go and
+// writeAgentWait in internal/server/agent.go.
+func (a *admitter) clear(w http.ResponseWriter) {
+	if a == nil || w == nil {
+		return
+	}
+	o := a.opts.Load()
+	// Go's http.Cookie.String serializes MaxAge < 0 as "Max-Age=0" (whereas
+	// MaxAge == 0 omits the Max-Age attribute completely).
+	http.SetCookie(w, &http.Cookie{
+		Name:     admitCookie,
+		Value:    "",
+		Path:     o.path,
+		Domain:   o.domain,
+		MaxAge:   -1,
 		Secure:   o.secure,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
@@ -221,12 +273,13 @@ type userShard struct {
 	m  map[passID]*userSlots
 }
 
-// userSlots keeps separate pools per protocol family so a client's HTTP/1.1
-// and HTTP/2 asset limits stay independent without resizing on every request.
+// userSlots keeps separate pools per protocol family (h1/h2 assets) plus a
+// bounded per-pass concurrent page pool for active-session continuity.
 type userSlots struct {
 	lastSeen int64 // unix nanos, guarded by the shard mutex
 	h1       sema.Semaphore
 	h2       sema.Semaphore
+	page     sema.Semaphore
 }
 
 func newUserStore(h1Cap, h2Cap int) *userStore {
@@ -265,6 +318,46 @@ func (s *userStore) slot(id passID, multiplexed bool, now int64) sema.Semaphore 
 	return u.h1
 }
 
+// pageSlot returns the bounded concurrent page semaphore (cap
+// defaultAdmitPageCap) for admission pass id, creating the shard entry on
+// first use and updating lastSeen under the shard mutex so the janitor cannot
+// evict the entry between lookup and acquire.
+//
+// # Parameters
+//
+//   - id: Verified admission pass identifier.
+//   - now: Current Unix timestamp in nanoseconds.
+//
+// # Returns
+//
+// A concurrency-safe sema.Semaphore bounded to defaultAdmitPageCap slots.
+//
+// # Example
+//
+//	sem := g.assets.users.pageSlot(id, time.Now().UnixNano())
+//
+// # Used By
+//
+// Called by generation.priorityGate in internal/server/priority.go.
+func (s *userStore) pageSlot(id passID, now int64) sema.Semaphore {
+	sh := &s.shards[id[0]&(userShards-1)]
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+
+	u, ok := sh.m[id]
+	if !ok {
+		u = &userSlots{}
+		sh.m[id] = u
+		s.count.Add(1)
+	}
+	u.lastSeen = now
+
+	if u.page == nil {
+		u.page = sema.Must(defaultAdmitPageCap)
+	}
+	return u.page
+}
+
 // sweep evicts entries idle since before cutoff with nothing in flight.
 func (s *userStore) sweep(cutoff int64) int {
 	evicted := 0
@@ -272,7 +365,7 @@ func (s *userStore) sweep(cutoff int64) int {
 		sh := &s.shards[i]
 		sh.mu.Lock()
 		for id, u := range sh.m {
-			if u.lastSeen < cutoff && semIdle(u.h1) && semIdle(u.h2) {
+			if u.lastSeen < cutoff && semIdle(u.h1) && semIdle(u.h2) && semIdle(u.page) {
 				delete(sh.m, id)
 				evicted++
 			}

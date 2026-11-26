@@ -36,12 +36,59 @@ func (h headerFlags) Set(v string) error {
 
 // CLI runs the benchmark from command-line arguments: cmd/bench-concert and
 // "concert bench" both call it. The human summary goes to out; progress to
-// errOut.
+// errOut. Supports both the default capacity ramp/bisect mode and the
+// soak-100k / mixed real-human + flood queue-fairness profiles.
+//
+// # Parameters
+//
+//   - args: Command-line arguments (excluding argv[0]).
+//   - out: Destination for human-readable summary output.
+//   - errOut: Destination for flag help and progress logs.
+//
+// # Returns
+//
+// nil on a passing run, flag.ErrHelp on -h/-help, or a non-nil error if flags
+// are invalid, output persistence fails, or a soak fairness check fails.
+//
+// # Example
+//
+//	if err := bench.CLI(os.Args[1:], os.Stdout, os.Stderr); err != nil {
+//		return err
+//	}
+//
+// # Used By
+//
+// Generated from repository symbol references; do not edit these lines.
+//
+//   - cmd/bench-concert/main.go:23 (direct call)
+//   - internal/bench/bench_test.go:353 (direct call)
+//   - internal/bench/bench_test.go:353 (function value)
+//   - internal/bench/bench_test.go:378 (direct call)
+//   - internal/bench/bench_test.go:378 (function value)
+//   - internal/bench/bench_test.go:381 (direct call)
+//   - internal/bench/bench_test.go:381 (function value)
+//   - internal/bench/soak_test.go:473 (direct call)
+//   - internal/bench/soak_test.go:473 (function value)
+//   - internal/bench/soak_test.go:507 (direct call)
+//   - internal/bench/soak_test.go:507 (function value)
+//
+// Scope: internal/bench and cmd/bench-concert (including tests); build configuration: darwin/arm64, default tags.
+// Runtime/interface/external uses are not exhaustive.
 func CLI(args []string, out, errOut io.Writer) error {
 	fs := flag.NewFlagSet("bench", flag.ContinueOnError)
 	fs.SetOutput(errOut)
 	d := Defaults
 	target := fs.String("target", "", "root URL to crawl, such as http://127.0.0.1:3000/ (benchmark the application, not Concert, to size a leaf)")
+	profile := fs.String("profile", "", "benchmark profile: capacity (default), soak-100k, or fairness")
+	mixRealAndFlood := fs.Bool("mix-real-and-flood", false, "run mixed legitimate human sessions (cookie jar + /queue/status) alongside a flood/bot cohort")
+	soakDuration := fs.Duration("soak-duration", 0, "duration for soak-100k / fairness profiles (default 30s)")
+	soakConns := fs.Int64("soak-connections", -1, "target total request/connection budget for soak profiles (default 100000 for soak-100k, 0 for duration-only)")
+	humans := fs.Int("humans", 0, "concurrent human visitor sessions in soak/fairness mode")
+	flood := fs.Int("flood", -1, "concurrent flood/bot workers in soak/fairness mode (0 disables flood cohort)")
+	floodKeepCookies := fs.Bool("flood-keep-cookies", false, "retain cookies in flood workers (default false: stateless lemmings flood)")
+	pollInterval := fs.Duration("poll-interval", defaultPollInterval, "human /queue/status polling interval when queued")
+	maxRequeues := fs.Int64("max-requeues", 0, "maximum tolerated re-queues of already-admitted human sessions")
+	maxHuman5xx := fs.Int64("max-human-5xx", 0, "maximum tolerated upstream 5xx responses on human sessions")
 	depth := fs.Int("depth", d.MaxDepth, "links a lemming follows from the root before starting over")
 	pageHits := fs.Int("page-hits", d.PageHits, "visits a page takes per stage before lemmings skip it")
 	p95 := fs.Duration("p95", d.P95Limit, "page p95 latency a stage must stay within")
@@ -63,6 +110,8 @@ func CLI(args []string, out, errOut io.Writer) error {
 	quiet := fs.Bool("quiet", false, "no progress lines")
 	hdr := headerFlags{}
 	fs.Var(hdr, "header", "extra request header, Name: value (repeatable)")
+	floodHdr := headerFlags{}
+	fs.Var(floodHdr, "flood-header", "extra request header sent only by flood cohort, Name: value (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -73,6 +122,63 @@ func CLI(args []string, out, errOut io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("bench: -target: %w", err)
 	}
+
+	prof := strings.ToLower(strings.TrimSpace(*profile))
+	if *mixRealAndFlood || prof == ProfileSoak100k || prof == ProfileFairness {
+		if prof == "" || prof == ProfileCapacity {
+			prof = ProfileFairness
+		}
+		soakOpts := SoakProfileDefaults(prof)
+		soakOpts.Target = u
+		if *soakDuration > 0 {
+			soakOpts.Duration = *soakDuration
+		}
+		if *soakConns >= 0 {
+			soakOpts.MaxRequests = *soakConns
+		}
+		if *humans > 0 {
+			soakOpts.HumanSessions = *humans
+		}
+		if *flood >= 0 {
+			soakOpts.FloodWorkers = *flood
+		}
+		soakOpts.FloodKeepCookies = *floodKeepCookies
+		soakOpts.PollInterval = *pollInterval
+		soakOpts.RequestTimeout = *timeout
+		soakOpts.HumanP95Limit = *p95
+		soakOpts.MaxRequeueAfterAdmit = *maxRequeues
+		soakOpts.MaxHumanUpstream5xx = *maxHuman5xx
+		soakOpts.Insecure = *insecure
+		soakOpts.Header = http.Header(hdr)
+		soakOpts.FloodHeader = http.Header(floodHdr)
+		if !*quiet {
+			soakOpts.Logf = log.New(errOut, "", log.LstdFlags).Printf
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		rep, runErr := RunSoak(ctx, soakOpts)
+		if rep == nil {
+			return runErr
+		}
+		SummarizeSoak(out, rep)
+		if *reportPath != "" {
+			if err := writeJSON(*reportPath, rep); err != nil {
+				return err
+			}
+			fmt.Fprintf(out, "report: %s\n", *reportPath)
+		}
+		if runErr != nil {
+			return runErr
+		}
+		if !rep.Pass {
+			return errors.New(rep.Verdict)
+		}
+		return nil
+	}
+	if prof != "" && prof != ProfileCapacity {
+		return fmt.Errorf("bench: unknown -profile %q (want capacity, soak-100k, or fairness)", *profile)
+	}
+
 	if *capPath == "" && *dataDir != "" {
 		*capPath = capacity.Path(*dataDir)
 	}

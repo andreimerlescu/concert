@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -50,6 +51,8 @@ type generation struct {
 	assets     *assetGuard
 	static     *static.Server
 	microCache *pageMicroCache
+	guard      *guardState
+	routes     *routeTable
 	streams    *streamGuard
 	lane       *rankedSem // priority lane; see priority.go
 	upstreams  *upstreamPool
@@ -99,26 +102,36 @@ func (a *app) buildGeneration(next config, prev *generation) (*generation, error
 	g.untracked = append(g.untracked, pathRule{path: "/_room", prefix: true})
 	g.untracked = append(g.untracked, untrackedEnterprisePaths()...)
 
-	if prev != nil && sameProxy(prev.cfg, next) {
+	baseModify := a.tierResponse(a.prio.grants.modifyResponse)
+	siteModify := wrapSiteHeadersModify(baseModify, next.siteHeaders)
+	onCBOpen := func(target, reason string) {
+		a.notifyAlert(alertEvent{
+			Category:    alertCatSilence,
+			Severity:    alertSevCritical,
+			Title:       "Upstream circuit breaker opened",
+			Summary:     fmt.Sprintf("Backend %s circuit breaker opened after repeated failures (%s).", target, reason),
+			Fingerprint: "cb:" + target,
+			Details:     map[string]string{"backend": target, "reason": reason},
+		})
+	}
+	if prev != nil && sameProxy(prev.cfg, next) && sameSiteRoutes(prev.cfg, next) {
 		g.proxy = prev.proxy
 		g.upstreams = prev.upstreams
+		g.routes = prev.routes
 	} else {
-		proxy, pool, err := newEnterpriseProxy(next, a.stats, a.tierResponse(a.prio.grants.modifyResponse), a.topo)
+		proxy, pool, err := newEnterpriseProxy(next, a.stats, siteModify, a.topo)
 		if err != nil {
 			return nil, err
 		}
-		pool.onCircuitOpen = func(target, reason string) {
-			a.notifyAlert(alertEvent{
-				Category:    alertCatSilence,
-				Severity:    alertSevCritical,
-				Title:       "Upstream circuit breaker opened",
-				Summary:     fmt.Sprintf("Backend %s circuit breaker opened after repeated failures (%s).", target, reason),
-				Fingerprint: "cb:" + target,
-				Details:     map[string]string{"backend": target, "reason": reason},
-			})
+		pool.onCircuitOpen = onCBOpen
+		rt, rerr := buildRouteTable(next, a.stats, baseModify, a.topo, onCBOpen)
+		if rerr != nil {
+			pool.close()
+			return nil, rerr
 		}
 		g.proxy = proxy
 		g.upstreams = pool
+		g.routes = rt
 	}
 	g.forward = g.proxyForward
 	g.forwardPage = g.wrapForwardPage(g.forward)
@@ -190,11 +203,27 @@ func (a *app) buildGeneration(next config, prev *generation) (*generation, error
 	if prev != nil && sameMicroCache(prev.cfg, next) {
 		g.microCache = prev.microCache
 	} else {
-		g.microCache = buildMicroCache(next, a.stats)
+		mc, mcErr := buildMicroCache(next, a.stats)
+		if mcErr != nil {
+			return nil, fmt.Errorf("page cache: %w", mcErr)
+		}
+		g.microCache = mc
 	}
+
+	gs, gErr := buildGuardState(next, prev, a)
+	if gErr != nil {
+		if g.microCache != nil && (prev == nil || g.microCache != prev.microCache) {
+			g.microCache.close()
+		}
+		return nil, gErr
+	}
+	g.guard = gs
 
 	engine, err := buildRouter(g)
 	if err != nil {
+		if g.microCache != nil && (prev == nil || g.microCache != prev.microCache) {
+			g.microCache.close()
+		}
 		return nil, err
 	}
 	g.engine = engine
@@ -337,6 +366,9 @@ func (a *app) commit(g *generation, lp *listenPlan) error {
 	if prev == nil || prev.assets.users != g.assets.users {
 		g.assets.users.startJanitor(janitorInterval(cfg.admitTTL), cfg.admitTTL)
 	}
+	if g.guard != nil && g.guard.shedder != nil && (prev == nil || prev.guard == nil || prev.guard.shedder != g.guard.shedder) {
+		g.guard.shedder.Start(context.Background())
+	}
 	if cfg.htmlFile != "" && (prev == nil || prev.cfg.htmlFile != cfg.htmlFile) {
 		log.Printf("custom waiting room loaded from %s — it must treat cookies_required as terminal "+
 			"and check document.cookie for room_probe before its first poll", cfg.htmlFile)
@@ -351,11 +383,20 @@ func (a *app) commit(g *generation, lp *listenPlan) error {
 		if prev.static != nil && prev.static != g.static {
 			_ = prev.static.Close()
 		}
+		if prev.microCache != nil && prev.microCache != g.microCache {
+			prev.microCache.close()
+		}
+		if prev.guard != nil && prev.guard.shedder != nil && (g.guard == nil || prev.guard.shedder != g.guard.shedder) {
+			prev.guard.shedder.Stop()
+		}
 		if prev.proxy != g.proxy {
 			prev.upstreams.close()
 			if t, ok := prev.proxy.Transport.(*http.Transport); ok {
 				t.CloseIdleConnections()
 			}
+		}
+		if prev.routes != nil && prev.routes != g.routes {
+			prev.routes.close()
 		}
 	}
 	lp.commit()
@@ -371,8 +412,10 @@ func (a *app) commit(g *generation, lp *listenPlan) error {
 type listenPlan struct {
 	main, portal *endpoint
 
-	setTLS bool
-	tls    *tls.Config
+	setTLS   bool
+	tls      *tls.Config
+	tlsClose func()
+	appRef   *app
 
 	mainLn, portalLn     net.Listener
 	mainAddr, portalAddr string
@@ -391,14 +434,14 @@ func (a *app) attachEndpoints(main, portal *endpoint) {
 // Without running listeners (tests, or before run starts serving) it still
 // validates the certificate configuration.
 func (a *app) prepareListeners(next config) (*listenPlan, error) {
-	lp := &listenPlan{main: a.mainEP, portal: a.portalEP}
+	lp := &listenPlan{main: a.mainEP, portal: a.portalEP, appRef: a}
 
 	if cur := a.current().cfg; tlsChanged(cur, next) {
-		tc, err := newACMETLSConfig(next)
+		tc, _, tlsClose, err := newACMETLSConfigWithLifecycle(context.Background(), next, a.acmeKVSync())
 		if err != nil {
 			return nil, err
 		}
-		lp.setTLS, lp.tls = true, tc
+		lp.setTLS, lp.tls, lp.tlsClose = true, tc, tlsClose
 	}
 
 	if ep := a.mainEP; ep != nil && next.listen != ep.addr() {
@@ -432,11 +475,16 @@ func (lp *listenPlan) commit() {
 	}
 	if lp.setTLS && lp.main != nil {
 		lp.main.setTLS(lp.tls)
+		if lp.tlsClose != nil && lp.appRef != nil {
+			lp.appRef.onClose(lp.tlsClose)
+		}
 		if lp.tls != nil {
 			log.Printf("main: TLS on for new connections")
 		} else {
 			log.Printf("main: TLS off for new connections")
 		}
+	} else if lp.tlsClose != nil {
+		lp.tlsClose()
 	}
 	if lp.mainLn != nil && lp.main != nil {
 		lp.main.serveOn(lp.mainLn, lp.mainAddr)
@@ -454,6 +502,9 @@ func (lp *listenPlan) commit() {
 func (lp *listenPlan) abort() {
 	if lp == nil {
 		return
+	}
+	if lp.tlsClose != nil {
+		lp.tlsClose()
 	}
 	for _, ln := range []net.Listener{lp.mainLn, lp.portalLn} {
 		if ln != nil {
@@ -473,5 +524,6 @@ func portalAddress(cfg config) string {
 func tlsChanged(a, b config) bool {
 	return strings.Join(a.tlsHosts, ",") != strings.Join(b.tlsHosts, ",") ||
 		a.tlsEmail != b.tlsEmail || a.tlsCacheDir != b.tlsCacheDir || a.tlsStaging != b.tlsStaging ||
-		a.tlsCert != b.tlsCert || a.tlsKey != b.tlsKey || a.tlsMinVersion != b.tlsMinVersion
+		a.tlsCert != b.tlsCert || a.tlsKey != b.tlsKey || a.tlsMinVersion != b.tlsMinVersion ||
+		a.tlsDNSProvider != b.tlsDNSProvider || a.tlsDNSWebhookURL != b.tlsDNSWebhookURL
 }

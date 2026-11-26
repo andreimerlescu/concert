@@ -48,19 +48,32 @@ Concert caps the number of concurrent page requests that reach your origin. Ever
 
 **Pages** go through room. A request whose ticket falls inside the serving window takes a slot, is proxied, and releases the slot when its response has been fully delivered. Other requests get a `room_ticket` cookie and the waiting room page, which polls `/queue/status` and reloads when the visitor's turn arrives. `-cap` is the maximum number of page requests in flight to your origin.
 
-**Admitted page responses** also carry `concert_admit`, a signed, HttpOnly pass that slides forward as the visitor keeps browsing.
+**Admitted page responses** also carry `concert_admit`, a signed, HttpOnly pass that slides forward as the visitor keeps browsing. With `-admit-session-continuity=true` (enabled by default), active `concert_admit` holders continue browsing without being re-queued behind fresh arrivals (bounded per pass), and expired/stale passes are explicitly cleared with `Set-Cookie: concert_admit=; Max-Age=0` on requeue.
+
+**Waiting-room signal headers** let browsers, proxies, client SDKs, and load tools such as Lemmings distinguish queued waiting-room responses cleanly from errors: every queued HTML (`200`/`429`/`503`) and JSON API (`429`/`503`) waiting-room response carries `X-Concert-Queue: 1`, `X-Concert-Position: <N>`, `Retry-After: <seconds>`, `Cache-Control: no-store`, and (when non-default) `X-Concert-Status-Url`. `X-Concert-Queue` is **never** emitted on capacity-breaker `503`s, `403` denials, abuse `429` bans, refused forms, or upstream `503`s.
 
 **Assets** don't queue. A stylesheet or image can't run the waiting room's JavaScript, so making one wait is the same as failing it. Instead, asset paths require a valid pass, and each pass has its own small concurrency pool. One visitor can't monopolise the asset tier, and visitors who were never admitted can't touch it at all. A global semaphore across all passes protects the host.
 
-## Editions (Three Purpose-Built Binaries)
+## The Concert Suite (8 Purpose-Built Open-Source Binaries)
 
-`make build` compiles three deduplicated binaries from shared `internal/` packages (plus `bench-concert`), keeping lean binaries free of blockchain/gRPC/enterprise dependencies via Go build tags:
+Every binary in the Concert Suite is **100% open-source under Apache-2.0** (zero license keys, zero fiat/Stripe processors — Fast-Lane and AI Agent Pass Bidding are **100% crypto-only** across **XRPL**, **Stellar**, **Hedera**, and **Solana**). `make build` compiles all 8 static binaries (`linux/amd64` and `linux/arm64`) while keeping lean editions free of blockchain/gRPC/enterprise dependencies via Go build tags:
 
 | Binary | Build Command | What's Included |
 | --- | --- | --- |
-| **`concert`** | `go build ./cmd/concert` | Lean HTTP/HTTPS waiting-room front-door: FIFO waiting room (`room`), `sema` capacity + asset/stream tiers, `Concert-Priority`, `os.Root` local static serving + `.br`/`.gz`/gzip, ACME TLS + `:80→:443` redirect + opt-in `-http3`, declarative `-config` (`Concertfile`/`.json`) multi-vhost with `SIGHUP` hot-reload, abuse registry, single-password Portal (with multi-vhost site switcher), Prometheus `/metrics`, `bench` |
-| **`wpconcert`** | `go build -tags wordpress ./cmd/wpconcert` | Everything in `concert` **+** pure-stdlib FastCGI (`fcgi://`, `fcgi+unix://`), WordPress/WooCommerce `preset wordpress`, bounded in-memory anonymous GET micro-cache with `singleflight` stampede collapse (`-micro-cache-ttl`), and `wpconcert doctor` / `wpconcert init` PHP-FPM pool sizing tools — **zero** blockchain/gRPC/enterprise mesh deps |
-| **`econcert`** | `go build -tags "wordpress,enterprise" ./cmd/econcert` | Complete open-source enterprise superset: `concert` + `wpconcert` **+** two-tier edge/leaf hop mesh (`Concert-Hop` nonces + native leaf mTLS + traffic-weighted multi-edge + drained remote re-benchmarking), Redis HA cluster sync & alert dedupe, RBAC/SSO + tamper-evident audit log + `-enterprise-hardened`, transactional email digest mailer, and 4-chain x402 / Direct QR / NFT & token-gated Fast-Lane (`reconcile`, `archive-receipts`) |
+| **`concert`** | `go build ./cmd/concert` | Lean HTTP/HTTPS waiting-room front-door: FIFO waiting room (`room`), `sema` capacity + asset/stream tiers, `concert_admit` session continuity, `Concert-Priority`, `os.Root` local static serving + `.br`/`.gz`/gzip, ACME HTTP-01 & pure-stdlib DNS-01 wildcard TLS + `:80→:443` redirect + opt-in `-http3`, declarative `-config` (`Concertfile`/`.json`) multi-vhost with path `route {}`, `header`, `redirect`, scheduled drops & `SIGHUP` hot-reload, host-protection guardrails (`-max-queue-per-ip`, `-allow-max-queue-per-ip`, `-host-max-mem-mb`, `-challenge-mode pow\|turnstile`), Waiting Room Studio (5 layouts, 10 WCAG themes, YouTube embed, 19 locales incl. RTL), ChatOps (`internal/notify`) & pure-stdlib OTLP tracing, abuse registry, Portal, Prometheus `/_room/metrics`, `bench` |
+| **`wpconcert`** | `go build -tags wordpress ./cmd/wpconcert` | Everything in `concert` **+** pure-stdlib FastCGI (`fcgi://`, `fcgi+unix://`), WordPress/WooCommerce `preset wordpress`, bounded in-memory anonymous GET micro-cache or external `concert-cache` daemon (`-cache-addr`) with active `POST /_room/cache/purge`, and `wpconcert doctor` / `wpconcert init` PHP-FPM pool sizing tools — **zero** blockchain/gRPC/enterprise mesh deps |
+| **`econcert`** | `go build -tags "wordpress,enterprise" ./cmd/econcert` | Complete open-source enterprise superset: `concert` + `wpconcert` **+** two-tier edge/leaf hop mesh (`Concert-Hop` single-use nonces + native leaf mTLS + traffic-weighted multi-edge + drained remote re-benchmarking), `concert-kv` HA cluster sync / shared waiting-room queue / AES-256-GCM wildcard cert sync (plus legacy Redis/Valkey alias), RBAC/Argon2id+TOTP MFA/SSO + tamper-evident hash-chained `audit.jsonl` + `-enterprise-hardened`, transactional email digest mailer, and 4-chain (`XRPL`, `Stellar`, `Hedera`, `Solana`) x402 / Direct QR / NFT & token-gated Fast-Lane + non-custodial AI Agent Pass Bidding (`/_concert/bids`, losers pay `$0`) |
+| **`concert-kv`** | `go build ./cmd/concert-kv` | Standalone pure-stdlib RESP2 key-value, pub/sub, WAL/snapshot, and primary/replica HA daemon replacing Redis for shared queues (`-kv-shared-queue`), ban sync, scheduled drops, and encrypted ACME cert sync |
+| **`concert-cache`** | `go build ./cmd/concert-cache` | Standalone sharded LRU page-cache daemon over `0600` Unix socket or TCP/TLS/mTLS with constant-time shared-secret auth (`CONCERT_CACHE_SECRET_FILE`), tag/prefix/URL purge, and `/_cache/metrics` |
+| **`concert-watchdog`** | `go build ./cmd/concert-watchdog` | External parent-process or PID health, RSS/FD, and recovery supervisor (integrated into `installer.sh` with `CONCERT_WATCHDOG=1`) that differentiates origin outages from Concert faults before restarting |
+| **`bench-concert`** | `go build ./cmd/bench-concert` | Origin capacity crawler (`capacity.json`) and 100k-connection mixed human + flood fairness soak harness (`-profile soak-100k -mix-real-and-flood`) |
+| **`concert-client`** | `go build ./cmd/concert-client` | Reference non-custodial AI agent CLI supporting `--wait`, `--nft`, `--direct`, and automated 4-chain pass bidding (`--bid --max-bid --bid-chain --bid-asset`) |
+
+### Deployment Tutorials, Client SDKs & Production Readiness
+
+- **6 Human + AI-Agent Deployment Tutorials:** [`docs/tutorials/`](docs/tutorials/README.md) — Single-host Linux VPS + watchdog ([01](docs/tutorials/01-single-host-vps.md)), WordPress/WooCommerce + `concert-cache` ([02](docs/tutorials/02-wordpress-woocommerce-stack.md)), High-Traffic 100k Edge/Leaf Mesh ([03](docs/tutorials/03-high-traffic-100k-mesh.md)), Kubernetes Production + Prometheus/Grafana/OTLP/ChatOps ([04](docs/tutorials/04-kubernetes-production.md)), Wildcard DNS-01 TLS + Multi-Tenant Drops ([05](docs/tutorials/05-wildcard-private-dns01.md)), and Crypto API Routing + AI Agent Pass Bidding + Waiting Room Studio ([06](docs/tutorials/06-crypto-api-agent-bidding.md)).
+- **Official Client SDKs (`clients/`):** Zero-dependency integrations for [WordPress (`clients/wordpress`)](clients/wordpress/), [PHP (`clients/php`)](clients/php/), [Go (`clients/go`)](clients/go/), [Node.js / TypeScript (`clients/node`)](clients/node/), [Python (`clients/python`)](clients/python/), and [Ruby (`clients/ruby`)](clients/ruby/).
+- **33-Point Production Readiness Scorecard:** [`todo/PRODUCTION-33.md`](todo/PRODUCTION-33.md) — Deterministic pass/fail audit checklist before launch.
 
 ## Install
 
@@ -75,9 +88,9 @@ Or build the Linux static binaries, FIPS builds, release tarballs, and per-editi
     make build
     make dist
 
-`make build` writes static Linux binaries (`linux/amd64` and `linux/arm64`) for `concert`, `wpconcert`, `econcert`, `bench-concert`, and `concert-client` to `bin/`. `make dist` packages Linux release `.tar.gz` tarballs (including FIPS 140-3 builds), CycloneDX 1.5 SBOMs, and `SHA256SUMS.txt` into `dist/`. For local development on another OS, build directly with `go build ./cmd/concert`. Requires Go 1.27.3 or newer (`room v1.9.0` / `sema v1.3.0`).
+`make build` writes static Linux binaries (`linux/amd64` and `linux/arm64`) for all 8 binaries (`concert`, `wpconcert`, `econcert`, `concert-kv`, `concert-cache`, `concert-watchdog`, `bench-concert`, and `concert-client`) to `bin/`. `make dist` packages Linux release `.tar.gz` tarballs (including FIPS 140-3 builds), CycloneDX 1.5 SBOMs, and `SHA256SUMS.txt` into `dist/`. For local development on another OS, build directly with `go build ./cmd/concert`. Requires Go 1.27.3 or newer (`room v1.9.0` / `sema v1.3.0`).
 
-On RHEL, Alma, Rocky, CentOS Stream or Fedora, `installer.sh` installs a prebuilt binary as a confined systemd service under SELinux enforcing mode, downloads the IPtoASN database for IP details, and schedules its daily refresh. See the comments at the top of the script.
+On RHEL, Alma, Rocky, CentOS Stream or Fedora, `installer.sh` installs a prebuilt binary (and optionally `concert-watchdog` with `CONCERT_WATCHDOG=1`) as a confined systemd service under SELinux enforcing mode, downloads the IPtoASN database for IP details, and schedules its daily refresh. See [Tutorial 01](docs/tutorials/01-single-host-vps.md) and the comments at the top of the script.
 
 ## Quick start
 
@@ -147,7 +160,24 @@ Every option can be set with a flag or an environment variable. A flag overrides
 | `-asset-user-cap-h2` | `CONCERT_ASSET_USER_CAP_H2` | `128` | Concurrent asset requests per pass over HTTP/2 and HTTP/3 |
 | `-asset-user-wait` | `CONCERT_ASSET_USER_WAIT` | `2s` | Max wait for a per-pass asset slot before 429 |
 | `-admit-ttl` | `CONCERT_ADMIT_TTL` | `10m` | Sliding lifetime of the admission pass (minimum 30s) |
+| `-admit-session-continuity` | `CONCERT_ADMIT_SESSION_CONTINUITY` | `true` | Allow active `concert_admit` holders to continue browsing without queue re-entry (bounded per pass; clears stale passes with `Max-Age=0`) |
 | `-client-proto-header` | `CONCERT_CLIENT_PROTO_HEADER` | *(empty)* | Header from a trusted TLS terminator carrying the client's HTTP protocol |
+| `-cache-addr` | `CONCERT_CACHE_ADDR` | *(empty)* | `wpconcert`/`econcert`: external `concert-cache` TCP `host:port` or Unix socket path (requires `CONCERT_CACHE_SECRET[_FILE]`) |
+| `-cache-tls` | `CONCERT_CACHE_TLS` | `false` | `wpconcert`/`econcert`: enable TLS when connecting to `-cache-addr` |
+| `-max-queue-per-ip` | `CONCERT_MAX_QUEUE_PER_IP` | `0` | Max concurrent queued tickets per client IP (or IPv6 `/64`); `0` disables |
+| `-allow-max-queue-per-ip` | `CONCERT_ALLOW_MAX_QUEUE_PER_IP` | `0` | Max concurrent queued tickets per allowlisted (`-abuse-allow`) IP; `0` disables |
+| `-host-max-mem-mb` | `CONCERT_HOST_MAX_MEM_MB` | `0` | Shed new arrivals with `503` before host RSS exceeds this MiB ceiling |
+| `-host-max-fds` | `CONCERT_HOST_MAX_FDS` | `0` | Shed new arrivals with `503` before open file descriptors exceed this ceiling |
+| `-host-max-conns` | `CONCERT_HOST_MAX_CONNS` | `0` | Shed new arrivals with `503` before active connections exceed this ceiling |
+| `-challenge-mode` | `CONCERT_CHALLENGE_MODE` | `off` | Pre-ticket bot challenge: `off`, `pow` (zero-dep SHA-256 Proof-of-Work), or `turnstile` (`CONCERT_TURNSTILE_SECRET[_FILE]`) |
+| `-challenge-pow-bits` | `CONCERT_CHALLENGE_POW_BITS` | `16` | Leading zero bits required when `-challenge-mode=pow` |
+| `-agent-bidding` | `CONCERT_AGENT_BIDDING` | `false` | Enable 4-chain (`xrpl`/`stellar`/`hedera`/`solana`) non-custodial AI agent pass bidding (`/_concert/bids`) |
+| `-agent-bidding-floor` | `CONCERT_AGENT_BIDDING_FLOOR` | `1000000` | Minimum bid floor in exact integer micro-USD (`1000000` = `$1.00`) |
+| `-agent-bidding-epoch` | `CONCERT_AGENT_BIDDING_EPOCH` | `15s` | Sealed-bid auction clearing window under saturation |
+| `-agent-bidding-slots` | `CONCERT_AGENT_BIDDING_SLOTS` | `5` | Priority passes awarded per auction epoch |
+| `-tls-dns-provider` | `CONCERT_TLS_DNS_PROVIDER` | *(empty)* | Pure-stdlib ACME DNS-01 wildcard provider: `cloudflare` (`CONCERT_DNS_API_TOKEN[_FILE]`) or `webhook` (`-tls-dns-webhook-url`) |
+| `-otlp-endpoint` | `CONCERT_OTLP_ENDPOINT` | *(empty)* | Pure-stdlib OTLP/HTTP JSON trace endpoint (`-otlp-sample-rate`, `CONCERT_OTLP_AUTH_HEADER[_FILE]`) |
+| `-notify-slack-url` | `CONCERT_NOTIFY_SLACK_URL` | *(empty)* | ChatOps Slack webhook (`*_FILE` supported; also `-notify-discord-url`, `-notify-teams-url`, `-notify-webhook-url`, `-notify-pagerduty-key`) |
 | `-stream-paths` | `CONCERT_STREAM_PATHS` | *(empty)* | WebSocket and SSE paths served outside the room, admission pass required |
 | `-stream-cap` | `CONCERT_STREAM_CAP` | `1000` | Most stream connections open at once |
 | `-priority-cap` | `CONCERT_PRIORITY_CAP` | `0` (a quarter of `-cap`) | Priority lane slots, on top of `-cap` |
@@ -226,7 +256,7 @@ The default trusts loopback only. That is safe even when Concert faces the inter
 
 ## Admin portal
 
-Set `CONCERT_PORTAL_PASS` and the portal listens on `-portal-listen` (default `127.0.0.1:8081`) for addresses in `-portal-allow`. It has eight tabs:
+Set `CONCERT_PORTAL_PASS` and the portal listens on `-portal-listen` (default `127.0.0.1:8081`) for addresses in `-portal-allow`. It has nine tabs:
 
 | Tab | Shows |
 |---|---|
@@ -236,6 +266,7 @@ Set `CONCERT_PORTAL_PASS` and the portal listens on `-portal-listen` (default `1
 | Visitors | Every client the history recorded, with its requests and the bans covering it |
 | Ban log | Every ban in the history: when it began and ends, what started it, and what the banned network requested while blocked |
 | Fast lane | x402 payment offers, NFT collection rules, receipt journal headroom alerts, and one-click zero-downtime online reconciliation |
+| Waiting Room | Waiting Room Studio: 5 layouts (`default`, `youtube`, `drop-countdown`, `minimal-brand`, `split-stage`), 10 WCAG themes + `system`, live YouTube 11-char ID embed & CSP preview, 19 built-in locales (incl. RTL `ar`/`he`/`fa`/`arc`), live EWMA ETA, operator broadcasts, and Scheduled Drop controls |
 | Email | Administrator email delivery (SMTP, Resend, or SendPanda), DNS & handshake verifier, test delivery, compliance links, cadence scheduler, and queued event digest |
 | Settings | Every setting, where its value comes from, and a form to change it live |
 
@@ -294,6 +325,7 @@ Concert keeps these files in `-data-dir` (default `/var/lib/concert/data`), crea
 | `email-secrets.json` | AES-256-GCM encrypted SMTP password / Resend / SendPanda API keys entered through the portal |
 | `email-queue.json` | Coalesced pending alert events, rolling digest send timestamps, and per-recipient pause state |
 | `queue.snapshot` | The waiting line, saved on shutdown and restored on start |
+| `waitingroom.json` | Waiting Room Studio layout, theme, branding, YouTube video ID, default locale, and live broadcast (`0600` atomic write) |
 | `history.jsonl` | The portal's request history and ban log |
 
 Each setting takes the first value it finds, in this order:
@@ -511,7 +543,7 @@ Software that waits for a drop, such as an AI shopping agent, usually keeps no c
 - `fast_lane` and `Link` appear only with payment offers. They name the pass resource, the networks, assets and amounts, and the pass length. Recipients come from the 402 at `payment_url`. See [The fast-lane offer in a queued response](docs/FASTLANE.md#the-fast-lane-offer-in-a-queued-response).
 - When the queue is full, agents get the same `503` "waiting room is full" as other API clients. `-api-json` does not apply to agents: they always get JSON.
 
-`concert-client --wait /path` is a reference agent: it waits with its saved session and never pays on its own.
+`concert-client --wait /path` is a reference agent: it waits with its saved session and never pays on its own. When AI agent pass bidding (`-agent-bidding` or route `agent_bidding on`) is enabled on the server, pass `--bid --max-bid 2.50 --bid-chain xrpl` to let `concert-client` automatically evaluate 4-chain (`xrpl`, `stellar`, `hedera`, `solana`) auction offers, sign locally without broadcasting on-chain, submit `POST /_concert/bids`, poll `GET /_concert/bids/status`, and enter immediately if it wins — paying **`$0`** and keeping its queue place if it loses. See [Tutorial 06](docs/tutorials/06-crypto-api-agent-bidding.md).
 
 The portal's Queue tab marks agent places as **agent** with the first 8 characters of the session ID, and its overview counts the places held and the arrivals refused. The line is per process, like the rest of the queue: two Concert instances keep two independent lines, and an agent's place exists only on the instance it asked.
 
@@ -528,6 +560,8 @@ These are never queued, so they keep answering even when the room is full. Banne
 | `POST /_room/cap` | Change page capacity at runtime and save it to `settings.json` (`operator`) |
 | `POST /_room/promote` | Move a queued ticket or client to the front of the line (`operator`) |
 | `POST /_room/queue/clear` | Flush stale tickets (`{"mode":"stale"}`) or clear the entire waiting line (`{"mode":"all"}`) without blocking visitors (`operator`) |
+| `POST /_room/cache/purge` | Purge page cache by `url`, `prefix`, `tag`, or `all` across in-process micro-cache or external `concert-cache` (`operator`) |
+| `GET/POST /_room/drop` | Inspect or control Scheduled Drops (`schedule`, `pause`, `resume`, `sold_out`, `reset`; `operator` for mutations) |
 | `GET /_room/abuse` | List banned clients and ranges (`viewer`) |
 | `DELETE /_room/abuse?client=…` | Unban a client or range and forget its history (`operator`) |
 
@@ -581,7 +615,7 @@ Your application ranks its own visitors by adding a header to any page response:
 
     Concert-Priority: checkout; ttl=30m
 
-`concert.php` in this repository is a ready-made helper for PHP applications.
+Official zero-dependency client SDKs live in [`clients/`](clients/) for WordPress ([`clients/wordpress`](clients/wordpress/)), PHP ([`clients/php`](clients/php/)), Go ([`clients/go`](clients/go/)), Node.js/TypeScript ([`clients/node`](clients/node/)), Python ([`clients/python`](clients/python/)), and Ruby ([`clients/ruby`](clients/ruby/)). Root `concert.php` remains for legacy links.
 
 | Rank | Value | Send it when | While the room is full | Default TTL |
 |---|---|---|---|---|
@@ -622,9 +656,17 @@ A browser that refuses cookies can't hold a place in line. Instead of reloading 
 
 The same message appears when cookies are misconfigured. The most common cause is setting `-secure-cookie` while browsers reach Concert over plain HTTP. A wrong `-cookie-domain` produces it too.
 
-## Custom waiting room page
+## Waiting Room Studio & Custom Waiting Room Page
 
-Replace the built-in page with `-html /path/to/waiting_room.html`. The file may use these placeholders:
+Every Concert edition ships with **Waiting Room Studio** (managed live in the Admin Portal **Waiting Room** tab and persisted atomically to `<data-dir>/waitingroom.json` with mode `0600`):
+
+- **5 Layouts:** `default`, `youtube` (widescreen YouTube Cinema stage), `drop-countdown`, `minimal-brand`, and `split-stage`.
+- **10 WCAG Themes + `system`:** `system`, `paper`, `synthwave84`, `solarized-light`, `solarized-dark`, `nord`, `dracula`, `gruvbox-dark`, `github-light`, `github-dark`, and `high-contrast`.
+- **Strict Dynamic CSP:** `frame-src 'none'` on every layout except `youtube` with a validated 11-character YouTube ID, which scopes `frame-src` exclusively to `https://www.youtube-nocookie.com`.
+- **19 Built-In Locales (with automatic RTL `dir="rtl"`):** `en`, `es`, `es-MX`, `fr`, `fr-CA`, `ro`, `ru`, `tr`, `de`, `it`, `ja`, `zh-CN`, `hi`, `pl`, `sr`, plus RTL locales `ar` (Arabic), `he` (Hebrew), `fa` (Persian), and `arc` (Aramaic/Syriac). Negotiated in order: `?lang=` → `concert_lang` cookie → `Accept-Language` → `default_locale` → `en`.
+- **Live EWMA ETA & Operator Broadcasts:** `/queue/status` enriches responses with `eta_seconds`, `admissions_per_minute`, `eta_confidence`, live operator `broadcast` banners (`POST /api/waitingroom/broadcast`), and scheduled drop fields (`drop_phase`, `drop_countdown_seconds`, `drop_sold_out_message`).
+
+For full bespoke markup, you can still replace the built-in page with `-html /path/to/waiting_room.html`. The file may use these placeholders:
 
 | Placeholder | Replaced with |
 |---|---|
@@ -734,7 +776,7 @@ It writes `capacity.json`, which a leaf uses as its host capacity. With `-bench-
 
 ## Limitations
 
-**One instance, one queue, one registry.** Queue state, asset semaphores, the abuse registry and the history live in the process's memory. Two Concert instances are two independent waiting rooms: the origin sees up to twice `-cap`, a visitor's place in line exists only on the instance that issued their ticket, and a client banned on one instance is not banned on the other. If you must run more than one, divide `-cap` by the number of instances and enable sticky sessions at the load balancer, or run them as [edge and leaf tiers](#edge-and-leaf-tiers) instead. Use a cookie the load balancer inserts itself, because `room_ticket` is only issued once a visitor is queued. Admission passes and priority grants work across instances as long as they share `CONCERT_ADMIT_SECRET`.
+**Standalone mode is per-process; use `concert-kv` for multi-edge shared queues.** In standalone mode (`concert` or `wpconcert`), queue state, asset semaphores, the abuse registry and history live in process memory. For multi-node active-active deployments, run **`econcert`** with **`concert-kv`** (`-kv-addr`, `-kv-shared-queue=true`, `-kv-tls=true`) to synchronize bans, shared waiting-room queues, scheduled drops, and AES-256-GCM encrypted wildcard certificates across edges with zero Redis dependency — or pair edges with leaves in [edge and leaf tiers](#edge-and-leaf-tiers). See [Tutorial 03](docs/tutorials/03-high-traffic-100k-mesh.md) and [Tutorial 04](docs/tutorials/04-kubernetes-production.md). Admission passes (`concert_admit`) and priority grants work across all instances sharing `CONCERT_ADMIT_SECRET`.
 
 **A pass limits concurrency, not request rate.** A pass holder can have at most its per-user cap of asset requests in flight, but fast assets finish quickly, so a single pass can still generate many requests per second. The global semaphore bounds the total load on the host regardless. Volumetric attacks from many addresses belong at a CDN or WAF in front of Concert; the abuse registry handles individual misbehaving clients.
 

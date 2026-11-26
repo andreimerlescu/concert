@@ -14,11 +14,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/andreimerlescu/concert/internal/acme"
+	"github.com/andreimerlescu/concert/internal/bidding"
 	"github.com/andreimerlescu/concert/internal/capacity"
+	"github.com/andreimerlescu/concert/internal/drop"
 	"github.com/andreimerlescu/concert/internal/fastlane"
 	"github.com/andreimerlescu/concert/internal/gateway"
 	"github.com/andreimerlescu/concert/internal/hop"
 	"github.com/andreimerlescu/concert/internal/mailer"
+	"github.com/andreimerlescu/concert/internal/x402"
 	"github.com/andreimerlescu/room"
 	"github.com/gin-gonic/gin"
 )
@@ -295,16 +299,137 @@ func (a *app) wireFastlaneClusterHooks() {
 
 func (a *app) initEnterpriseServices(cfg config) {
 	a.mailer = a.initMailer(cfg)
-	if cfg.redisAddr != "" {
+	if addr := cfg.effectiveKVAddr(); addr != "" {
+		scope := cfg.siteHost
+		if scope == "" {
+			scope = cfg.roomScope
+		}
 		a.cluster = newClusterSync(clusterConfig{
-			addr:     cfg.redisAddr,
-			password: cfg.redisPassword,
-			useTLS:   cfg.redisTLS,
-			prefix:   cfg.redisPrefix,
+			addr:        addr,
+			password:    cfg.effectiveKVPassword(),
+			useTLS:      cfg.effectiveKVTLS(),
+			prefix:      cfg.effectiveKVPrefix(),
+			sharedQueue: cfg.kvSharedQueue,
+			queueScope:  scope,
 		}, a.abuse, a.stats, a.queueDrop)
-		a.onClose(a.cluster.close)
-		a.wireFastlaneClusterHooks()
+		if a.cluster != nil {
+			a.onClose(a.cluster.close)
+			a.wireFastlaneClusterHooks()
+		}
 	}
+}
+
+func (a *app) recordSharedQueueJoin(ticket, clientKey string, ttl time.Duration) {
+	if a != nil && a.cluster != nil {
+		a.cluster.recordQueueJoinAsync(ticket, clientKey, ttl)
+	}
+}
+
+func (a *app) purgeSharedQueue(ctx context.Context, mode string) {
+	if a != nil && a.cluster != nil {
+		a.cluster.purgeSharedQueue(ctx, mode)
+	}
+}
+
+func (a *app) acmeKVSync() acme.KVBundleSync {
+	if a != nil && a.cluster != nil {
+		return a.cluster.acmeBundleSync()
+	}
+	return nil
+}
+
+func (a *app) dropKVSync() drop.StateSync {
+	if a != nil && a.cluster != nil {
+		return a.cluster.dropStateSync()
+	}
+	return nil
+}
+
+func (a *app) biddingClusterSync() bidding.ClusterSync {
+	if a != nil && a.cluster != nil {
+		return a.cluster.biddingClusterSync()
+	}
+	return nil
+}
+
+// gatewayBiddingSettler adapts Concert's internal/gateway (fastlane.Gateway)
+// to internal/bidding.PaymentSettler: off-chain /verify on submit, on-chain
+// /settle exclusively on winners (losers pay $0).
+type gatewayBiddingSettler struct {
+	gw fastlane.Gateway
+}
+
+func (s gatewayBiddingSettler) Verify(ctx context.Context, bid bidding.BidSubmission) (bidding.VerifyReceipt, error) {
+	if s.gw == nil {
+		return bidding.VerifyReceipt{Valid: false, InvalidReason: "gateway_not_configured"}, nil
+	}
+	raw, err := s.gw.Handle(ctx, "/verify", bid.PaymentPayload)
+	if err != nil {
+		return bidding.VerifyReceipt{Valid: false, InvalidReason: "verification_failed"}, err
+	}
+	var vr x402.VerifyResponse
+	switch v := raw.(type) {
+	case x402.VerifyResponse:
+		vr = v
+	case *x402.VerifyResponse:
+		if v != nil {
+			vr = *v
+		}
+	default:
+		b, merr := json.Marshal(raw)
+		if merr != nil {
+			return bidding.VerifyReceipt{Valid: false, InvalidReason: "invalid_verify_response"}, merr
+		}
+		if uerr := json.Unmarshal(b, &vr); uerr != nil {
+			return bidding.VerifyReceipt{Valid: false, InvalidReason: "invalid_verify_response"}, uerr
+		}
+	}
+	return bidding.VerifyReceipt{
+		Valid:         vr.Valid,
+		Payer:         vr.Payer,
+		InvalidReason: vr.Reason,
+	}, nil
+}
+
+func (s gatewayBiddingSettler) Settle(ctx context.Context, bid bidding.BidSubmission) (bidding.SettleReceipt, error) {
+	if s.gw == nil {
+		return bidding.SettleReceipt{Settled: false, ErrorReason: "gateway_not_configured"}, bidding.ErrSettlementFailed
+	}
+	raw, err := s.gw.Handle(ctx, "/settle", bid.PaymentPayload)
+	if err != nil {
+		return bidding.SettleReceipt{Settled: false, ErrorReason: "settlement_failed"}, err
+	}
+	var sr x402.SettleResponse
+	switch v := raw.(type) {
+	case x402.SettleResponse:
+		sr = v
+	case *x402.SettleResponse:
+		if v != nil {
+			sr = *v
+		}
+	default:
+		b, merr := json.Marshal(raw)
+		if merr != nil {
+			return bidding.SettleReceipt{Settled: false, ErrorReason: "invalid_settle_response"}, merr
+		}
+		if uerr := json.Unmarshal(b, &sr); uerr != nil {
+			return bidding.SettleReceipt{Settled: false, ErrorReason: "invalid_settle_response"}, uerr
+		}
+	}
+	return bidding.SettleReceipt{
+		Settled:     sr.Success,
+		Transaction: sr.Transaction,
+		Network:     sr.Network,
+		Payer:       sr.Payer,
+		ErrorReason: sr.ErrorReason,
+	}, nil
+}
+
+func (a *app) newBiddingSettler() bidding.PaymentSettler {
+	if a != nil && a.fastlaneGW != nil {
+		return gatewayBiddingSettler{gw: a.fastlaneGW}
+	}
+	return failClosedBiddingSettler{}
 }
 
 func (a *app) startEnterpriseLoops() {
@@ -385,6 +510,7 @@ func (a *app) notifyAlert(ev alertEvent) {
 		Fingerprint: ev.Fingerprint,
 		Details:     ev.Details,
 	})
+	a.dispatchChatOps(ev)
 }
 
 func (a *app) recordAudit(ev auditEvent) {
@@ -477,6 +603,15 @@ func (a *app) populateOverviewEnterprise(h gin.H) {
 
 func (a *app) populateStatsEnterprise(out gin.H) {
 	out["edition"] = Edition()
+	if a.cluster != nil && a.cluster.cfg.sharedQueue {
+		st, ok := a.cluster.sharedQueueStats(context.Background())
+		out["kv_shared_queue"] = gin.H{
+			"enabled":  true,
+			"degraded": !ok || st.Degraded,
+			"waiting":  st.Waiting,
+			"claimed":  st.Claimed,
+		}
+	}
 	if a.topo == nil {
 		return
 	}
@@ -562,8 +697,12 @@ func (a *app) writeTierMetrics(b *strings.Builder) {
 
 func (a *app) describeEnterpriseSecrets(cfg config, out map[string]string) {
 	clusterDesc := "standalone (in-memory)"
-	if cfg.redisAddr != "" {
-		clusterDesc = "Redis sync (" + cfg.redisAddr + ")"
+	if addr := cfg.effectiveKVAddr(); addr != "" {
+		if cfg.kvSharedQueue {
+			clusterDesc = "KV sync + shared queue (" + addr + ")"
+		} else {
+			clusterDesc = "KV sync (" + addr + ")"
+		}
 	}
 	emailSecretsDesc := "none configured"
 	if a.mailer != nil && a.mailer.Secrets() != nil {
@@ -1201,14 +1340,26 @@ func enterpriseSettingDefs() []settingDef {
 			ptr: func(c *config) any { return &c.auditLog }},
 
 		// ---- Cluster sync; see cluster.go ----
-		{key: "redis_addr", flag: "redis-addr", env: "CONCERT_REDIS_ADDR", group: groupCluster, label: "Redis/Valkey address", restart: true,
-			def: "", usage: "host:port of Redis/Valkey for multi-node HA ban synchronization (empty disables)",
+		{key: "kv_addr", flag: "kv-addr", env: "CONCERT_KV_ADDR", group: groupCluster, label: "concert-kv address", restart: true,
+			def: "", usage: "host:port or unix:///path of concert-kv (or Redis/Valkey) for multi-node HA ban sync and optional shared queue (empty disables)",
+			ptr: func(c *config) any { return &c.kvAddr }},
+		{key: "kv_tls", flag: "kv-tls", env: "CONCERT_KV_TLS", group: groupCluster, label: "concert-kv TLS", restart: true,
+			def: false, usage: "use TLS 1.2+ when connecting to concert-kv",
+			ptr: func(c *config) any { return &c.kvTLS }},
+		{key: "kv_prefix", flag: "kv-prefix", env: "CONCERT_KV_PREFIX", group: groupCluster, label: "concert-kv key prefix", restart: true,
+			def: "concert", usage: "key and pubsub channel prefix for cluster state in concert-kv",
+			ptr: func(c *config) any { return &c.kvPrefix }},
+		{key: "kv_shared_queue", flag: "kv-shared-queue", env: "CONCERT_KV_SHARED_QUEUE", group: groupCluster, label: "Shared waiting-room queue in concert-kv", restart: true,
+			def: false, usage: "mirror waiting-room queue state in concert-kv via CQ.* commands with fail-open fallback to local room",
+			ptr: func(c *config) any { return &c.kvSharedQueue }},
+		{key: "redis_addr", flag: "redis-addr", env: "CONCERT_REDIS_ADDR", group: groupCluster, label: "Redis/Valkey address (alias for kv-addr)", restart: true,
+			def: "", usage: "backward-compatible alias for -kv-addr: host:port of Redis/Valkey/concert-kv for multi-node HA sync",
 			ptr: func(c *config) any { return &c.redisAddr }},
-		{key: "redis_tls", flag: "redis-tls", env: "CONCERT_REDIS_TLS", group: groupCluster, label: "Redis TLS", restart: true,
-			def: false, usage: "use TLS 1.2+ when connecting to Redis/Valkey",
+		{key: "redis_tls", flag: "redis-tls", env: "CONCERT_REDIS_TLS", group: groupCluster, label: "Redis TLS (alias for kv-tls)", restart: true,
+			def: false, usage: "backward-compatible alias for -kv-tls: use TLS 1.2+ when connecting to Redis/Valkey/concert-kv",
 			ptr: func(c *config) any { return &c.redisTLS }},
-		{key: "redis_prefix", flag: "redis-prefix", env: "CONCERT_REDIS_PREFIX", group: groupCluster, label: "Redis key prefix", restart: true,
-			def: "concert", usage: "key and pubsub channel prefix for cluster state in Redis/Valkey",
+		{key: "redis_prefix", flag: "redis-prefix", env: "CONCERT_REDIS_PREFIX", group: groupCluster, label: "Redis key prefix (alias for kv-prefix)", restart: true,
+			def: "concert", usage: "backward-compatible alias for -kv-prefix: key and pubsub channel prefix for cluster state",
 			ptr: func(c *config) any { return &c.redisPrefix }},
 
 		// ---- Edge and leaf tiers; see topology.go and docs/TOPOLOGY.md ----

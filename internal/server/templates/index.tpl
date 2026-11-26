@@ -78,6 +78,11 @@
       </button>
     </li>
     <li class="nav-item" role="presentation">
+      <button class="nav-link" id="tab-waitingroom-btn" data-bs-toggle="tab" data-bs-target="#tab-waitingroom" type="button" role="tab" aria-controls="tab-waitingroom" aria-selected="false">
+        <i aria-hidden="true" class="bi bi-palette"></i> Waiting Room
+      </button>
+    </li>
+    <li class="nav-item" role="presentation">
       <button class="nav-link" id="tab-settings-btn" data-bs-toggle="tab" data-bs-target="#tab-settings" type="button" role="tab" aria-controls="tab-settings" aria-selected="false">
         <i aria-hidden="true" class="bi bi-sliders"></i> Settings
       </button>
@@ -1166,6 +1171,184 @@
                   <tbody id="email-queue-rows"></tbody>
                 </table>
               </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-pane fade" id="tab-waitingroom" role="tabpanel" aria-labelledby="tab-waitingroom-btn" tabindex="0">
+      <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+        <div>
+          <p class="concert-eyebrow mb-1">WAITING ROOM STUDIO · 19 LOCALES · SCHEDULED DROPS</p>
+          <h2 class="h3 mb-0">Waiting Room &amp; Drop Control</h2>
+        </div>
+        <div class="d-flex flex-wrap align-items-center gap-2">
+          <button type="button" class="btn btn-outline-secondary btn-sm" id="wr-refresh-btn"><i aria-hidden="true" class="bi bi-arrow-clockwise"></i> Refresh</button>
+        </div>
+      </div>
+
+      <div class="row g-4">
+        <div class="col-lg-7">
+          <div class="card stat-card mb-4">
+            <div class="card-body">
+              <h3 class="h5 mb-3"><i aria-hidden="true" class="bi bi-palette2"></i> Waiting Room Studio</h3>
+              <form id="wr-studio-form" novalidate>
+                <div class="row g-3">
+                  <div class="col-md-4">
+                    <label for="wr-layout" class="form-label small fw-semibold">Layout</label>
+                    <select class="form-select form-select-sm" id="wr-layout">
+                      <option value="default">Default (Editorial)</option>
+                      <option value="youtube">YouTube Cinema</option>
+                      <option value="drop-countdown">Drop Countdown</option>
+                      <option value="minimal-brand">Minimal Brand</option>
+                      <option value="split-stage">Split Stage</option>
+                    </select>
+                  </div>
+                  <div class="col-md-4">
+                    <label for="wr-theme" class="form-label small fw-semibold">Theme</label>
+                    <select class="form-select form-select-sm" id="wr-theme">
+                      <option value="system">System (Auto)</option>
+                      <option value="paper">Paper (Light)</option>
+                      <option value="synthwave84">SynthWave '84</option>
+                      <option value="solarized-light">Solarized Light</option>
+                      <option value="solarized-dark">Solarized Dark</option>
+                      <option value="nord">Nord</option>
+                      <option value="dracula">Dracula</option>
+                      <option value="gruvbox-dark">Gruvbox Dark</option>
+                      <option value="github-light">GitHub Light</option>
+                      <option value="github-dark">GitHub Dark</option>
+                      <option value="high-contrast">High Contrast (WCAG AAA)</option>
+                    </select>
+                  </div>
+                  <div class="col-md-4">
+                    <label for="wr-locale" class="form-label small fw-semibold">Default locale</label>
+                    <select class="form-select form-select-sm" id="wr-locale">
+                      <option value="en">English (en)</option>
+                      <option value="es">Español (es)</option>
+                      <option value="es-MX">Español México (es-MX)</option>
+                      <option value="fr">Français (fr)</option>
+                      <option value="fr-CA">Français Canada (fr-CA)</option>
+                      <option value="ro">Română (ro)</option>
+                      <option value="ru">Русский (ru)</option>
+                      <option value="tr">Türkçe (tr)</option>
+                      <option value="de">Deutsch (de)</option>
+                      <option value="it">Italiano (it)</option>
+                      <option value="ja">日本語 (ja)</option>
+                      <option value="zh-CN">简体中文 (zh-CN)</option>
+                      <option value="hi">हिन्दी (hi)</option>
+                      <option value="pl">Polski (pl)</option>
+                      <option value="sr">Српски (sr)</option>
+                      <option value="ar">العربية (ar · RTL)</option>
+                      <option value="he">עברית (he · RTL)</option>
+                      <option value="fa">فارسی (fa · RTL)</option>
+                      <option value="arc">ܣܘܪܝܝܐ (arc · RTL)</option>
+                    </select>
+                  </div>
+                  <div class="col-md-6">
+                    <label for="wr-brand" class="form-label small fw-semibold">Brand name</label>
+                    <input type="text" class="form-control form-control-sm" id="wr-brand" maxlength="120" placeholder="Concert">
+                  </div>
+                  <div class="col-md-6">
+                    <label for="wr-accent" class="form-label small fw-semibold">Accent color (#RRGGBB)</label>
+                    <input type="text" class="form-control form-control-sm font-monospace" id="wr-accent" maxlength="7" placeholder="#36f9f6">
+                  </div>
+                  <div class="col-md-6">
+                    <label for="wr-logo-url" class="form-label small fw-semibold">Logo URL (/ or https://)</label>
+                    <input type="text" class="form-control form-control-sm font-monospace" id="wr-logo-url" placeholder="/assets/logo.svg">
+                  </div>
+                  <div class="col-md-6">
+                    <label for="wr-hero-image-url" class="form-label small fw-semibold">Hero image URL (/ or https://)</label>
+                    <input type="text" class="form-control form-control-sm font-monospace" id="wr-hero-image-url" placeholder="https://cdn.example.com/hero.jpg">
+                  </div>
+                  <div class="col-12">
+                    <label for="wr-headline" class="form-label small fw-semibold">Headline override</label>
+                    <input type="text" class="form-control form-control-sm" id="wr-headline" maxlength="200" placeholder="Leave blank for localized default">
+                  </div>
+                  <div class="col-12">
+                    <label for="wr-subheadline" class="form-label small fw-semibold">Subheadline override</label>
+                    <textarea class="form-control form-control-sm" id="wr-subheadline" rows="2" maxlength="500" placeholder="Leave blank for localized default"></textarea>
+                  </div>
+                  <div class="col-12">
+                    <label for="wr-youtube-input" class="form-label small fw-semibold">YouTube stream / video URL or 11-char ID</label>
+                    <div class="input-group input-group-sm">
+                      <input type="text" class="form-control font-monospace" id="wr-youtube-input" placeholder="https://www.youtube.com/watch?v=dQw4w9WgXcQ or dQw4w9WgXcQ">
+                      <span class="input-group-text font-monospace" id="wr-youtube-parsed">none</span>
+                    </div>
+                    <div class="form-text">Only embeds on the YouTube Cinema layout via <code>youtube-nocookie.com</code>; all other layouts enforce <code>frame-src 'none'</code>.</div>
+                  </div>
+                  <div class="col-12">
+                    <label class="form-label small text-body-secondary mb-1">Active Content-Security-Policy</label>
+                    <div class="small font-monospace p-2 rounded bg-body-tertiary text-break" id="wr-csp-preview">–</div>
+                  </div>
+                </div>
+                <div class="mt-3 d-flex justify-content-end gap-2">
+                  <button type="submit" class="btn btn-primary btn-sm" id="wr-save-btn"><i aria-hidden="true" class="bi bi-check2-circle"></i> Save Studio Settings</button>
+                </div>
+              </form>
+            </div>
+          </div>
+
+          <div class="card stat-card">
+            <div class="card-body">
+              <div class="d-flex justify-content-between align-items-center mb-2">
+                <h3 class="h5 mb-0"><i aria-hidden="true" class="bi bi-megaphone"></i> Live Operator Broadcast</h3>
+                <span class="small text-body-secondary" id="wr-broadcast-status">No active broadcast</span>
+              </div>
+              <form id="wr-broadcast-form" novalidate>
+                <label for="wr-broadcast-msg" class="form-label small">Announcement shown live to every waiting visitor (max 280 chars)</label>
+                <textarea class="form-control form-control-sm mb-2" id="wr-broadcast-msg" rows="2" maxlength="280" placeholder="Doors open in 2 minutes. Keep this tab open!"></textarea>
+                <div class="d-flex justify-content-end gap-2">
+                  <button type="button" class="btn btn-outline-secondary btn-sm" id="wr-broadcast-clear">Clear Broadcast</button>
+                  <button type="submit" class="btn btn-success btn-sm" id="wr-broadcast-send"><i aria-hidden="true" class="bi bi-broadcast"></i> Publish Broadcast</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+
+        <div class="col-lg-5">
+          <div class="card stat-card">
+            <div class="card-body">
+              <div class="d-flex justify-content-between align-items-center mb-3">
+                <h3 class="h5 mb-0"><i aria-hidden="true" class="bi bi-stopwatch"></i> Scheduled Drop &amp; Lobby</h3>
+                <span class="badge text-bg-secondary" id="drop-phase-badge">none</span>
+              </div>
+              <dl class="row stat-list small mb-3">
+                <dt class="col-5">Event ID</dt><dd class="col-7 text-end font-monospace" id="drop-event-label">–</dd>
+                <dt class="col-5">Countdown</dt><dd class="col-7 text-end font-monospace" id="drop-countdown-label">–</dd>
+                <dt class="col-5">Lobby tickets</dt><dd class="col-7 text-end font-monospace" id="drop-lobby-count">0</dd>
+                <dt class="col-5">Shuffled / Queue</dt><dd class="col-7 text-end font-monospace" id="drop-queue-count">0 / 0</dd>
+              </dl>
+              <form id="drop-control-form" novalidate>
+                <div class="mb-2">
+                  <label for="drop-event-id" class="form-label small fw-semibold">Event ID</label>
+                  <input type="text" class="form-control form-control-sm font-monospace" id="drop-event-id" maxlength="128" placeholder="launch-2026">
+                </div>
+                <div class="mb-2">
+                  <label for="drop-lobby-at" class="form-label small fw-semibold">Lobby opens (RFC3339 UTC)</label>
+                  <input type="text" class="form-control form-control-sm font-monospace" id="drop-lobby-at" placeholder="2026-12-01T16:45:00Z">
+                </div>
+                <div class="mb-2">
+                  <label for="drop-opens-at" class="form-label small fw-semibold">Drop opens &amp; shuffles (RFC3339 UTC)</label>
+                  <input type="text" class="form-control form-control-sm font-monospace" id="drop-opens-at" placeholder="2026-12-01T17:00:00Z">
+                </div>
+                <div class="mb-2">
+                  <label for="drop-max-lobby" class="form-label small fw-semibold">Max lobby tickets</label>
+                  <input type="number" class="form-control form-control-sm" id="drop-max-lobby" min="1" max="1000000" placeholder="100000">
+                </div>
+                <div class="mb-3">
+                  <label for="drop-sold-out-msg" class="form-label small fw-semibold">Sold-out message</label>
+                  <input type="text" class="form-control form-control-sm" id="drop-sold-out-msg" maxlength="512" placeholder="All inventory has been claimed.">
+                </div>
+                <div class="d-flex flex-wrap gap-2">
+                  <button type="submit" class="btn btn-primary btn-sm" id="drop-schedule-btn"><i aria-hidden="true" class="bi bi-calendar-check"></i> Schedule</button>
+                  <button type="button" class="btn btn-outline-warning btn-sm" id="drop-pause-btn"><i aria-hidden="true" class="bi bi-pause-fill"></i> Pause</button>
+                  <button type="button" class="btn btn-outline-success btn-sm" id="drop-resume-btn"><i aria-hidden="true" class="bi bi-play-fill"></i> Resume</button>
+                  <button type="button" class="btn btn-outline-danger btn-sm" id="drop-sold-out-btn"><i aria-hidden="true" class="bi bi-bag-x"></i> Sold Out</button>
+                  <button type="button" class="btn btn-outline-secondary btn-sm" id="drop-reset-btn"><i aria-hidden="true" class="bi bi-arrow-counterclockwise"></i> Reset</button>
+                </div>
+              </form>
             </div>
           </div>
         </div>

@@ -3,8 +3,11 @@
 // lemmings: browser-like sessions that follow links up to 14 layers deep and
 // load every file each page references. Point it at the application itself
 // (not at Concert) to size a leaf, and give it -data-dir to write the
-// capacity.json a leaf Concert reads. See internal/bench and
-// docs/TOPOLOGY.md.
+// capacity.json a leaf Concert reads.
+//
+// It also supports 100k-connection soak and waiting-room fairness testing
+// against Concert via -profile soak-100k and -mix-real-and-flood. See
+// internal/bench and docs/TOPOLOGY.md.
 package main
 
 import (

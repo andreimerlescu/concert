@@ -492,6 +492,14 @@ func (p *portal) apiQueueClear(c *gin.Context) {
 	handleQueueClear(c, a, pr.Actor, pr.Role.String(), "portal", p)
 }
 
+func (p *portal) apiCachePurge(c *gin.Context) {
+	a, ok := p.targetApp(c)
+	if !ok {
+		return
+	}
+	handleCachePurge(c, a, portalPrincipal(c), "portal")
+}
+
 // janitor forgets notes for tickets room no longer holds, expired kicks,
 // old sign-in failures and old history, and notices bans lifted outside
 // the portal.
@@ -556,6 +564,12 @@ func (p *portal) routes() *gin.Engine {
 	api.POST("/queue/promote", p.requireRole(roleOperator), p.apiPromote)
 	api.POST("/queue/kick", p.requireRole(roleOperator), p.apiKick)
 	api.POST("/queue/clear", p.requireRole(roleOperator), p.apiQueueClear)
+	api.POST("/cache/purge", p.requireRole(roleOperator), p.apiCachePurge)
+	api.GET("/drop", p.requireRole(roleViewer), p.apiDropGet)
+	api.POST("/drop", p.requireRole(roleOperator), p.apiDropPost)
+	api.GET("/waitingroom", p.requireRole(roleViewer), p.apiWaitingRoomGet)
+	api.PUT("/waitingroom", p.requireRole(roleAdmin), p.apiWaitingRoomPut)
+	api.POST("/waitingroom/broadcast", p.requireRole(roleOperator), p.apiWaitingRoomBroadcast)
 	api.GET("/bans", p.requireRole(roleViewer), p.apiBans)
 	api.POST("/bans", p.requireRole(roleOperator), p.apiBanSave)
 	api.DELETE("/bans", p.requireRole(roleOperator), p.apiUnban)

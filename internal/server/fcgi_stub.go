@@ -50,8 +50,12 @@ func withFastCGIStream(req *http.Request) *http.Request                   { retu
 
 func maybeGzipFastCGI(*http.Request, *http.Response) {}
 
-func buildMicroCache(config, *counters) *pageMicroCache { return nil }
-func sameMicroCache(config, config) bool                { return true }
+func buildMicroCache(config, *counters) (*pageMicroCache, error) { return nil, nil }
+func sameMicroCache(config, config) bool                         { return true }
+func (p *pageMicroCache) close()                                 {}
+func (p *pageMicroCache) purge(context.Context, string, string, string) (int, error) {
+	return 0, fmt.Errorf("page cache is provided by wpconcert (or econcert)")
+}
 func (g *generation) microCacheMiddleware(c *gin.Context) {
 	c.Next()
 }
@@ -65,6 +69,8 @@ func movedWordPressFlags() map[string]string {
 		"fcgi-deny-paths":    "wpconcert",
 		"micro-cache-ttl":    "wpconcert",
 		"micro-cache-max-mb": "wpconcert",
+		"cache-addr":         "wpconcert",
+		"cache-tls":          "wpconcert",
 		"wp-preset":          "wpconcert",
 	}
 }

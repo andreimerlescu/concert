@@ -1,6 +1,96 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Your place is saved · Concert</title><link rel="stylesheet" href="/_concert/waiting.css"><script src="/_concert/waiting.js" defer></script></head>
-<body class="queue-page"><a class="skip-link" href="#main">Skip to your queue status</a><header class="masthead"><a class="wordmark" href="/" aria-label="Concert home"><span class="brand-bars" aria-hidden="true"><i></i><i></i><i></i><i></i></span>concert<span class="brand-dot">.</span></a><span class="pill"><span class="status-dot"></span> LIVE TRAFFIC CONTROL</span></header>
-<main id="main" class="queue-layout"><section class="intro"><p class="eyebrow">A LITTLE SPACE. A BETTER EXPERIENCE.</p><h1>Good things.<br><span>Worth the wait.</span></h1><p class="lede">There’s a full house right now. We’re letting people through at a pace the site can handle. Your place stays yours while this page is open.</p><div class="scene" aria-hidden="true"><div class="sun"></div><div class="horizon"></div><div class="grid-floor"></div><div class="scene-label">KEEP THE RHYTHM. LOSE THE OVERLOAD.</div></div><div class="principles"><span><b>01</b> Fair by default</span><span><b>02</b> Automatic entry</span><span><b>03</b> No refresh needed</span></div></section>
-    <section class="queue-panel" aria-label="Your queue status"><div class="ticket"><div class="ticket-top"><span class="eyebrow">YOUR PLACE IN LINE</span><span class="tiny-tag">FIFO</span></div><div class="position" id="position">{{.Position}}</div><div class="ticket-status"><span class="status-dot"></span><span id="queue-state" role="status" aria-live="polite">Confirming your place</span></div><div class="signal" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><div class="ticket-stats"><div><small>SESSION</small><strong id="session-state">Connecting</strong></div><div><small>WAITING</small><strong id="elapsed">00:00</strong></div><div><small>ENTRY</small><strong>Automatic</strong></div></div><p class="quiet" id="queue-note">Keep this tab open. We’ll take you in when it’s your turn.</p><noscript><p class="notice">Enable JavaScript to keep your place and enter automatically.</p></noscript></div>
-        <aside class="upgrade" id="fastlane-card" hidden><div><span class="eyebrow cyan">ANOTHER WAY IN</span><h2>Meet the fast lane.</h2><p>Pay with your wallet, or unlock access with an eligible NFT.</p></div><a class="button button-primary" id="access-link" href="/_concert/access">Explore access <span aria-hidden="true">↗</span></a><p class="micro">Optional. Your standard place in line is free.</p></aside><aside class="upgrade" id="legacy-card" hidden><span class="eyebrow cyan">OTHER ADMISSION OPTIONS</span><h2>Skip the line</h2><p id="legacy-price">See the site’s admission options.</p><a class="button" id="legacy-link" href="/">View admission options ↗</a></aside><div class="notice" id="queue-error" role="alert" hidden></div></section></main><footer class="page-footer"><span>CONCERT / BUILT FOR THE FULL HOUSE</span><span>Order in the queue. Energy in the room.</span></footer></body></html>
+<html lang="en" dir="ltr" data-layout="default" data-wr-theme="system">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Your place is saved · Concert</title>
+<link rel="stylesheet" href="/_concert/waiting.css">
+<script src="/_concert/waiting.js" defer></script>
+</head>
+<body class="queue-page">
+<a class="skip-link" href="#main" data-i18n="skip.link">Skip to your queue status</a>
+<header class="masthead">
+  <a class="wordmark" href="/" aria-label="Concert home"><!--CONCERT_WR_BRAND_START--><span class="brand-bars" aria-hidden="true"><i></i><i></i><i></i><i></i></span>concert<span class="brand-dot">.</span><!--CONCERT_WR_BRAND_END--></a>
+  <div class="masthead-controls">
+    <label class="lang-picker-wrap">
+      <span class="sr-only" data-i18n="lang.label">Language</span>
+      <select id="lang-picker" class="lang-picker" aria-label="Language"><!--CONCERT_WR_LANG_OPTIONS_START--><option value="en" selected>English</option><option value="es">Español</option><option value="es-MX">Español (México)</option><option value="fr">Français</option><option value="fr-CA">Français (Canada)</option><option value="ro">Română</option><option value="ru">Русский</option><option value="tr">Türkçe</option><option value="de">Deutsch</option><option value="it">Italiano</option><option value="ja">日本語</option><option value="zh-CN">简体中文</option><option value="hi">हिन्दी</option><option value="pl">Polski</option><option value="sr">Српски</option><option value="ar">العربية</option><option value="he">עברית</option><option value="fa">فارسی</option><option value="arc">ܣܘܪܝܝܐ</option><!--CONCERT_WR_LANG_OPTIONS_END--></select>
+    </label>
+    <span class="pill"><span class="status-dot"></span> <span data-i18n="pill.live_control">LIVE TRAFFIC CONTROL</span></span>
+  </div>
+</header>
+<!--CONCERT_WR_BROADCAST_START--><section class="broadcast-banner" id="broadcast-banner" role="status" aria-live="polite" hidden><span class="broadcast-badge" data-i18n="broadcast.label">LIVE UPDATE</span><p class="broadcast-text" id="broadcast-message"></p><time class="broadcast-time" id="broadcast-time"></time></section><!--CONCERT_WR_BROADCAST_END-->
+<main id="main" class="queue-layout">
+  <section class="intro">
+    <div class="hero-copy"><!--CONCERT_WR_HERO_START--><p class="eyebrow" data-i18n="eyebrow.space">A LITTLE SPACE. A BETTER EXPERIENCE.</p><h1 id="hero-headline"><span class="headline-lead" data-i18n="hero.headline">Good things.</span><br><span class="headline-accent" data-i18n="hero.headline_accent">Worth the wait.</span></h1><p class="lede" id="hero-subheadline" data-i18n="hero.lede">There’s a full house right now. We’re letting people through at a pace the site can handle. Your place stays yours while this page is open.</p><!--CONCERT_WR_HERO_END--></div>
+    <!--CONCERT_WR_STAGE_START--><div class="scene" id="stage-container" aria-hidden="true"><div class="sun"></div><div class="horizon"></div><div class="grid-floor"></div><div class="scene-label" data-i18n="scene.label">KEEP THE RHYTHM. LOSE THE OVERLOAD.</div></div><!--CONCERT_WR_STAGE_END-->
+    <div class="principles"><span><b>01</b> <span data-i18n="principle.fair">Fair by default</span></span><span><b>02</b> <span data-i18n="principle.auto">Automatic entry</span></span><span><b>03</b> <span data-i18n="principle.norefresh">No refresh needed</span></span></div>
+  </section>
+  <section class="queue-panel" aria-label="Your queue status">
+    <div class="ticket">
+      <div class="ticket-top"><span class="eyebrow" data-i18n="ticket.eyebrow">YOUR PLACE IN LINE</span><span class="tiny-tag" data-i18n="ticket.tag">FIFO</span></div>
+      <div class="position" id="position">{{.Position}}</div>
+      <div class="ticket-status"><span class="status-dot"></span><span id="queue-state" role="status" aria-live="polite" data-i18n="status.confirming">Confirming your place</span></div>
+      <div class="signal" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+      <div class="ticket-stats ticket-stats-4">
+        <div><small data-i18n="stat.session">SESSION</small><strong id="session-state" data-i18n="session.connecting">Connecting</strong></div>
+        <div><small data-i18n="stat.waiting">WAITING</small><strong id="elapsed">00:00</strong></div>
+        <div><small data-i18n="stat.eta">EST. WAIT</small><strong id="eta-value" data-i18n="eta.calculating">Calculating…</strong></div>
+        <div><small data-i18n="stat.entry">ENTRY</small><strong data-i18n="entry.automatic">Automatic</strong></div>
+      </div>
+      <p class="quiet" id="queue-note" data-i18n="note.keep_open">Keep this tab open. We’ll take you in when it’s your turn.</p>
+      <noscript><p class="notice" data-i18n="note.noscript">Enable JavaScript to keep your place and enter automatically.</p></noscript>
+    </div>
+    <aside class="upgrade" id="fastlane-card" hidden>
+      <div>
+        <span class="eyebrow cyan" data-i18n="fastlane.eyebrow">ANOTHER WAY IN</span>
+        <h2 data-i18n="fastlane.title">Meet the fast lane.</h2>
+        <p data-i18n="fastlane.desc">Pay with your crypto wallet (XRPL, Stellar, Hedera, Solana), or unlock VIP access with an eligible NFT.</p>
+      </div>
+      <div class="upgrade-actions">
+        <button type="button" class="button button-primary" id="open-fastlane-drawer" aria-expanded="false" aria-controls="fastlane-drawer"><span data-i18n="fastlane.drawer_open">Crypto Fast-Lane / VIP Drawer</span> <span aria-hidden="true">⚡</span></button>
+        <a class="button" id="access-link" href="/_concert/access"><span data-i18n="fastlane.cta">Explore access</span> <span aria-hidden="true">↗</span></a>
+      </div>
+      <p class="micro" data-i18n="fastlane.micro">Optional. Your standard place in line is free.</p>
+    </aside>
+    <aside class="upgrade" id="legacy-card" hidden>
+      <span class="eyebrow cyan" data-i18n="legacy.eyebrow">OTHER ADMISSION OPTIONS</span>
+      <h2 data-i18n="legacy.title">Skip the line</h2>
+      <p id="legacy-price" data-i18n="legacy.desc">See the site’s admission options.</p>
+      <a class="button" id="legacy-link" href="/"><span data-i18n="legacy.cta">View admission options</span> <span aria-hidden="true">↗</span></a>
+    </aside>
+    <div class="notice" id="queue-error" role="alert" hidden></div>
+  </section>
+</main>
+<aside class="fastlane-drawer" id="fastlane-drawer" role="dialog" aria-modal="false" aria-labelledby="fastlane-drawer-heading" hidden>
+  <div class="fastlane-drawer-head">
+    <div>
+      <span class="eyebrow cyan" data-i18n="fastlane.eyebrow">ANOTHER WAY IN</span>
+      <h2 id="fastlane-drawer-heading" data-i18n="fastlane.drawer_title">Crypto Fast-Lane &amp; NFT VIP Access</h2>
+    </div>
+    <button type="button" class="drawer-close" id="close-fastlane-drawer" aria-label="Close drawer" data-i18n-aria="fastlane.drawer_close">×</button>
+  </div>
+  <p class="drawer-desc" data-i18n="fastlane.drawer_desc">Stay on the stream while unlocking priority admission with XRPL, Stellar, Hedera, or Solana.</p>
+  <div class="drawer-tabs" role="tablist">
+    <button type="button" class="drawer-tab is-active" id="drawer-tab-pay" role="tab" aria-selected="true" aria-controls="drawer-panel-pay" data-i18n="fastlane.tab_pay">Crypto Fast-Lane</button>
+    <button type="button" class="drawer-tab" id="drawer-tab-nft" role="tab" aria-selected="false" aria-controls="drawer-panel-nft" data-i18n="fastlane.tab_nft">NFT VIP Bypass</button>
+  </div>
+  <div class="drawer-panel" id="drawer-panel-pay" role="tabpanel" aria-labelledby="drawer-tab-pay">
+    <ul class="drawer-list" id="drawer-offers-list"></ul>
+  </div>
+  <div class="drawer-panel" id="drawer-panel-nft" role="tabpanel" aria-labelledby="drawer-tab-nft" hidden>
+    <ul class="drawer-list" id="drawer-nft-list"></ul>
+  </div>
+  <div class="drawer-foot">
+    <a class="button button-primary" id="drawer-access-link" href="/_concert/access"><span data-i18n="fastlane.cta">Explore access</span> <span aria-hidden="true">↗</span></a>
+    <p class="micro" data-i18n="fastlane.micro">Optional. Your standard place in line is free.</p>
+  </div>
+</aside>
+<footer class="page-footer">
+  <span data-i18n="footer.left">CONCERT / BUILT FOR THE FULL HOUSE</span>
+  <span data-i18n="footer.right">Order in the queue. Energy in the room.</span>
+</footer>
+<!--CONCERT_WR_STATE-->
+</body>
+</html>

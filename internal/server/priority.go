@@ -647,6 +647,29 @@ func (g *generation) priorityGate(c *gin.Context) {
 				return
 			}
 		}
+
+		// Active-session continuity (-admit-session-continuity): visitors
+		// already holding a valid, unexpired concert_admit cookie bypass queue
+		// re-entry during active browsing and slide their admission TTL past
+		// half-life inside g.gated, bounded per passID so one cookie cannot
+		// saturate the origin.
+		if cfg.admitSessionContinuity {
+			if ck, err := r.Cookie(admitCookie); err == nil && ck.Value != "" {
+				if id, _, status := g.a.admit.verify(ck.Value, now); status == passValid {
+					pageSem := g.assets.users.pageSlot(id, now.UnixNano())
+					if !pageSem.TryAcquire() {
+						c.Header("Retry-After", "1")
+						c.Header("Cache-Control", "no-store")
+						c.AbortWithStatus(http.StatusTooManyRequests)
+						return
+					}
+					defer func() { _ = pageSem.Release() }()
+					g.gated(c)
+					c.Abort()
+					return
+				}
+			}
+		}
 	}
 
 	var token string

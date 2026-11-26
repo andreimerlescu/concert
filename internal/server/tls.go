@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	concertacme "github.com/andreimerlescu/concert/internal/acme"
 	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
 )
@@ -59,6 +61,13 @@ func parseTLSMinVersion(spec string) (uint16, error) {
 // ports, wildcards and IP addresses are rejected: TLS-ALPN-01 validates one
 // concrete hostname at a time.
 func parseTLSDomains(spec string) ([]string, error) {
+	return parseTLSDomainsMode(spec, false)
+}
+
+// parseTLSDomainsMode parses comma-separated TLS hostnames and, when
+// allowWildcard is true (ACME DNS-01 mode), permits RFC 6125 single-label
+// wildcard patterns such as "*.example.com".
+func parseTLSDomainsMode(spec string, allowWildcard bool) ([]string, error) {
 	var hosts []string
 	seen := map[string]bool{}
 	for _, part := range strings.Split(spec, ",") {
@@ -66,14 +75,29 @@ func parseTLSDomains(spec string) ([]string, error) {
 		if h == "" {
 			continue
 		}
-		if strings.ContainsAny(h, "/:*@ \t") {
+		wildcard := false
+		checkHost := h
+		if allowWildcard && strings.HasPrefix(h, "*.") {
+			wildcard = true
+			checkHost = strings.TrimPrefix(h, "*.")
+			if checkHost == "" || !strings.Contains(checkHost, ".") {
+				return nil, fmt.Errorf("%q: wildcard hostname must look like *.example.com", strings.TrimSpace(part))
+			}
+		}
+		if strings.ContainsAny(checkHost, "/:*@ \t") {
+			if allowWildcard {
+				return nil, fmt.Errorf("%q: list bare hostnames or single-label wildcards such as *.example.com", strings.TrimSpace(part))
+			}
 			return nil, fmt.Errorf("%q: list bare hostnames such as example.com, without scheme, port or wildcard", strings.TrimSpace(part))
 		}
-		if _, err := netip.ParseAddr(h); err == nil {
+		if _, err := netip.ParseAddr(checkHost); err == nil {
 			return nil, fmt.Errorf("%q: certificates are issued for hostnames, not IP addresses", h)
 		}
-		if !strings.Contains(h, ".") {
+		if !strings.Contains(checkHost, ".") {
 			return nil, fmt.Errorf("%q: not a fully qualified hostname", h)
+		}
+		if wildcard {
+			h = "*." + checkHost
 		}
 		if seen[h] {
 			continue
@@ -82,6 +106,65 @@ func parseTLSDomains(spec string) ([]string, error) {
 		hosts = append(hosts, h)
 	}
 	return hosts, nil
+}
+
+// matchHostPattern reports whether host matches pattern (either exact equality
+// or RFC 6125 single-label wildcard "*.example.com").
+func matchHostPattern(pattern, host string) bool {
+	if pattern == host {
+		return true
+	}
+	if strings.HasPrefix(pattern, "*.") {
+		suffix := strings.TrimPrefix(pattern, "*.")
+		label, rest, ok := strings.Cut(host, ".")
+		return ok && label != "" && rest == suffix && !strings.Contains(label, ".")
+	}
+	return false
+}
+
+// buildDNS01Manager constructs an internal/acme.Manager for wildcard/exact
+// DNS-01 certificate issuance using Cloudflare or Webhook DNS providers and
+// optional AES-256-GCM encrypted KV certificate sync.
+func buildDNS01Manager(cfg config, domains []string, kvSync concertacme.KVBundleSync) (*concertacme.Manager, error) {
+	if err := ensureWritableDir(cfg.tlsCacheDir); err != nil {
+		return nil, err
+	}
+	var provider concertacme.DNSProvider
+	var err error
+	switch strings.ToLower(strings.TrimSpace(cfg.tlsDNSProvider)) {
+	case "cloudflare":
+		provider, err = concertacme.NewCloudflareProvider(concertacme.CloudflareConfig{
+			APIToken: cfg.dnsAPIToken,
+		})
+	case "webhook":
+		provider, err = concertacme.NewWebhookProvider(concertacme.WebhookConfig{
+			Endpoint:    cfg.tlsDNSWebhookURL,
+			BearerToken: cfg.dnsWebhookToken,
+		})
+	default:
+		return nil, fmt.Errorf("unsupported -tls-dns-provider %q", cfg.tlsDNSProvider)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	acmeCfg := concertacme.Config{
+		Domains:  domains,
+		Email:    cfg.tlsEmail,
+		CacheDir: cfg.tlsCacheDir,
+		Provider: provider,
+	}
+	if cfg.tlsStaging {
+		acmeCfg.DirectoryURL = letsEncryptStagingURL
+	}
+	if kvSync != nil && len(cfg.admitSecret) > 0 {
+		acmeCfg.KVSync = kvSync
+		acmeCfg.KVSecret = concertacme.NewSecretBytes(cfg.admitSecret)
+		if pfx := cfg.effectiveKVPrefix(); pfx != "" {
+			acmeCfg.KVKeyPrefix = pfx + ":acme:cert:"
+		}
+	}
+	return concertacme.NewManager(acmeCfg)
 }
 
 // certReloader caches a PEM keypair and transparently reloads it when either
@@ -210,36 +293,71 @@ func applyClientCA(tc *tls.Config, caFile string, requireAll bool) error {
 // newACMETLSConfig returns the TLS config for the main listener (custom PEM
 // certificate files or Let's Encrypt ACME), or nil when TLS is disabled.
 func newACMETLSConfig(cfg config) (*tls.Config, error) {
-	tc, _, err := newACMETLSConfigWithManager(cfg)
+	tc, _, closeFn, err := newACMETLSConfigWithLifecycle(context.Background(), cfg, nil)
+	if closeFn != nil {
+		closeFn()
+	}
 	return tc, err
 }
 
 // newACMETLSConfigWithManager returns both the listener *tls.Config and, when
-// Let's Encrypt ACME (-tls-domains) is enabled, the *autocert.Manager so a
-// companion -tls-http-listen (:80) server can answer ACME HTTP-01 challenges.
+// Let's Encrypt ACME (-tls-domains) is enabled without DNS-01, the
+// *autocert.Manager so a companion -tls-http-listen (:80) server can answer
+// ACME HTTP-01 challenges.
 func newACMETLSConfigWithManager(cfg config) (*tls.Config, *autocert.Manager, error) {
+	tc, mgr, closeFn, err := newACMETLSConfigWithLifecycle(context.Background(), cfg, nil)
+	if closeFn != nil {
+		closeFn()
+	}
+	return tc, mgr, err
+}
+
+// newACMETLSConfigWithLifecycle returns the listener *tls.Config, optional
+// *autocert.Manager (for HTTP-01/TLS-ALPN-01), and optional lifecycle closer
+// (for internal/acme.Manager DNS-01 background renewal loop, R2).
+func newACMETLSConfigWithLifecycle(ctx context.Context, cfg config, kvSync concertacme.KVBundleSync) (*tls.Config, *autocert.Manager, func(), error) {
 	if cfg.tlsCert != "" || cfg.tlsKey != "" {
 		if len(cfg.tlsHosts) > 0 {
-			return nil, nil, errors.New("-tls-cert/-tls-key cannot be combined with -tls-domains")
+			return nil, nil, nil, errors.New("-tls-cert/-tls-key cannot be combined with -tls-domains")
 		}
 		tc, err := newPEMTLSConfig(cfg.tlsCert, cfg.tlsKey, cfg.tlsMinVersion)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if err := applyClientCA(tc, cfg.tlsClientCA, cfg.tlsRequireClientCert); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		return tc, nil, nil
+		return tc, nil, nil, nil
 	}
 	if len(cfg.tlsHosts) == 0 {
-		return nil, nil, nil
-	}
-	if err := ensureWritableDir(cfg.tlsCacheDir); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, nil
 	}
 	minVer, err := parseTLSMinVersion(cfg.tlsMinVersion)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
+	}
+
+	if strings.TrimSpace(cfg.tlsDNSProvider) != "" {
+		dnsMgr, err := buildDNS01Manager(cfg, cfg.tlsHosts, kvSync)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if err := dnsMgr.Start(ctx); err != nil {
+			_ = dnsMgr.Close()
+			return nil, nil, nil, err
+		}
+		tc := dnsMgr.TLSConfig()
+		tc.MinVersion = minVer
+		tc.CipherSuites = strongCipherSuites
+		if err := applyClientCA(tc, cfg.tlsClientCA, cfg.tlsRequireClientCert); err != nil {
+			_ = dnsMgr.Close()
+			return nil, nil, nil, err
+		}
+		return tc, nil, func() { _ = dnsMgr.Close() }, nil
+	}
+
+	if err := ensureWritableDir(cfg.tlsCacheDir); err != nil {
+		return nil, nil, nil, err
 	}
 
 	m := &autocert.Manager{
@@ -258,9 +376,9 @@ func newACMETLSConfigWithManager(cfg config) (*tls.Config, *autocert.Manager, er
 	tc.MinVersion = minVer
 	tc.CipherSuites = strongCipherSuites
 	if err := applyClientCA(tc, cfg.tlsClientCA, cfg.tlsRequireClientCert); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return tc, m, nil
+	return tc, m, nil, nil
 }
 
 // httpsRedirectHandler answers Let's Encrypt ACME HTTP-01 challenges when mgr
@@ -268,10 +386,7 @@ func newACMETLSConfigWithManager(cfg config) (*tls.Config, *autocert.Manager, er
 // GET/HEAD, 308 for other methods) with strict Host validation to prevent open
 // redirects.
 func httpsRedirectHandler(cfg config, mgr *autocert.Manager) http.Handler {
-	allowed := map[string]bool{}
-	for _, h := range cfg.tlsHosts {
-		allowed[h] = true
-	}
+	allowed := append([]string(nil), cfg.tlsHosts...)
 	_, httpsPort, _ := net.SplitHostPort(cfg.listen)
 
 	fallback := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -281,9 +396,18 @@ func httpsRedirectHandler(cfg config, mgr *autocert.Manager) http.Handler {
 			http.Error(w, "invalid Host header", http.StatusBadRequest)
 			return
 		}
-		if len(allowed) > 0 && !allowed[host] {
-			http.Error(w, "host not configured for HTTPS", http.StatusMisdirectedRequest)
-			return
+		if len(allowed) > 0 {
+			matched := false
+			for _, pat := range allowed {
+				if matchHostPattern(pat, host) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				http.Error(w, "host not configured for HTTPS", http.StatusMisdirectedRequest)
+				return
+			}
 		}
 		dstHost := host
 		if httpsPort != "" && httpsPort != "443" {
