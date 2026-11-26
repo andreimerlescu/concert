@@ -1,0 +1,69 @@
+# Multi-host WordPress + PHP-FPM container topology with wpconcert.
+# wpconcert serves static assets directly from the shared read-only webroot
+# via os.Root, micro-caches anonymous GET/HEAD HTML, and speaks FastCGI over
+# TCP directly to php-fpm (no nginx or Apache required).
+#
+# Start with: docker compose -f deploy/docker/compose.wordpress.yml up --build
+services:
+  wpconcert:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.wpconcert
+    image: wpconcert:v0.3.0
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    command: ["-config", "/etc/concert/Concertfile"]
+    environment:
+      CONCERT_ADMIT_SECRET: "${CONCERT_ADMIT_SECRET:-change-me-to-a-32-plus-char-random-secret-value}"
+      CONCERT_PORTAL_PASS: "${CONCERT_PORTAL_PASS:-change-me-admin-portal-password}"
+    ports:
+      - "8080:8080"
+      - "127.0.0.1:8081:8081"
+    volumes:
+      - ./Concertfile.wordpress:/etc/concert/Concertfile:ro
+      - wp_webroot:/var/www/html:ro
+      - wpconcert_data:/var/lib/concert/data
+    depends_on:
+      - wordpress
+    networks:
+      - wp_net
+
+  wordpress:
+    image: wordpress:6.8-php8.3-fpm
+    restart: unless-stopped
+    environment:
+      WORDPRESS_DB_HOST: db:3306
+      WORDPRESS_DB_NAME: wordpress
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: "${WP_DB_PASSWORD:-change-me-wordpress-db-password}"
+    volumes:
+      - wp_webroot:/var/www/html
+    depends_on:
+      - db
+    networks:
+      - wp_net
+
+  db:
+    image: mariadb:11
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: wordpress
+      MARIADB_USER: wordpress
+      MARIADB_PASSWORD: "${WP_DB_PASSWORD:-change-me-wordpress-db-password}"
+      MARIADB_ROOT_PASSWORD: "${WP_DB_ROOT_PASSWORD:-change-me-root-db-password}"
+    volumes:
+      - wp_db:/var/lib/mysql
+    networks:
+      - wp_net
+
+volumes:
+  wp_webroot:
+  wp_db:
+  wpconcert_data:
+
+networks:
+  wp_net:

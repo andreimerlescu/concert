@@ -10,8 +10,16 @@ import (
 	"strings"
 )
 
-//go:embed web/waiting.html web/waiting.css web/waiting.js
+//go:embed web/waiting.html web/waiting.css web/waiting.js web/busy.html web/busy.js
 var waitingWeb embed.FS
+
+func init() {
+	b, err := waitingWeb.ReadFile("web/busy.html")
+	if err != nil {
+		panic("embedded web/busy.html missing: " + err.Error())
+	}
+	defaultBusyHTML = b
+}
 
 // Gin context keys shared between priorityGate (core) and edgeClaim (enterprise).
 const (

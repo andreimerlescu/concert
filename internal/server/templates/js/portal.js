@@ -16,6 +16,7 @@
     // Set once the portal has moved away from this page's address; stops polling.
     let portalMoved = false;
     let activeSite = '';
+    let lastLiveQueueDepth = 0;
 
     function withSiteParam(url) {
         if (!activeSite || url.startsWith('/api/sites') || url.startsWith('/api/reload')) return url;
@@ -578,6 +579,7 @@
             const drainBadge = byId('badge-cap-draining');
             if (drainBadge) drainBadge.classList.toggle('d-none', !d.cap_draining);
             setBar('bar-occupancy', d.occupancy, d.cap);
+            if (typeof d.live_queue_depth === 'number') lastLiveQueueDepth = d.live_queue_depth;
             setText('stat-queue', fmtNum(d.live_queue_depth));
             setText('stat-queue-depth', fmtNum(d.queue_depth));
             setText('stat-assets', fmtNum(d.asset_in_flight) + ' / ' + fmtNum(d.asset_cap));
@@ -841,6 +843,47 @@
 
     byId('queue-filter').addEventListener('input', debounce(() => queueTable.go(1), 300));
     byId('queue-refresh').addEventListener('click', () => queueTable.refresh());
+
+    const clearStaleBtn = byId('queue-clear-stale');
+    if (clearStaleBtn) {
+        clearStaleBtn.addEventListener('click', async () => {
+            const scope = activeSite ? ` for ${activeSite}` : '';
+            if (!window.confirm(`Flush stale/idle tickets from the waiting room${scope}? Active polling visitors keep their places.`)) return;
+            clearStaleBtn.disabled = true;
+            try {
+                const r = await api('POST', '/api/queue/clear', { mode: 'stale' });
+                const n = Number(r.removed || 0);
+                toast(n > 0 ? `Flushed ${plural(n, 'stale ticket')}${scope}.` : `No stale tickets found${scope}.`, n > 0 ? 'warning' : 'info');
+            } catch (err) {
+                toast(err.message, 'danger');
+            } finally {
+                clearStaleBtn.disabled = false;
+                queueTable.refresh();
+                refreshOverview();
+            }
+        });
+    }
+
+    const clearAllBtn = byId('queue-clear-all');
+    if (clearAllBtn) {
+        clearAllBtn.addEventListener('click', async () => {
+            const depth = typeof lastLiveQueueDepth === 'number' ? lastLiveQueueDepth : queueTable.total;
+            const siteLabel = activeSite || 'this site';
+            if (!window.confirm(`Clear all waiting tickets for ${siteLabel} (currently ${fmtNum(depth)} waiting)?\n\nCleared visitors are not banned or blocked and can transparently re-admit or rejoin at the back of the line.`)) return;
+            clearAllBtn.disabled = true;
+            try {
+                const r = await api('POST', '/api/queue/clear', { mode: 'all' });
+                const n = Number(r.removed || 0);
+                toast(`Cleared ${plural(n, 'ticket')} from ${siteLabel}.`, 'warning');
+            } catch (err) {
+                toast(err.message, 'danger');
+            } finally {
+                clearAllBtn.disabled = false;
+                queueTable.refresh();
+                refreshOverview();
+            }
+        });
+    }
 
     byId('queue-rows').addEventListener('click', async (ev) => {
         const btn = ev.target.closest('button[data-action]');

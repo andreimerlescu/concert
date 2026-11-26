@@ -617,7 +617,7 @@ func (s *Server) verifyDirect(ctx context.Context, body []byte) (any, error) {
 	var err error
 	switch c.family {
 	case "xrpl":
-		txHash, payer, err = c.xrp.FindDirectPayment(ctx, in.From, in.To, in.Asset, in.MinAmount, in.DestinationTag, in.RequireTag, in.Memo, 0)
+		txHash, payer, err = c.xrp.FindDirectPaymentSince(ctx, in.From, in.To, in.Asset, in.MinAmount, in.DestinationTag, in.RequireTag, in.Memo, 0, since)
 	case "stellar":
 		txHash, payer, err = c.xlm.FindDirectPayment(ctx, in.From, in.To, in.Asset, in.MinAmount, in.Memo, since)
 	case "hedera":

@@ -126,6 +126,135 @@ func TestParseConcertfile_Errors(t *testing.T) {
 	}
 }
 
+func TestRoomV19AndUpstreamDirectivesRoundTrip(t *testing.T) {
+	src := `{
+    listen :8443
+    token_ttl 2m
+    first_poll_grace 20s
+    ready_grace 15s
+    idle_poll_ttl 30s
+    reaper 10s
+    retry_after 3
+    busy_html /etc/concert/busy.html
+    clear_queue_on_start off
+    body_read_idle_timeout off
+    max_upload_time off
+    upstream_timeout 45s
+    upstream_body_idle_timeout 20s
+    upstream_cb_failures 5
+    upstream_cb_cooldown 15s
+    upstream_health_path /healthz
+    upstream_health_interval 5s
+}
+
+alpha.example.com {
+    upstream http://127.0.0.1:9001
+    cap 20
+}
+
+beta.example.com {
+    upstream http://127.0.0.1:9002
+    cap 10
+    token_ttl 0
+    first_poll_grace off
+    ready_grace off
+    idle_poll_ttl off
+    reaper 12s
+    retry_after 4
+    busy_html /etc/concert/beta-busy.html
+    clear_queue_on_start on
+    upstream_timeout off
+    upstream_body_idle_timeout off
+    upstream_cb_failures 0
+    upstream_cb_cooldown 30s
+    upstream_health_path off
+    upstream_health_interval 15s
+}
+`
+	f, err := ParseConcertfile([]byte(src))
+	if err != nil {
+		t.Fatalf("ParseConcertfile: %v", err)
+	}
+	if f.Global.TokenTTL != "2m" || f.Global.FirstPollGrace != "20s" || f.Global.ReadyGrace != "15s" ||
+		f.Global.IdlePollTTL != "30s" || f.Global.Reaper != "10s" || f.Global.RetryAfter != 3 ||
+		f.Global.BusyHTML != "/etc/concert/busy.html" || f.Global.ClearQueueOnStart == nil || *f.Global.ClearQueueOnStart ||
+		f.Global.UpstreamTimeout != "45s" || f.Global.UpstreamBodyIdleTimeout != "20s" ||
+		f.Global.UpstreamCBFailures == nil || *f.Global.UpstreamCBFailures != 5 ||
+		f.Global.UpstreamCBCooldown != "15s" || f.Global.UpstreamHealthPath != "/healthz" ||
+		f.Global.UpstreamHealthInterval != "5s" {
+		t.Fatalf("unexpected global fields: %+v", f.Global)
+	}
+	s1 := f.Sites[1]
+	if s1.TokenTTL != "0" || s1.FirstPollGrace != "off" || s1.ReadyGrace != "off" ||
+		s1.IdlePollTTL != "off" || s1.Reaper != "12s" || s1.RetryAfter != 4 ||
+		s1.BusyHTML != "/etc/concert/beta-busy.html" || s1.ClearQueueOnStart == nil || !*s1.ClearQueueOnStart ||
+		s1.UpstreamTimeout != "off" || s1.UpstreamBodyIdleTimeout != "off" ||
+		s1.UpstreamCBFailures == nil || *s1.UpstreamCBFailures != 0 ||
+		s1.UpstreamCBCooldown != "30s" || s1.UpstreamHealthPath != "off" ||
+		s1.UpstreamHealthInterval != "15s" {
+		t.Fatalf("unexpected site fields: %+v", s1)
+	}
+
+	out := FormatConcertfile(f)
+	f2, err := ParseConcertfile([]byte(out))
+	if err != nil {
+		t.Fatalf("round-trip ParseConcertfile failed: %v\n%s", err, out)
+	}
+	if f2.Global.ReadyGrace != "15s" || f2.Global.IdlePollTTL != "30s" || f2.Global.Reaper != "10s" ||
+		f2.Global.RetryAfter != 3 || f2.Global.BusyHTML != "/etc/concert/busy.html" ||
+		f2.Global.ClearQueueOnStart == nil || *f2.Global.ClearQueueOnStart ||
+		f2.Global.UpstreamBodyIdleTimeout != "20s" || f2.Global.UpstreamCBFailures == nil || *f2.Global.UpstreamCBFailures != 5 ||
+		f2.Global.UpstreamHealthPath != "/healthz" || f2.Global.UpstreamHealthInterval != "5s" {
+		t.Fatalf("global round-trip mismatch: %+v\n%s", f2.Global, out)
+	}
+	if f2.Sites[1].ReadyGrace != "off" || f2.Sites[1].IdlePollTTL != "off" ||
+		f2.Sites[1].ClearQueueOnStart == nil || !*f2.Sites[1].ClearQueueOnStart ||
+		f2.Sites[1].UpstreamCBFailures == nil || *f2.Sites[1].UpstreamCBFailures != 0 ||
+		f2.Sites[1].UpstreamHealthPath != "off" {
+		t.Fatalf("site round-trip mismatch: %+v\n%s", f2.Sites[1], out)
+	}
+
+	// JSON parsing supports all new fields too.
+	j := `{
+		"global": {"ready_grace":"25s","idle_poll_ttl":"40s","upstream_body_idle_timeout":"15s","upstream_cb_failures":3,"clear_queue_on_start":true},
+		"sites": [{"hosts":["j.example.com"],"upstream":"http://127.0.0.1:9000","ready_grace":"off","upstream_cb_failures":0}]
+	}`
+	jf, err := ParseJSON([]byte(j))
+	if err != nil {
+		t.Fatalf("ParseJSON: %v", err)
+	}
+	if jf.Global.ReadyGrace != "25s" || jf.Global.ClearQueueOnStart == nil || !*jf.Global.ClearQueueOnStart ||
+		jf.Sites[0].ReadyGrace != "off" || jf.Sites[0].UpstreamCBFailures == nil || *jf.Sites[0].UpstreamCBFailures != 0 {
+		t.Fatalf("unexpected JSON config: %+v", jf)
+	}
+
+	// Invalid directive bounds rejected.
+	badCases := []struct {
+		name string
+		src  string
+	}{
+		{"ready_grace too low", "a.com { ready_grace 2s }"},
+		{"ready_grace too high", "a.com { ready_grace 15m }"},
+		{"idle_poll_ttl too low", "a.com { idle_poll_ttl 5s }"},
+		{"reaper off", "a.com { reaper off }"},
+		{"reaper too low", "a.com { reaper 1s }"},
+		{"retry_after zero", "a.com { retry_after 0 }"},
+		{"upstream_body_idle_timeout too low", "a.com { upstream_body_idle_timeout 500ms }"},
+		{"upstream_cb_failures negative", "a.com { upstream_cb_failures -1 }"},
+		{"upstream_cb_cooldown too low", "a.com { upstream_cb_cooldown 500ms }"},
+		{"upstream_health_path no slash", "a.com { upstream_health_path healthz }"},
+		{"upstream_health_interval too low", "a.com { upstream_health_interval 500ms }"},
+		{"global ready_grace bad", "{ ready_grace 1s }\na.com { cap 1 }"},
+	}
+	for _, tc := range badCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := ParseConcertfile([]byte(tc.src)); err == nil {
+				t.Errorf("expected error for %s (%s)", tc.name, tc.src)
+			}
+		})
+	}
+}
+
 func FuzzParseConcertfile(f *testing.F) {
 	f.Add("{ listen :443; http3 on }\nshop.example.com { root /var/www; cap 12 }")
 	f.Add("a.com, b.com { preset wordpress\n # comment\n micro_cache 10s }")

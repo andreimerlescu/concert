@@ -31,6 +31,8 @@ func registerConcertRoutes(r *gin.Engine, g *generation) {
 			file = "waiting.css"
 		case "/waiting.js":
 			file = "waiting.js"
+		case "/busy.js":
+			file = "busy.js"
 		case "/access.js":
 			file = "access.js"
 		case "/wallet-adapters.js":
@@ -47,14 +49,19 @@ func registerConcertRoutes(r *gin.Engine, g *generation) {
 				return
 			}
 			ct := "text/html; charset=utf-8"
+			cacheControl := "no-store"
 			if strings.HasSuffix(file, ".css") {
 				ct = "text/css; charset=utf-8"
 			}
 			if strings.HasSuffix(file, ".js") {
 				ct = "text/javascript; charset=utf-8"
 			}
+			if file == "busy.js" {
+				ct = "application/javascript; charset=utf-8"
+				cacheControl = "public, max-age=300"
+			}
 			c.Header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
-			c.Header("Cache-Control", "no-store")
+			c.Header("Cache-Control", cacheControl)
 			c.Header("X-Content-Type-Options", "nosniff")
 			c.Header("Referrer-Policy", "no-referrer")
 			c.Data(200, ct, b)

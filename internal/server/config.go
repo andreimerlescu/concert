@@ -47,29 +47,34 @@ type config struct {
 	microCacheMaxMB int
 	http3           bool
 
-	listen              string
-	upstream            string
-	capacity            int
-	maxQueue            int64
-	reaper              time.Duration
-	tokenTTL            time.Duration
-	firstPollGrace      time.Duration
-	secureCookie        bool
-	cookiePath          string
-	cookieDomain        string
-	preserveHost        bool
-	bypass              string
-	htmlFile            string
-	skipURL             string
-	rate                float64
-	surge               float64
-	passDuration        time.Duration
-	headerTimeout       time.Duration
-	bodyReadIdleTimeout time.Duration
-	maxUploadTime       time.Duration
-	apiJSON             bool
-	retryAfter          int
-	adminToken          string
+	listen                  string
+	upstream                string
+	capacity                int
+	maxQueue                int64
+	reaper                  time.Duration
+	tokenTTL                time.Duration
+	firstPollGrace          time.Duration
+	readyGrace              time.Duration
+	idlePollTTL             time.Duration
+	secureCookie            bool
+	cookiePath              string
+	cookieDomain            string
+	preserveHost            bool
+	bypass                  string
+	htmlFile                string
+	busyHTMLFile            string
+	clearQueueOnStart       bool
+	skipURL                 string
+	rate                    float64
+	surge                   float64
+	passDuration            time.Duration
+	headerTimeout           time.Duration
+	upstreamBodyIdleTimeout time.Duration
+	bodyReadIdleTimeout     time.Duration
+	maxUploadTime           time.Duration
+	apiJSON                 bool
+	retryAfter              int
+	adminToken              string
 
 	// room v1.8.0 verify-only Ed25519 split mode for multi-replica VIP passes & signed leases.
 	roomVerifyKeys       string
@@ -366,6 +371,10 @@ func (c *config) normalize() error {
 	if c.upstreamCBCooldown == 0 {
 		c.upstreamCBCooldown = 15 * time.Second
 	}
+	if c.upstreamBodyIdleTimeout != 0 && (c.upstreamBodyIdleTimeout < minUpstreamBodyIdleTimeout || c.upstreamBodyIdleTimeout > maxUpstreamBodyIdleTimeout) {
+		return fmt.Errorf("invalid -upstream-body-idle-timeout %s: must be 0 (off) or between %s and %s",
+			c.upstreamBodyIdleTimeout, minUpstreamBodyIdleTimeout, maxUpstreamBodyIdleTimeout)
+	}
 	if c.bodyReadIdleTimeout < 0 {
 		return fmt.Errorf("invalid -body-read-idle-timeout %s: must not be negative", c.bodyReadIdleTimeout)
 	}
@@ -410,15 +419,57 @@ func (c *config) normalize() error {
 	if math.IsNaN(c.roomLeaseFraction) || math.IsInf(c.roomLeaseFraction, 0) || c.roomLeaseFraction < 0 || c.roomLeaseFraction > 1 {
 		return fmt.Errorf("invalid -room-lease-fraction %g: must be between 0 and 1", c.roomLeaseFraction)
 	}
+	minRetryGrace := 2 * time.Duration(c.retryAfter) * time.Second
+	effTokenTTL := c.effectiveTokenTTL()
 	if g := c.firstPollGrace; g != 0 {
 		if g < minFirstPollGrace || g > maxFirstPollGrace {
 			return fmt.Errorf("invalid -first-poll-grace %s: must be 0 (off) or between %s and %s",
 				g, minFirstPollGrace, maxFirstPollGrace)
 		}
-		if min := 2 * time.Duration(c.retryAfter) * time.Second; g < min {
+		if g < minRetryGrace {
 			return fmt.Errorf("invalid -first-poll-grace %s: must be at least twice -retry-after (%s), "+
-				"so API clients that retry instead of polling keep their place", g, min)
+				"so API clients that retry instead of polling keep their place", g, minRetryGrace)
 		}
+	}
+	if g := c.readyGrace; g != 0 {
+		if g < minReadyGrace || g > maxReadyGrace {
+			return fmt.Errorf("invalid -ready-grace %s: must be 0 (off) or between %s and %s",
+				g, minReadyGrace, maxReadyGrace)
+		}
+		if g < minRetryGrace {
+			return fmt.Errorf("invalid -ready-grace %s: must be at least twice -retry-after (%s), "+
+				"so API clients that retry on schedule can claim their slot", g, minRetryGrace)
+		}
+		if g > effTokenTTL {
+			return fmt.Errorf("invalid -ready-grace %s: must not exceed effective -token-ttl (%s)", g, effTokenTTL)
+		}
+	}
+	if g := c.idlePollTTL; g != 0 {
+		if g < minIdlePollTTL || g > maxIdlePollTTL {
+			return fmt.Errorf("invalid -idle-poll-ttl %s: must be 0 (off) or between %s and %s",
+				g, minIdlePollTTL, maxIdlePollTTL)
+		}
+		if g < minRetryGrace {
+			return fmt.Errorf("invalid -idle-poll-ttl %s: must be at least twice -retry-after (%s), "+
+				"so API clients that retry on schedule keep their place", g, minRetryGrace)
+		}
+		if g > effTokenTTL {
+			return fmt.Errorf("invalid -idle-poll-ttl %s: must not exceed effective -token-ttl (%s)", g, effTokenTTL)
+		}
+	}
+	if p := strings.TrimSpace(c.busyHTMLFile); p != "" {
+		info, serr := os.Stat(p)
+		if serr != nil {
+			return fmt.Errorf("cannot read -busy-html %s: %w", c.busyHTMLFile, serr)
+		}
+		if info.IsDir() {
+			return fmt.Errorf("cannot read -busy-html %s: is a directory", c.busyHTMLFile)
+		}
+		f, ferr := os.Open(p)
+		if ferr != nil {
+			return fmt.Errorf("cannot read -busy-html %s: %w", c.busyHTMLFile, ferr)
+		}
+		_ = f.Close()
 	}
 	if c.assetCap < 0 || c.assetCap > math.MaxInt32 {
 		return fmt.Errorf("invalid -asset-cap %d: must be 0 (derived) or between 1 and %d", c.assetCap, math.MaxInt32)
@@ -560,6 +611,15 @@ func (c *config) normalize() error {
 	}
 
 	return validateRoutes(c)
+}
+
+// effectiveTokenTTL returns the active sliding token TTL: room.DefaultTokenTTL
+// when -token-ttl is 0, otherwise c.tokenTTL.
+func (c *config) effectiveTokenTTL() time.Duration {
+	if c.tokenTTL == 0 {
+		return room.DefaultTokenTTL
+	}
+	return c.tokenTTL
 }
 
 // effectiveAssetCap is -asset-cap when set, otherwise cap × asset-user-cap-h2,

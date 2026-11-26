@@ -6,7 +6,7 @@ require (
 	filippo.io/edwards25519 v1.2.0
 	github.com/andreimerlescu/goenv v1.1.0
 	github.com/andreimerlescu/naddr v0.0.1
-	github.com/andreimerlescu/room v1.8.0
+	github.com/andreimerlescu/room v1.9.0
 	github.com/andreimerlescu/sema v1.3.0
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1
 	github.com/gin-gonic/gin v1.12.0

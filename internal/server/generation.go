@@ -4,6 +4,8 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"net/netip"
 	"strconv"
@@ -231,47 +233,53 @@ func registerOps(r *gin.Engine, g *generation) {
 		}
 		c.Header("Cache-Control", "no-store")
 		out := gin.H{
-			"cap":                          wr.Cap(),
-			"occupancy":                    wr.Len(),
-			"cap_draining":                 wr.Len() > int(wr.Cap()),
-			"queue_depth":                  wr.QueueDepth(),
-			"live_queue_depth":             wr.LiveQueueDepth(),
-			"max_queue_depth":              wr.MaxQueueDepth(),
-			"utilization":                  wr.UtilizationSmoothed(),
-			"token_ttl":                    wr.TokenTTL().String(),
-			"first_poll_grace":             wr.FirstPollGrace().String(),
-			"queued_total":                 stats.queued.Load(),
-			"evicted_total":                stats.evicted.Load(),
-			"timeouts_total":               stats.timeouts.Load(),
-			"promoted_total":               stats.promoted.Load(),
-			"removed_total":                stats.removed.Load(),
-			"token_rejected_total":         stats.tokenRejected.Load(),
-			"lease_ceiling":                wr.LeaseCeiling(),
-			"asset_cap":                    assets.global.Cap(),
-			"asset_in_flight":              assets.global.Len(),
-			"asset_users":                  assets.users.count.Load(),
-			"static_served_total":          stats.staticServed.Load(),
-			"static_not_found_total":       stats.staticNotFound.Load(),
-			"fcgi_requests_total":          stats.fcgiRequests.Load(),
-			"fcgi_denied_total":            stats.fcgiDenied.Load(),
-			"asset_user_cap_h1":            cfg.assetUserCapH1,
-			"asset_user_cap_h2":            cfg.assetUserCapH2,
-			"asset_served_total":           stats.assetServed.Load(),
-			"asset_denied_total":           stats.assetDenied.Load(),
-			"asset_user_throttled_total":   stats.assetUserThrottled.Load(),
-			"asset_global_throttled_total": stats.assetGlobalThrottled.Load(),
-			"stream_cap":                   streams.sem.Cap(),
-			"stream_active":                streams.sem.Len(),
-			"stream_served_total":          stats.streamServed.Load(),
-			"stream_denied_total":          stats.streamDenied.Load(),
-			"stream_throttled_total":       stats.streamThrottled.Load(),
-			"abuse_enabled":                g.abuse != nil,
-			"abuse_tracked":                g.abuse.tracked(),
-			"abuse_range_bans":             g.abuse.rangeCount(),
-			"abuse_strikes_total":          stats.abuseStrikes.Load(),
-			"abuse_bans_total":             stats.abuseBans.Load(),
-			"abuse_rejected_total":         stats.abuseRejected.Load(),
-			"abuse_dropped_total":          stats.abuseDropped.Load(),
+			"cap":                               wr.Cap(),
+			"occupancy":                         wr.Len(),
+			"cap_draining":                      wr.Len() > int(wr.Cap()),
+			"queue_depth":                       wr.QueueDepth(),
+			"live_queue_depth":                  wr.LiveQueueDepth(),
+			"max_queue_depth":                   wr.MaxQueueDepth(),
+			"utilization":                       wr.UtilizationSmoothed(),
+			"token_ttl":                         wr.TokenTTL().String(),
+			"first_poll_grace":                  wr.FirstPollGrace().String(),
+			"ready_grace":                       wr.ReadyGrace().String(),
+			"idle_poll_ttl":                     wr.IdlePollTTL().String(),
+			"reaper":                            wr.ReaperInterval().String(),
+			"queued_total":                      stats.queued.Load(),
+			"evicted_total":                     stats.evicted.Load(),
+			"timeouts_total":                    stats.timeouts.Load(),
+			"promoted_total":                    stats.promoted.Load(),
+			"removed_total":                     stats.removed.Load(),
+			"rejected_503_total":                stats.rejected503.Load(),
+			"cleared_total":                     stats.cleared.Load(),
+			"token_rejected_total":              stats.tokenRejected.Load(),
+			"upstream_body_idle_timeouts_total": stats.upstreamBodyIdleTimeouts.Load(),
+			"lease_ceiling":                     wr.LeaseCeiling(),
+			"asset_cap":                         assets.global.Cap(),
+			"asset_in_flight":                   assets.global.Len(),
+			"asset_users":                       assets.users.count.Load(),
+			"static_served_total":               stats.staticServed.Load(),
+			"static_not_found_total":            stats.staticNotFound.Load(),
+			"fcgi_requests_total":               stats.fcgiRequests.Load(),
+			"fcgi_denied_total":                 stats.fcgiDenied.Load(),
+			"asset_user_cap_h1":                 cfg.assetUserCapH1,
+			"asset_user_cap_h2":                 cfg.assetUserCapH2,
+			"asset_served_total":                stats.assetServed.Load(),
+			"asset_denied_total":                stats.assetDenied.Load(),
+			"asset_user_throttled_total":        stats.assetUserThrottled.Load(),
+			"asset_global_throttled_total":      stats.assetGlobalThrottled.Load(),
+			"stream_cap":                        streams.sem.Cap(),
+			"stream_active":                     streams.sem.Len(),
+			"stream_served_total":               stats.streamServed.Load(),
+			"stream_denied_total":               stats.streamDenied.Load(),
+			"stream_throttled_total":            stats.streamThrottled.Load(),
+			"abuse_enabled":                     g.abuse != nil,
+			"abuse_tracked":                     g.abuse.tracked(),
+			"abuse_range_bans":                  g.abuse.rangeCount(),
+			"abuse_strikes_total":               stats.abuseStrikes.Load(),
+			"abuse_bans_total":                  stats.abuseBans.Load(),
+			"abuse_rejected_total":              stats.abuseRejected.Load(),
+			"abuse_dropped_total":               stats.abuseDropped.Load(),
 		}
 		// Only disclose internal upstream URLs when unauthenticated legacy mode
 		// is active or when the caller holds admin role.
@@ -393,6 +401,14 @@ func registerOps(r *gin.Engine, g *generation) {
 		c.JSON(http.StatusOK, gin.H{"promoted": occupantID(token), "position": body.Position})
 	})
 
+	r.POST("/_room/queue/clear", func(c *gin.Context) {
+		actor, ok := g.requireRole(c, roleOperator)
+		if !ok {
+			return
+		}
+		handleQueueClear(c, a, actor.Actor, actor.Role.String(), "api", nil)
+	})
+
 	r.GET("/_room/abuse", func(c *gin.Context) {
 		if _, ok := g.requireRole(c, roleViewer); !ok {
 			return
@@ -457,5 +473,108 @@ func registerOps(r *gin.Engine, g *generation) {
 			return
 		}
 		handlePrivacyErase(c, a, actor, "api")
+	})
+}
+
+type queueClearReq struct {
+	Mode           string `json:"mode"`
+	MaxIdleSeconds int    `json:"max_idle_seconds"`
+}
+
+func clientIPString(c *gin.Context) string {
+	if ip := clientIPFrom(c); ip.IsValid() {
+		return ip.String()
+	}
+	if pr := portalPrincipal(c); pr.IP.IsValid() {
+		return pr.IP.String()
+	}
+	if ip, ok := remoteAddr(c.Request); ok && ip.IsValid() {
+		return ip.String()
+	}
+	return ""
+}
+
+// handleQueueClear clears stale or all waiting tickets from a.room without
+// populating p.kicked (so cleared visitors transparently re-admit or re-queue
+// instead of seeing a 403 removal notice), reconciles keyed agent places,
+// immediately prunes portal notes when p != nil, updates cleared metrics, and
+// writes an audit entry (audit-logged only, no alert email).
+func handleQueueClear(c *gin.Context, a *app, actor, role, source string, p *portal) {
+	if c.Request.Body == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": `mode is required ("stale" or "all")`})
+		return
+	}
+	var req queueClearReq
+	if err := json.NewDecoder(io.LimitReader(c.Request.Body, 4<<10)).Decode(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid JSON body: " + err.Error()})
+		return
+	}
+	req.Mode = strings.TrimSpace(req.Mode)
+	if req.Mode != "stale" && req.Mode != "all" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": `mode must be "stale" or "all"`})
+		return
+	}
+	if req.MaxIdleSeconds < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "max_idle_seconds must be non-negative"})
+		return
+	}
+
+	var removed int
+	var maxIdle time.Duration
+	switch req.Mode {
+	case "stale":
+		if req.MaxIdleSeconds > 0 {
+			maxIdle = time.Duration(req.MaxIdleSeconds) * time.Second
+		} else {
+			maxIdle = a.room.IdlePollTTL()
+			if maxIdle <= 0 {
+				maxIdle = 30 * time.Second
+			}
+		}
+		removed = a.room.ClearStale(maxIdle)
+	case "all":
+		removed = a.room.ClearQueue()
+	}
+
+	if removed > 0 {
+		a.stats.cleared.Add(int64(removed))
+	}
+	a.agents.reconcile(a.room)
+	if p != nil {
+		p.pruneNotesFor(a)
+	}
+
+	liveDepth := a.room.LiveQueueDepth()
+	queueDepth := a.room.QueueDepth()
+
+	details := map[string]any{
+		"mode":           req.Mode,
+		"removed":        removed,
+		"remaining_live": liveDepth,
+	}
+	if req.Mode == "stale" {
+		details["max_idle_seconds"] = int(maxIdle / time.Second)
+	}
+	if site := a.current().cfg.siteHost; site != "" {
+		details["site"] = site
+	}
+
+	a.recordAudit(auditEvent{
+		Actor:    actor,
+		Role:     role,
+		Source:   source,
+		Action:   "queue.clear",
+		Outcome:  "ok",
+		ClientIP: clientIPString(c),
+		Details:  details,
+	})
+	log.Printf("queue: %s cleared queue via %s (mode=%s removed=%d remaining_live=%d)", actor, source, req.Mode, removed, liveDepth)
+
+	c.Header("Cache-Control", "no-store")
+	c.JSON(http.StatusOK, gin.H{
+		"mode":             req.Mode,
+		"removed":          removed,
+		"live_queue_depth": liveDepth,
+		"queue_depth":      queueDepth,
 	})
 }

@@ -439,12 +439,13 @@ func newEnterpriseProxy(cfg config, stats *counters, modify func(*http.Response)
 	}
 	pool := newUpstreamPoolWithFCGI(cfg, transport, fcgiTr)
 	rt := &trackedTransport{
-		base:     transport,
-		fcgi:     fcgiTr,
-		compress: cfg.compress,
-		pool:     pool,
-		stats:    stats,
-		topo:     topo,
+		base:            transport,
+		fcgi:            fcgiTr,
+		compress:        cfg.compress,
+		bodyIdleTimeout: cfg.upstreamBodyIdleTimeout,
+		pool:            pool,
+		stats:           stats,
+		topo:            topo,
 	}
 
 	proxy := &httputil.ReverseProxy{
@@ -525,12 +526,13 @@ func newEnterpriseProxy(cfg config, stats *counters, modify func(*http.Response)
 var errCircuitOpen = errors.New("upstream circuit breaker open")
 
 type trackedTransport struct {
-	base     http.RoundTripper
-	fcgi     *fcgiTransport
-	compress bool
-	pool     *upstreamPool
-	stats    *counters
-	topo     *topology // signs an edge's claims; nil or standalone signs nothing
+	base            http.RoundTripper
+	fcgi            *fcgiTransport
+	compress        bool
+	bodyIdleTimeout time.Duration
+	pool            *upstreamPool
+	stats           *counters
+	topo            *topology // signs an edge's claims; nil or standalone signs nothing
 }
 
 // RoundTrip sends req to the backend chosen for it. On an edge it signs the
@@ -548,8 +550,9 @@ func (t *trackedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	} else {
 		healthy = b.isHealthy(now)
 	}
-	if !healthy && t.pool.cbThreshold > 0 {
-		// If circuit is explicitly open (not just active health failed on single node with CB disabled), fail fast.
+	if !healthy {
+		// Fail fast whenever the chosen backend is unhealthy — either its
+		// circuit breaker is open or active health probing marked it failed.
 		return nil, errCircuitOpen
 	}
 
@@ -595,22 +598,49 @@ func (t *trackedTransport) attempt(b *upstreamBackend, req *http.Request) (*http
 	b.inFlight.Add(1)
 	defer b.inFlight.Add(-1)
 
+	parentCtx := req.Context()
+	attemptReq, cancelBody := prepareRespBodyIdleTimeout(req, t.bodyIdleTimeout)
+	var bodyStalled atomic.Bool
+	onBodyStall := func() {
+		bodyStalled.Store(true)
+		if t.stats != nil {
+			t.stats.upstreamBodyIdleTimeouts.Add(1)
+		}
+		log.Printf("upstream response body idle timeout %s %s target=%s timeout=%s",
+			req.Method, clip(req.URL.Path, 256), b.target.Redacted(), t.bodyIdleTimeout)
+		if b.recordFailure(t.pool.cbThreshold, t.pool.cbCooldown, "upstream response body idle timeout", time.Now()) && t.pool.onCircuitOpen != nil {
+			t.pool.onCircuitOpen(b.target.Redacted(), "upstream response body idle timeout")
+		}
+	}
+
 	start := time.Now()
 	var resp *http.Response
 	var err error
 	if isFastCGITarget(b.target) && t.fcgi != nil {
-		resp, err = roundTripFCGI(t.fcgi, req, b.target)
-		if err == nil && t.compress {
-			maybeGzipFastCGI(req, resp)
+		resp, err = roundTripFCGI(t.fcgi, attemptReq, b.target)
+		if err == nil {
+			// Wrap resp.Body UNDERNEATH maybeGzipFastCGI so the synchronous 1 KiB
+			// gzip sniff is bounded and a mid-body stall closes orig to unblock
+			// io.Copy without deadlocking pipeCloser.Close().
+			wrapRespBodyIdleTimeout(parentCtx, attemptReq, resp, t.bodyIdleTimeout, cancelBody, onBodyStall)
+			if t.compress {
+				maybeGzipFastCGI(attemptReq, resp)
+			}
 		}
 	} else {
-		resp, err = t.base.RoundTrip(req)
+		resp, err = t.base.RoundTrip(attemptReq)
+		if err == nil {
+			wrapRespBodyIdleTimeout(parentCtx, attemptReq, resp, t.bodyIdleTimeout, cancelBody, onBodyStall)
+		}
 	}
 	dur := time.Since(start)
 	if t.stats != nil {
 		t.stats.upstreamLatency.observe(dur)
 	}
 	if err != nil {
+		if cancelBody != nil {
+			cancelBody()
+		}
 		if !errors.Is(err, context.Canceled) {
 			if b.recordFailure(t.pool.cbThreshold, t.pool.cbCooldown, err.Error(), time.Now()) && t.pool.onCircuitOpen != nil {
 				t.pool.onCircuitOpen(b.target.Redacted(), err.Error())
@@ -637,12 +667,16 @@ func (t *trackedTransport) attempt(b *upstreamBackend, req *http.Request) (*http
 		if t.stats != nil {
 			t.stats.upstreamUnavail.Add(1)
 		}
-		reason := fmt.Sprintf("HTTP %d", resp.StatusCode)
-		if b.recordFailure(t.pool.cbThreshold, t.pool.cbCooldown, reason, time.Now()) && t.pool.onCircuitOpen != nil {
-			t.pool.onCircuitOpen(b.target.Redacted(), reason)
+		if !bodyStalled.Load() {
+			reason := fmt.Sprintf("HTTP %d", resp.StatusCode)
+			if b.recordFailure(t.pool.cbThreshold, t.pool.cbCooldown, reason, time.Now()) && t.pool.onCircuitOpen != nil {
+				t.pool.onCircuitOpen(b.target.Redacted(), reason)
+			}
 		}
 	default:
-		b.recordSuccess()
+		if !bodyStalled.Load() {
+			b.recordSuccess()
+		}
 	}
 	return resp, nil
 }

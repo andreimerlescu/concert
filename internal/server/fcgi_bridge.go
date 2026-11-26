@@ -33,10 +33,11 @@ func validateFastCGITarget(u *url.URL) error {
 
 func newFCGITransportWithStats(cfg config, stats *counters) (*fcgiTransport, error) {
 	return fcgi.NewTransport(fcgi.Config{
-		Root:          cfg.staticRoot,
-		Index:         cfg.fcgiIndex,
-		DenyPaths:     cfg.parsedFCGIDenyPaths,
-		HeaderTimeout: cfg.headerTimeout,
+		Root:            cfg.staticRoot,
+		Index:           cfg.fcgiIndex,
+		DenyPaths:       cfg.parsedFCGIDenyPaths,
+		HeaderTimeout:   cfg.headerTimeout,
+		BodyIdleTimeout: cfg.upstreamBodyIdleTimeout,
 		OnStderr: func(msg string) {
 			log.Printf("fcgi stderr: %s", clip(msg, 512))
 		},
@@ -79,6 +80,13 @@ func withFastCGIBodyAbort(req *http.Request, fn func() bool) *http.Request {
 		return req
 	}
 	return req.WithContext(fcgi.WithBodyAbort(req.Context(), fn))
+}
+
+func withFastCGIStream(req *http.Request) *http.Request {
+	if req == nil {
+		return nil
+	}
+	return req.WithContext(fcgi.WithStream(req.Context()))
 }
 
 func buildMicroCache(cfg config, stats *counters) *pageMicroCache {

@@ -6,9 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/andreimerlescu/concert/internal/chain/httpx"
 )
+
+// rippleEpochOffset is the number of seconds between Unix epoch (1970-01-01)
+// and the XRPL Ripple Epoch (2000-01-01T00:00:00Z).
+const rippleEpochOffset int64 = 946684800
 
 // AccountInfo is the validated account state the scheme consults.
 type AccountInfo struct {
@@ -44,6 +49,7 @@ type AccountTxEntry struct {
 	Hash              string
 	Validated         bool
 	LedgerIndex       uint32
+	Date              time.Time // UTC close time from XRPL tx.date (Ripple Epoch), zero if omitted
 	Result            string
 	TxType            string
 	Account           string
@@ -282,6 +288,7 @@ func (c RPC) AccountTx(ctx context.Context, account string, ledgerIndexMin uint3
 			Tx        *struct {
 				Hash           string  `json:"hash"`
 				LedgerIndex    uint32  `json:"ledger_index"`
+				Date           uint32  `json:"date"`
 				TxType         string  `json:"TransactionType"`
 				Account        string  `json:"Account"`
 				Destination    string  `json:"Destination"`
@@ -295,6 +302,7 @@ func (c RPC) AccountTx(ctx context.Context, account string, ledgerIndexMin uint3
 			} `json:"tx"`
 			TxJSON *struct {
 				LedgerIndex    uint32  `json:"ledger_index"`
+				Date           uint32  `json:"date"`
 				TxType         string  `json:"TransactionType"`
 				Account        string  `json:"Account"`
 				Destination    string  `json:"Destination"`
@@ -326,6 +334,9 @@ func (c RPC) AccountTx(ctx context.Context, account string, ledgerIndexMin uint3
 		if item.Tx != nil {
 			e.Hash = item.Tx.Hash
 			e.LedgerIndex = item.Tx.LedgerIndex
+			if item.Tx.Date > 0 {
+				e.Date = time.Unix(int64(item.Tx.Date)+rippleEpochOffset, 0).UTC()
+			}
 			e.TxType = item.Tx.TxType
 			e.Account = item.Tx.Account
 			e.Destination = item.Tx.Destination
@@ -339,6 +350,9 @@ func (c RPC) AccountTx(ctx context.Context, account string, ledgerIndexMin uint3
 		} else if item.TxJSON != nil {
 			e.Hash = item.Hash
 			e.LedgerIndex = item.TxJSON.LedgerIndex
+			if item.TxJSON.Date > 0 {
+				e.Date = time.Unix(int64(item.TxJSON.Date)+rippleEpochOffset, 0).UTC()
+			}
 			e.TxType = item.TxJSON.TxType
 			e.Account = item.TxJSON.Account
 			e.Destination = item.TxJSON.Destination

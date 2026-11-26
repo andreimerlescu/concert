@@ -16,6 +16,10 @@ const (
 	// ctxAgentKey holds the room key of a request agentGate identified by
 	// its Concert-Session header; see agent.go.
 	ctxAgentKey = "concert.agent_key"
+	// ctxRoomFull is set by room's FullResponder when rejecting a request
+	// because maxQueueDepth was reached, so apiQueueWriter and agentWaitWriter
+	// pass the response through untouched.
+	ctxRoomFull = "concert.room_full"
 )
 
 // shutdownGrace bounds how long in-flight requests get to finish on SIGTERM,
@@ -57,12 +61,20 @@ const (
 	strikeAgentPlaces  = 1 // new keyed place past -agent-places for the address
 )
 
-// First-poll grace limits. room accepts 10s-24h (0 turns it off). concert
-// also keeps it at least twice -retry-after, so an API client that retries
-// on schedule instead of polling /queue/status is not reclaimed.
+// First-poll grace, ready-claim grace, idle-poll TTL, and upstream response
+// body idle timeout limits. room accepts 10s-24h for first-poll grace and
+// idle-poll TTL, and 5s-10m for ready-claim grace (0 turns each off). concert
+// also keeps queue liveness timers at least twice -retry-after and at most the
+// effective -token-ttl.
 const (
-	minFirstPollGrace = 10 * time.Second
-	maxFirstPollGrace = 24 * time.Hour
+	minFirstPollGrace          = 10 * time.Second
+	maxFirstPollGrace          = 24 * time.Hour
+	minReadyGrace              = 5 * time.Second
+	maxReadyGrace              = 10 * time.Minute
+	minIdlePollTTL             = 10 * time.Second
+	maxIdlePollTTL             = 24 * time.Hour
+	minUpstreamBodyIdleTimeout = 1 * time.Second
+	maxUpstreamBodyIdleTimeout = 24 * time.Hour
 )
 
 // Permanent bans. A client or range whose ban ends at banForever stays

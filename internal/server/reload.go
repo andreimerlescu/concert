@@ -61,7 +61,12 @@ type generation struct {
 	forwardPage gin.HandlerFunc
 	engine      *gin.Engine
 	html        []byte // custom waiting room page; nil means room's own
+	busyHTML    []byte // branded 503 busy page (-busy-html or defaultBusyHTML)
 }
+
+// defaultBusyHTML holds Concert's embedded 503 busy page bytes when populated
+// by edition_core.go; loadBusyHTML falls back to it when -busy-html is unset.
+var defaultBusyHTML []byte
 
 // current is the generation serving requests now.
 func (a *app) current() *generation {
@@ -78,8 +83,12 @@ func (a *app) buildGeneration(next config, prev *generation) (*generation, error
 	if err != nil {
 		return nil, err
 	}
+	busyHTML, err := loadBusyHTML(next.busyHTMLFile)
+	if err != nil {
+		return nil, err
+	}
 
-	g := &generation{a: a, cfg: next, html: html, banRules: parsePaths(next.banPaths)}
+	g := &generation{a: a, cfg: next, html: html, busyHTML: busyHTML, banRules: parsePaths(next.banPaths)}
 	if next.abuseEnabled {
 		g.abuse = a.abuse
 	}
@@ -194,7 +203,8 @@ func (a *app) buildGeneration(next config, prev *generation) (*generation, error
 
 func sameProxy(a, b config) bool {
 	return a.upstream == b.upstream && a.preserveHost == b.preserveHost &&
-		a.headerTimeout == b.headerTimeout && a.trustedProxies == b.trustedProxies &&
+		a.headerTimeout == b.headerTimeout && a.upstreamBodyIdleTimeout == b.upstreamBodyIdleTimeout &&
+		a.trustedProxies == b.trustedProxies &&
 		a.upstreamHealthPath == b.upstreamHealthPath &&
 		a.upstreamHealthInterval == b.upstreamHealthInterval &&
 		a.upstreamCBFailures == b.upstreamCBFailures &&
@@ -230,6 +240,18 @@ func readWaitingRoomHTML(cfg config) ([]byte, error) {
 	html, err := os.ReadFile(cfg.htmlFile)
 	if err != nil {
 		return nil, fmt.Errorf("cannot read -html %s: %w", cfg.htmlFile, err)
+	}
+	return html, nil
+}
+
+func loadBusyHTML(path string) ([]byte, error) {
+	p := strings.TrimSpace(path)
+	if p == "" {
+		return defaultBusyHTML, nil
+	}
+	html, err := os.ReadFile(p)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read -busy-html %s: %w", path, err)
 	}
 	return html, nil
 }
@@ -279,6 +301,8 @@ func applyRoom(wr *room.WaitingRoom, cfg config, capacity int32, html []byte, pr
 		wr.SetReaperInterval(cfg.reaper),
 		wr.SetTokenTTL(cfg.tokenTTL),
 		wr.SetFirstPollGrace(cfg.firstPollGrace),
+		wr.SetReadyGrace(cfg.readyGrace),
+		wr.SetIdlePollTTL(cfg.idlePollTTL),
 		wr.SetPassDuration(cfg.passDuration),
 		wr.Validate(),
 	)

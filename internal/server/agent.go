@@ -213,6 +213,28 @@ func liveKeys(wr *room.WaitingRoom) map[string]struct{} {
 	return live
 }
 
+// reconcile removes any tracked key no longer present in wr's line, keeping
+// per-address agent counts accurate immediately after ClearStale or ClearQueue.
+func (p *agentPlaces) reconcile(wr *room.WaitingRoom) {
+	if p == nil || wr == nil {
+		return
+	}
+	p.mu.Lock()
+	empty := len(p.byKey) == 0
+	p.mu.Unlock()
+	if empty {
+		return
+	}
+	live := liveKeys(wr)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for k := range p.byKey {
+		if _, ok := live[k]; !ok {
+			p.forgetLocked(k)
+		}
+	}
+}
+
 // seed records the keyed places in room's line, after a restored queue.
 func (p *agentPlaces) seed(wr *room.WaitingRoom) int {
 	line := wr.Queue(math.MaxInt32)
@@ -295,7 +317,7 @@ func (g *generation) agentGate(c *gin.Context) {
 		places.forget(key)
 	case w.mode == agentHeld:
 		// The place exists.
-	case fresh:
+	case fresh, c.GetBool(ctxRoomFull):
 		// Refused by the breaker, or an error: no place was taken.
 		places.forget(key)
 	}
@@ -345,7 +367,7 @@ func (w *agentWaitWriter) decide(code int) {
 		return
 	}
 	w.decided = true
-	if w.c.GetBool(ctxAdmitted) {
+	if w.c.GetBool(ctxAdmitted) || w.c.GetBool(ctxRoomFull) {
 		return
 	}
 	h := w.ResponseWriter.Header()

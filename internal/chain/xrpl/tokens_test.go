@@ -159,4 +159,16 @@ func TestXRPL_TrustlineAndDirectPayment(t *testing.T) {
 	if err != nil || hash != "DEADBEEF02" || payer != holder {
 		t.Fatalf("FindDirectPayment(0.99 RLUSD): hash=%q payer=%q err=%v", hash, payer, err)
 	}
+
+	// Verify since filtering rejects older validated payments and accepts recent ones.
+	now := time.Now().UTC().Truncate(time.Second)
+	l.txs[0].Date = now.Add(-5 * time.Minute)
+	l.txs[1].Date = now
+	if _, _, err := s.FindDirectPaymentSince(context.Background(), holder, dest, "XRP", "1", tag, true, "concert:tag-proof-1", 400, now); err == nil {
+		t.Fatal("FindDirectPaymentSince accepted stale XRPL transaction predating since")
+	}
+	hash, payer, err = s.FindDirectPaymentSince(context.Background(), holder, dest, "RLUSD:"+issuer, "0.99", tag, true, "concert:rlusd-pay-1", 400, now)
+	if err != nil || hash != "DEADBEEF02" || payer != holder {
+		t.Fatalf("FindDirectPaymentSince(recent RLUSD): hash=%q payer=%q err=%v", hash, payer, err)
+	}
 }

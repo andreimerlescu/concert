@@ -1,12 +1,16 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
 	"math"
 	"net/http"
 	"net/netip"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -59,6 +63,11 @@ type app struct {
 	// runtimeCapOverride is true when -config mode has an emergency live cap
 	// override applied from the Portal/API (cleared on SIGHUP / reload).
 	runtimeCapOverride atomic.Bool
+
+	// skipQueueSave suppresses saveQueue in Close when an app is retired by a
+	// multi-vhost hot reload so no orphaned queue.snapshot is written after the
+	// replacement site app has already started.
+	skipQueueSave atomic.Bool
 
 	// Listeners, set by run once serving starts; guarded by settings.mu.
 	mainEP, portalEP *endpoint
@@ -126,6 +135,7 @@ func newApp(cfg config) (*app, error) {
 	// the cookie flow. The function only reads what agentGate left in the
 	// context, so it costs nothing on the hot path.
 	wr.SetTicketKeyFunc(agentKeyFromContext)
+	wr.SetFullResponder(a.handleRoomFull)
 	registerRoomEvents(wr, a)
 
 	g, err := a.buildGeneration(cfg, nil)
@@ -288,7 +298,7 @@ func (a *app) Close() {
 		// pass runs during or after the export below. The line itself
 		// stays readable after Stop.
 		a.room.Stop()
-		if a.queuePath != "" {
+		if a.queuePath != "" && !a.skipQueueSave.Load() {
 			a.saveQueue()
 		}
 		if g := a.current(); g != nil {
@@ -358,6 +368,21 @@ func registerRoomEvents(wr *room.WaitingRoom, a *app) {
 	wr.On(room.EventTimeout, func(room.Snapshot) { stats.timeouts.Add(1) })
 	wr.On(room.EventPromote, func(room.Snapshot) { stats.promoted.Add(1) })
 	wr.On(room.EventRemove, func(room.Snapshot) { stats.removed.Add(1) })
+	wr.On(room.EventReject, func(s room.Snapshot) {
+		stats.rejected503.Add(1)
+		live := wr.LiveQueueDepth()
+		a.notifyAlert(alertEvent{
+			Category:    alertCatQueue,
+			Severity:    alertSevCritical,
+			Title:       "Waiting room refused request (503)",
+			Summary:     fmt.Sprintf("Queue-full breaker refused a visitor (%d/%d slots, %d queued, %d live).", s.Occupancy, s.Capacity, s.QueueDepth, live),
+			Fingerprint: "queue:breaker-503",
+			Details: map[string]string{
+				"occupancy": fmt.Sprintf("%d/%d", s.Occupancy, s.Capacity),
+				"live":      fmt.Sprintf("%d", live),
+			},
+		})
+	})
 	wr.On(room.EventTokenRejected, func(s room.Snapshot) {
 		stats.tokenRejected.Add(1)
 		// Award a forged-pass strike on cryptographic tampering or cross-scope
@@ -367,6 +392,63 @@ func registerRoomEvents(wr *room.WaitingRoom, a *app) {
 			a.tokenRejectionStrike(s.ClientKey)
 		}
 	})
+}
+
+var placeholderRetryAfter = []byte("{{.RetryAfter}}")
+
+const busyPageCSP = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+
+// handleRoomFull is room's FullResponder, invoked when maxQueueDepth rejects an
+// arrival. It sets ctxRoomFull before writing headers so apiQueueWriter and
+// agentWaitWriter pass the formatted response through untouched.
+func (a *app) handleRoomFull(c *gin.Context, _ room.Snapshot) {
+	c.Set(ctxRoomFull, true)
+
+	retryAfter := 5
+	apiJSON := true
+	var raw []byte
+	if g := a.current(); g != nil {
+		if g.cfg.retryAfter > 0 {
+			retryAfter = g.cfg.retryAfter
+		}
+		apiJSON = g.cfg.apiJSON
+		raw = g.busyHTML
+	}
+	retryStr := strconv.Itoa(retryAfter)
+	c.Header("Cache-Control", "no-store")
+	c.Header("Retry-After", retryStr)
+
+	if c.GetString(ctxAgentKey) != "" {
+		c.Data(http.StatusServiceUnavailable, "application/json; charset=utf-8", mustJSON(gin.H{
+			"queued":              false,
+			"error":               "waiting room is full",
+			"retry_after_seconds": retryAfter,
+		}))
+		return
+	}
+
+	if wantsHTML(c.Request) {
+		if len(raw) == 0 {
+			raw = defaultBusyHTML
+		}
+		page := bytes.ReplaceAll(raw, placeholderRetryAfter, []byte(retryStr))
+		c.Header("Content-Security-Policy", busyPageCSP)
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("Referrer-Policy", "no-referrer")
+		c.Data(http.StatusServiceUnavailable, "text/html; charset=utf-8", page)
+		return
+	}
+
+	if apiJSON {
+		c.Data(http.StatusServiceUnavailable, "application/json; charset=utf-8", mustJSON(gin.H{
+			"queued":              false,
+			"error":               "waiting room is full",
+			"retry_after_seconds": retryAfter,
+		}))
+		return
+	}
+
+	c.AbortWithStatus(http.StatusServiceUnavailable)
 }
 
 func isForgedTokenRejection(reason string) bool {
@@ -487,9 +569,11 @@ func run(ctx context.Context, cfg config) error {
 	if c.assetCap == 0 {
 		derived = " (derived)"
 	}
-	log.Printf("concert %s -> %s (cap=%d, max-queue=%d, token-ttl=%s, first-poll-grace=%s, asset-cap=%d%s, asset-user-cap=%d h1 / %d h2)",
+	log.Printf("concert %s -> %s (cap=%d, max-queue=%d, token-ttl=%s, first-poll-grace=%s, ready-grace=%s, idle-poll-ttl=%s, reaper=%s, upstream-body-idle-timeout=%s, asset-cap=%d%s, asset-user-cap=%d h1 / %d h2)",
 		ln.Addr(), c.target, c.capacity, c.maxQueue, a.room.TokenTTL(), a.room.FirstPollGrace(),
+		a.room.ReadyGrace(), a.room.IdlePollTTL(), a.room.ReaperInterval(), c.upstreamBodyIdleTimeout,
 		g.assets.global.Cap(), derived, c.assetUserCapH1, c.assetUserCapH2)
+	logStartupDiagnostics("", c, hasCapacityFile(c.dataDir))
 	if lr := priorityRank(c.priorityLaneRank); lr < rankCount {
 		log.Printf("priority: %s and above use a lane of %d slot(s) while the room is busy; forms from admitted visitors %v",
 			lr, g.lane.Cap(), c.priorityForms)
@@ -573,4 +657,31 @@ func (a *app) pricing() (rate, surge float64) {
 func (a *app) price(depth int64) float64 {
 	rate, surge := a.pricing()
 	return rate + float64(depth)*surge
+}
+
+// hasCapacityFile reports whether dataDir contains a calibrated capacity.json.
+func hasCapacityFile(dataDir string) bool {
+	if strings.TrimSpace(dataDir) == "" {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(dataDir, "capacity.json"))
+	return err == nil && !info.IsDir()
+}
+
+// logStartupDiagnostics emits non-fatal warnings for configurations prone to
+// origin overload or waiting-room lockouts.
+func logStartupDiagnostics(label string, cfg config, hasCapacityFile bool) {
+	prefix := "startup"
+	if strings.TrimSpace(label) != "" {
+		prefix = "startup (" + strings.TrimSpace(label) + ")"
+	}
+	if cfg.role != roleEdge && cfg.capacity >= 400 && cfg.upstreamCBFailures == 0 && strings.TrimSpace(cfg.upstreamHealthPath) == "" && !hasCapacityFile {
+		prioCap := cfg.effectivePriorityCap()
+		log.Printf("%s: WARNING high uncalibrated -cap=%d (+ %d priority lane = %d max concurrent upstream page slots) with circuit breaker and active health checks disabled; calibrate with lemmings or -bench-on-start and consider -upstream-cb-failures 5 -upstream-health-path /healthz",
+			prefix, cfg.capacity, prioCap, cfg.capacity+prioCap)
+	}
+	if cfg.maxQueue > 0 && (cfg.readyGrace == 0 || cfg.idlePollTTL == 0) {
+		log.Printf("%s: WARNING waiting-room liveness guard disabled while -max-queue=%d is active (ready-grace=%s, idle-poll-ttl=%s); abandoned visitors may occupy queue slots until -token-ttl (%s)",
+			prefix, cfg.maxQueue, cfg.readyGrace, cfg.idlePollTTL, cfg.effectiveTokenTTL())
+	}
 }

@@ -97,6 +97,8 @@ func (a *app) renderPrometheusMetrics() string {
 	writePromMetric(&b, "concert_room_timeouts_total", "counter", "Total waiting room admission timeouts.", stats.timeouts.Load())
 	writePromMetric(&b, "concert_room_promoted_total", "counter", "Total queue promotions.", stats.promoted.Load())
 	writePromMetric(&b, "concert_room_removed_total", "counter", "Total tickets removed due to bans or operator kicks.", stats.removed.Load())
+	writePromMetric(&b, "concert_room_rejected_503_total", "counter", "Total visitors refused with 503 because the waiting room queue was full.", stats.rejected503.Load())
+	writePromMetric(&b, "concert_room_cleared_total", "counter", "Total waiting-room tickets cleared by operators.", stats.cleared.Load())
 	writePromMetric(&b, "concert_room_token_rejected_total", "counter", "Total signed pass or lease tokens rejected during verification.", stats.tokenRejected.Load())
 	writePromMetric(&b, "concert_room_lease_ceiling", "gauge", "Maximum slots reserved for the work-conserving signed lease pool.", wr.LeaseCeiling())
 
@@ -172,6 +174,7 @@ func (a *app) renderPrometheusMetrics() string {
 	fmt.Fprintf(&b, "concert_upstream_requests_total{status_class=\"4xx\"} %d\n", stats.upstream4xx.Load())
 	fmt.Fprintf(&b, "concert_upstream_requests_total{status_class=\"5xx\"} %d\n", stats.upstream5xx.Load())
 	writePromMetric(&b, "concert_upstream_errors_total", "counter", "Total upstream transport/circuit errors.", stats.upstreamErrors.Load())
+	writePromMetric(&b, "concert_upstream_body_idle_timeouts_total", "counter", "Total non-stream upstream responses aborted due to response-body idle timeout.", stats.upstreamBodyIdleTimeouts.Load())
 	stats.upstreamLatency.writePrometheus(&b, "concert_upstream_duration_seconds", "Upstream origin round-trip latency in seconds.")
 
 	writeWordPressMetrics(&b, g, stats)

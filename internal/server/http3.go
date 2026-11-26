@@ -51,6 +51,23 @@ func startHTTP3Server(listenAddr string, tlsCfg *tls.Config, handler http.Handle
 	return closeFn, nil
 }
 
+// h3AbortMarkerServer satisfies httputil.ReverseProxy.shouldPanicOnCopyError,
+// which checks req.Context().Value(http.ServerContextKey) != nil before
+// panicking with http.ErrAbortHandler on mid-body copy errors. quic-go/http3
+// populates http3.ServerContextKey rather than http.ServerContextKey, so
+// without this wrapper ReverseProxy would suppress the panic and close the
+// QUIC stream cleanly with a silently truncated 200 OK.
+var h3AbortMarkerServer = &http.Server{}
+
+func withHTTP3AbortContext(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Context().Value(http.ServerContextKey) == nil {
+			r = r.WithContext(context.WithValue(r.Context(), http.ServerContextKey, h3AbortMarkerServer))
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func startHTTP3OnPacketConn(pc net.PacketConn, tlsCfg *tls.Config, handler http.Handler) (func() error, error) {
 	h3TLS := tlsCfg.Clone()
 	h3TLS.MinVersion = tls.VersionTLS13
@@ -59,7 +76,7 @@ func startHTTP3OnPacketConn(pc net.PacketConn, tlsCfg *tls.Config, handler http.
 	srv := &http3.Server{
 		Addr:        pc.LocalAddr().String(),
 		TLSConfig:   h3TLS,
-		Handler:     handler,
+		Handler:     withHTTP3AbortContext(handler),
 		IdleTimeout: 60 * time.Second,
 	}
 

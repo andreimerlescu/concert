@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -133,6 +134,17 @@ func (a *app) dropWaiting(scopes ...netip.Prefix) int {
 // means the queue was imported after traffic arrived.
 func (a *app) restoreQueue() error {
 	path := a.queuePath
+	cfg := a.current().cfg
+
+	if cfg.clearQueueOnStart {
+		if err := os.Remove(path); err == nil {
+			log.Printf("queue: -clear-queue-on-start set; removed %s and starting with an empty line", path)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			log.Printf("queue: -clear-queue-on-start could not remove %s: %v", path, err)
+		}
+		return nil
+	}
+
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -142,12 +154,37 @@ func (a *app) restoreQueue() error {
 		return nil
 	}
 
+	var hdr struct {
+		ExportedAt time.Time `json:"exported_at"`
+	}
+	var exportedAt time.Time
+	if json.Unmarshal(data, &hdr) == nil && !hdr.ExportedAt.IsZero() {
+		exportedAt = hdr.ExportedAt
+	} else if info, serr := os.Stat(path); serr == nil {
+		exportedAt = info.ModTime()
+	}
+	if !exportedAt.IsZero() {
+		maxAge := cfg.effectiveTokenTTL()
+		if age := time.Since(exportedAt); age > maxAge {
+			log.Printf("queue: discarding stale snapshot %s (age %s > token-ttl %s)",
+				path, age.Round(time.Second), maxAge)
+			if rerr := os.Remove(path); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+				log.Printf("queue: could not remove stale snapshot %s: %v", path, rerr)
+			}
+			return nil
+		}
+	}
+
 	stats, err := a.room.Import(bytes.NewReader(data))
 	var notEmpty room.ErrImportNotEmpty
 	switch {
 	case err == nil:
-		log.Printf("queue: restored %d waiting visitor(s) from %s (%d too old to keep); %d VIP pass(es) (%d expired)",
+		log.Printf("queue: restored %d waiting visitor(s) from %s (dropped_stale=%d, passes_restored=%d, passes_expired=%d)",
 			stats.Restored, path, stats.DroppedStale, stats.PassesRestored, stats.PassesExpired)
+		if maxQ := a.room.MaxQueueDepth(); maxQ > 0 && int64(stats.Restored) >= (maxQ*4)/5 {
+			log.Printf("queue: WARNING restored %d/%d waiting visitor(s) (>=80%% of -max-queue); use POST /_room/queue/clear or -clear-queue-on-start if visitors have abandoned",
+				stats.Restored, maxQ)
+		}
 		if err := os.Remove(path); err != nil {
 			log.Printf("queue: could not remove %s after restoring it: %v", path, err)
 		}

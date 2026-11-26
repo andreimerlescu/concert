@@ -25,7 +25,7 @@ import (
 //
 // Keyed requests (agents; see agent.go) are not cookie clients: agentGate
 // shapes their responses, with no cookies, whatever -api-json says.
-func apiQueueResponses(a *app, retryAfter int) gin.HandlerFunc {
+func apiQueueResponses(_ *app, retryAfter int) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c.FullPath() != "" || wantsHTML(c.Request) || c.GetString(ctxAgentKey) != "" {
 			c.Next()
@@ -33,7 +33,6 @@ func apiQueueResponses(a *app, retryAfter int) gin.HandlerFunc {
 		}
 		c.Writer = &apiQueueWriter{
 			ResponseWriter: c.Writer,
-			a:              a,
 			c:              c,
 			retryAfter:     retryAfter,
 		}
@@ -47,11 +46,10 @@ func wantsHTML(r *http.Request) bool {
 
 // apiQueueWriter decides once, at the first header or body write, whether
 // the response came from room (proxy not reached) or from the upstream
-// (proxy reached). Upstream responses pass through untouched, including
-// streaming, flushing, and connection hijacking for upgrades.
+// (proxy reached). Upstream responses and FullResponder responses pass through
+// untouched, including streaming, flushing, and connection hijacking for upgrades.
 type apiQueueWriter struct {
 	gin.ResponseWriter
-	a          *app
 	c          *gin.Context
 	retryAfter int
 	decided    bool
@@ -67,7 +65,7 @@ func (w *apiQueueWriter) WriteHeader(code int) {
 	}
 	w.decided = true
 
-	if w.c.GetBool(ctxAdmitted) {
+	if w.c.GetBool(ctxAdmitted) || w.c.GetBool(ctxRoomFull) {
 		w.ResponseWriter.WriteHeader(code)
 		return
 	}
@@ -139,16 +137,8 @@ func (w *apiQueueWriter) translate(code int) (int, []byte) {
 			"hint":                "keep the room_ticket cookie and retry to hold your position",
 		})
 	case http.StatusServiceUnavailable:
-		// Breaker tripped or admission timed out.
-		if w.a != nil {
-			w.a.notifyAlert(alertEvent{
-				Category:    alertCatQueue,
-				Severity:    alertSevCritical,
-				Title:       "Waiting room refused request (503)",
-				Summary:     "Waiting room queue-full breaker or admission timeout returned 503 Service Unavailable.",
-				Fingerprint: "queue:breaker-503",
-			})
-		}
+		// Admission timed out or room fell back to a bare 503. Queue-full
+		// rejections are handled and alerted solely via FullResponder / EventReject.
 		return http.StatusServiceUnavailable, mustJSON(gin.H{
 			"queued":              false,
 			"error":               "waiting room is full",
@@ -196,56 +186,63 @@ func (p *portal) apiOverview(c *gin.Context) {
 	wr, stats := a.room, a.stats
 	rate, surge := a.pricing()
 	h := gin.H{
-		"site":                         g.cfg.siteHost,
-		"preset":                       g.cfg.preset,
-		"config_managed":               g.cfg.configManaged,
-		"runtime_override":             a.runtimeCapOverride.Load(),
-		"cap":                          wr.Cap(),
-		"occupancy":                    wr.Len(),
-		"cap_draining":                 wr.Len() > int(wr.Cap()),
-		"queue_depth":                  wr.QueueDepth(),
-		"live_queue_depth":             wr.LiveQueueDepth(),
-		"max_queue_depth":              wr.MaxQueueDepth(),
-		"utilization":                  wr.UtilizationSmoothed(),
-		"first_poll_grace":             wr.FirstPollGrace().String(),
-		"queued_total":                 stats.queued.Load(),
-		"evicted_total":                stats.evicted.Load(),
-		"timeouts_total":               stats.timeouts.Load(),
-		"promoted_total":               stats.promoted.Load(),
-		"removed_total":                stats.removed.Load(),
-		"token_rejected_total":         stats.tokenRejected.Load(),
-		"lease_ceiling":                wr.LeaseCeiling(),
-		"asset_cap":                    g.assets.global.Cap(),
-		"asset_in_flight":              g.assets.global.Len(),
-		"asset_users":                  g.assets.users.count.Load(),
-		"asset_served_total":           stats.assetServed.Load(),
-		"asset_denied_total":           stats.assetDenied.Load(),
-		"asset_user_throttled_total":   stats.assetUserThrottled.Load(),
-		"asset_global_throttled_total": stats.assetGlobalThrottled.Load(),
-		"static_served_total":          stats.staticServed.Load(),
-		"static_not_found_total":       stats.staticNotFound.Load(),
-		"fcgi_requests_total":          stats.fcgiRequests.Load(),
-		"fcgi_denied_total":            stats.fcgiDenied.Load(),
-		"stream_cap":                   g.streams.sem.Cap(),
-		"stream_active":                g.streams.sem.Len(),
-		"stream_served_total":          stats.streamServed.Load(),
-		"stream_denied_total":          stats.streamDenied.Load(),
-		"stream_throttled_total":       stats.streamThrottled.Load(),
-		"abuse_enabled":                g.abuse != nil,
-		"abuse_tracked":                g.abuse.tracked(),
-		"abuse_range_bans":             g.abuse.rangeCount(),
-		"abuse_strikes_total":          stats.abuseStrikes.Load(),
-		"abuse_bans_total":             stats.abuseBans.Load(),
-		"abuse_rejected_total":         stats.abuseRejected.Load(),
-		"abuse_dropped_total":          stats.abuseDropped.Load(),
-		"active_bans":                  len(g.abuse.bans(time.Now())),
-		"notes_tracked":                p.notes.count(),
-		"notes_dropped":                p.notes.dropped.Load(),
-		"kicked_active":                p.kicked.count(),
-		"history_clients":              p.history.count.Load(),
-		"rate":                         rate,
-		"surge":                        surge,
-		"skip_url":                     wr.SkipURL(),
+		"site":                              g.cfg.siteHost,
+		"preset":                            g.cfg.preset,
+		"config_managed":                    g.cfg.configManaged,
+		"runtime_override":                  a.runtimeCapOverride.Load(),
+		"cap":                               wr.Cap(),
+		"occupancy":                         wr.Len(),
+		"cap_draining":                      wr.Len() > int(wr.Cap()),
+		"queue_depth":                       wr.QueueDepth(),
+		"live_queue_depth":                  wr.LiveQueueDepth(),
+		"max_queue_depth":                   wr.MaxQueueDepth(),
+		"utilization":                       wr.UtilizationSmoothed(),
+		"token_ttl":                         wr.TokenTTL().String(),
+		"first_poll_grace":                  wr.FirstPollGrace().String(),
+		"ready_grace":                       wr.ReadyGrace().String(),
+		"idle_poll_ttl":                     wr.IdlePollTTL().String(),
+		"reaper":                            wr.ReaperInterval().String(),
+		"queued_total":                      stats.queued.Load(),
+		"evicted_total":                     stats.evicted.Load(),
+		"timeouts_total":                    stats.timeouts.Load(),
+		"promoted_total":                    stats.promoted.Load(),
+		"removed_total":                     stats.removed.Load(),
+		"rejected_503_total":                stats.rejected503.Load(),
+		"cleared_total":                     stats.cleared.Load(),
+		"token_rejected_total":              stats.tokenRejected.Load(),
+		"upstream_body_idle_timeouts_total": stats.upstreamBodyIdleTimeouts.Load(),
+		"lease_ceiling":                     wr.LeaseCeiling(),
+		"asset_cap":                         g.assets.global.Cap(),
+		"asset_in_flight":                   g.assets.global.Len(),
+		"asset_users":                       g.assets.users.count.Load(),
+		"asset_served_total":                stats.assetServed.Load(),
+		"asset_denied_total":                stats.assetDenied.Load(),
+		"asset_user_throttled_total":        stats.assetUserThrottled.Load(),
+		"asset_global_throttled_total":      stats.assetGlobalThrottled.Load(),
+		"static_served_total":               stats.staticServed.Load(),
+		"static_not_found_total":            stats.staticNotFound.Load(),
+		"fcgi_requests_total":               stats.fcgiRequests.Load(),
+		"fcgi_denied_total":                 stats.fcgiDenied.Load(),
+		"stream_cap":                        g.streams.sem.Cap(),
+		"stream_active":                     g.streams.sem.Len(),
+		"stream_served_total":               stats.streamServed.Load(),
+		"stream_denied_total":               stats.streamDenied.Load(),
+		"stream_throttled_total":            stats.streamThrottled.Load(),
+		"abuse_enabled":                     g.abuse != nil,
+		"abuse_tracked":                     g.abuse.tracked(),
+		"abuse_range_bans":                  g.abuse.rangeCount(),
+		"abuse_strikes_total":               stats.abuseStrikes.Load(),
+		"abuse_bans_total":                  stats.abuseBans.Load(),
+		"abuse_rejected_total":              stats.abuseRejected.Load(),
+		"abuse_dropped_total":               stats.abuseDropped.Load(),
+		"active_bans":                       len(g.abuse.bans(time.Now())),
+		"notes_tracked":                     p.notes.count(),
+		"notes_dropped":                     p.notes.dropped.Load(),
+		"kicked_active":                     p.kicked.count(),
+		"history_clients":                   p.history.count.Load(),
+		"rate":                              rate,
+		"surge":                             surge,
+		"skip_url":                          wr.SkipURL(),
 	}
 	for k, v := range g.priorityView() {
 		h[k] = v

@@ -449,6 +449,49 @@ func (p *portal) pc() portalConfig {
 	return p.a.current().cfg.portal
 }
 
+// pruneNotesFor removes notes for tickets no longer present in any active
+// site's room (or target a in standalone mode).
+func (p *portal) pruneNotesFor(a *app) {
+	if p == nil || p.notes == nil {
+		return
+	}
+	if p.vhosts != nil {
+		if snap := p.vhosts.current(); snap != nil {
+			p.notes.prune(func(token string) bool {
+				for _, sr := range snap.sites {
+					if sr.app != nil {
+						if _, ok := sr.app.room.Ticket(token); ok {
+							return true
+						}
+					}
+				}
+				return false
+			})
+			return
+		}
+	}
+	target := a
+	if target == nil {
+		target = p.a
+	}
+	if target == nil {
+		return
+	}
+	p.notes.prune(func(token string) bool {
+		_, ok := target.room.Ticket(token)
+		return ok
+	})
+}
+
+func (p *portal) apiQueueClear(c *gin.Context) {
+	a, ok := p.targetApp(c)
+	if !ok {
+		return
+	}
+	pr := portalPrincipal(c)
+	handleQueueClear(c, a, pr.Actor, pr.Role.String(), "portal", p)
+}
+
 // janitor forgets notes for tickets room no longer holds, expired kicks,
 // old sign-in failures and old history, and notices bans lifted outside
 // the portal.
@@ -460,10 +503,7 @@ func (p *portal) janitor(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case now := <-t.C:
-			p.notes.prune(func(token string) bool {
-				_, ok := p.a.room.Ticket(token)
-				return ok
-			})
+			p.pruneNotesFor(p.a)
 			p.kicked.sweep(now)
 			p.fails.sweep(now)
 			p.history.sweep(now)
@@ -515,6 +555,7 @@ func (p *portal) routes() *gin.Engine {
 	api.GET("/queue", p.requireRole(roleViewer), p.apiQueue)
 	api.POST("/queue/promote", p.requireRole(roleOperator), p.apiPromote)
 	api.POST("/queue/kick", p.requireRole(roleOperator), p.apiKick)
+	api.POST("/queue/clear", p.requireRole(roleOperator), p.apiQueueClear)
 	api.GET("/bans", p.requireRole(roleViewer), p.apiBans)
 	api.POST("/bans", p.requireRole(roleOperator), p.apiBanSave)
 	api.DELETE("/bans", p.requireRole(roleOperator), p.apiUnban)

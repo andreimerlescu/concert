@@ -140,11 +140,14 @@ func registerConcertRoutes(r *gin.Engine, g *generation) {
 			return
 		}
 		var file, ct string
+		cacheControl := "no-store"
 		switch p {
 		case "/waiting.css":
 			file, ct = "web/waiting.css", "text/css; charset=utf-8"
 		case "/waiting.js":
 			file, ct = "web/waiting.js", "text/javascript; charset=utf-8"
+		case "/busy.js":
+			file, ct, cacheControl = "web/busy.js", "application/javascript; charset=utf-8", "public, max-age=300"
 		default:
 			c.JSON(http.StatusNotFound, gin.H{"error": "fast_lane_disabled"})
 			return
@@ -159,7 +162,7 @@ func registerConcertRoutes(r *gin.Engine, g *generation) {
 			return
 		}
 		c.Header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
-		c.Header("Cache-Control", "no-store")
+		c.Header("Cache-Control", cacheControl)
 		c.Header("X-Content-Type-Options", "nosniff")
 		c.Header("Referrer-Policy", "no-referrer")
 		c.Data(http.StatusOK, ct, b)
@@ -248,56 +251,57 @@ func enterpriseSettingDefs() []settingDef { return nil }
 
 func movedEnterpriseFlags() map[string]string {
 	return map[string]string{
-		"fastlane-config":         "econcert",
-		"networks-config":         "econcert",
-		"tls-client-ca":           "econcert",
-		"tls-require-client-cert": "econcert",
-		"portal-sso-header":       "econcert",
-		"portal-sso-role-header":  "econcert",
-		"portal-sso-default-role": "econcert",
-		"portal-trusted-proxies":  "econcert",
-		"enterprise-hardened":     "econcert",
-		"audit-log":               "econcert",
-		"redis-addr":              "econcert",
-		"redis-tls":               "econcert",
-		"redis-prefix":            "econcert",
-		"role":                    "econcert",
-		"node-id":                 "econcert",
-		"hop-peers":               "econcert",
-		"hop-max-skew":            "econcert",
-		"hop-wait":                "econcert",
-		"hop-replay-guard":        "econcert",
-		"hop-replay-max":          "econcert",
-		"hop-require-nonce":       "econcert",
-		"hop-require-mtls":        "econcert",
-		"host-cap":                "econcert",
-		"hop-leaves":              "econcert",
-		"hop-poll":                "econcert",
-		"hop-auto-cap":            "econcert",
-		"bench-on-start":          "econcert",
-		"bench-p95":               "econcert",
-		"bench-max-lemmings":      "econcert",
-		"email-provider":          "econcert",
-		"email-smtp-host":         "econcert",
-		"email-smtp-port":         "econcert",
-		"email-smtp-tls":          "econcert",
-		"email-smtp-user":         "econcert",
-		"email-resend-url":        "econcert",
-		"email-sendpanda-url":     "econcert",
-		"email-from-name":         "econcert",
-		"email-from-addr":         "econcert",
-		"email-to":                "econcert",
-		"email-dkim-selector":     "econcert",
-		"email-cadence-max":       "econcert",
-		"email-cadence-window":    "econcert",
-		"email-cadence-unit":      "econcert",
-		"email-events":            "econcert",
-		"email-org-name":          "econcert",
-		"email-postal-address":    "econcert",
-		"email-privacy-url":       "econcert",
-		"email-terms-url":         "econcert",
-		"email-portal-url":        "econcert",
-		"email-public-base-url":   "econcert",
-		"email-cluster-dedupe":    "econcert",
+		"fastlane-config":            "econcert",
+		"networks-config":            "econcert",
+		"fastlane-lock-destinations": "econcert",
+		"tls-client-ca":              "econcert",
+		"tls-require-client-cert":    "econcert",
+		"portal-sso-header":          "econcert",
+		"portal-sso-role-header":     "econcert",
+		"portal-sso-default-role":    "econcert",
+		"portal-trusted-proxies":     "econcert",
+		"enterprise-hardened":        "econcert",
+		"audit-log":                  "econcert",
+		"redis-addr":                 "econcert",
+		"redis-tls":                  "econcert",
+		"redis-prefix":               "econcert",
+		"role":                       "econcert",
+		"node-id":                    "econcert",
+		"hop-peers":                  "econcert",
+		"hop-max-skew":               "econcert",
+		"hop-wait":                   "econcert",
+		"hop-replay-guard":           "econcert",
+		"hop-replay-max":             "econcert",
+		"hop-require-nonce":          "econcert",
+		"hop-require-mtls":           "econcert",
+		"host-cap":                   "econcert",
+		"hop-leaves":                 "econcert",
+		"hop-poll":                   "econcert",
+		"hop-auto-cap":               "econcert",
+		"bench-on-start":             "econcert",
+		"bench-p95":                  "econcert",
+		"bench-max-lemmings":         "econcert",
+		"email-provider":             "econcert",
+		"email-smtp-host":            "econcert",
+		"email-smtp-port":            "econcert",
+		"email-smtp-tls":             "econcert",
+		"email-smtp-user":            "econcert",
+		"email-resend-url":           "econcert",
+		"email-sendpanda-url":        "econcert",
+		"email-from-name":            "econcert",
+		"email-from-addr":            "econcert",
+		"email-to":                   "econcert",
+		"email-dkim-selector":        "econcert",
+		"email-cadence-max":          "econcert",
+		"email-cadence-window":       "econcert",
+		"email-cadence-unit":         "econcert",
+		"email-events":               "econcert",
+		"email-org-name":             "econcert",
+		"email-postal-address":       "econcert",
+		"email-privacy-url":          "econcert",
+		"email-terms-url":            "econcert",
+		"email-portal-url":           "econcert",
+		"email-public-base-url":      "econcert",
+		"email-cluster-dedupe":       "econcert",
 	}
 }

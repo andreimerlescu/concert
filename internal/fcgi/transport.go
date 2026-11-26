@@ -15,19 +15,21 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // Config configures a FastCGI Transport.
 type Config struct {
-	Root          string        // absolute DOCUMENT_ROOT confined by os.Root
-	Index         string        // default "index.php"
-	DenyPaths     []string      // paths forbidden from PHP execution (e.g. "/wp-content/uploads/*", "/wp-config.php")
-	HeaderTimeout time.Duration // response header timeout (0 disables)
-	DialTimeout   time.Duration // socket connect timeout (default 5s)
-	OnStderr      func(msg string)
-	OnRequest     func()
-	OnDenied      func(path string)
+	Root            string        // absolute DOCUMENT_ROOT confined by os.Root
+	Index           string        // default "index.php"
+	DenyPaths       []string      // paths forbidden from PHP execution (e.g. "/wp-content/uploads/*", "/wp-config.php")
+	HeaderTimeout   time.Duration // response header timeout (0 disables)
+	BodyIdleTimeout time.Duration // per-chunk response body read idle timeout (0 disables; exempts streams/SSE)
+	DialTimeout     time.Duration // socket connect timeout (default 5s)
+	OnStderr        func(msg string)
+	OnRequest       func()
+	OnDenied        func(path string)
 }
 
 type denyRule struct {
@@ -103,15 +105,16 @@ func ParseTarget(u *url.URL) (network, address string, err error) {
 // Transport executes HTTP requests against php-fpm / FastCGI responders using
 // WordPress try_files script resolution inside an os.Root-confined document root.
 type Transport struct {
-	root          *os.Root
-	rootAbs       string
-	index         string
-	denyRules     []denyRule
-	headerTimeout time.Duration
-	dialTimeout   time.Duration
-	onStderr      func(string)
-	onRequest     func()
-	onDenied      func(string)
+	root            *os.Root
+	rootAbs         string
+	index           string
+	denyRules       []denyRule
+	headerTimeout   time.Duration
+	bodyIdleTimeout time.Duration
+	dialTimeout     time.Duration
+	onStderr        func(string)
+	onRequest       func()
+	onDenied        func(string)
 }
 
 // NewTransport opens an os.Root on cfg.Root and prepares a FastCGI Transport.
@@ -144,15 +147,16 @@ func NewTransport(cfg Config) (*Transport, error) {
 		dialTimeout = 5 * time.Second
 	}
 	return &Transport{
-		root:          root,
-		rootAbs:       absRoot,
-		index:         idx,
-		denyRules:     parseDenyRules(cfg.DenyPaths),
-		headerTimeout: cfg.HeaderTimeout,
-		dialTimeout:   dialTimeout,
-		onStderr:      cfg.OnStderr,
-		onRequest:     cfg.OnRequest,
-		onDenied:      cfg.OnDenied,
+		root:            root,
+		rootAbs:         absRoot,
+		index:           idx,
+		denyRules:       parseDenyRules(cfg.DenyPaths),
+		headerTimeout:   cfg.HeaderTimeout,
+		bodyIdleTimeout: cfg.BodyIdleTimeout,
+		dialTimeout:     dialTimeout,
+		onStderr:        cfg.OnStderr,
+		onRequest:       cfg.OnRequest,
+		onDenied:        cfg.OnDenied,
 	}, nil
 }
 
@@ -569,12 +573,19 @@ func (t *Transport) RoundTripTo(req *http.Request, target *url.URL) (*http.Respo
 		}
 	}
 
+	bodyIdle := t.bodyIdleTimeout
+	if bodyIdle > 0 && (isStreamFromContext(ctx) || statusCode == http.StatusSwitchingProtocols || isEventStreamHeader(hdr)) {
+		bodyIdle = 0
+	}
+
 	body := &responseBody{
-		br:         br,
-		sr:         sr,
-		closeConn:  closeConn,
-		stopCancel: stopCancel,
-		waitStdin:  waitStdin,
+		br:              br,
+		sr:              sr,
+		conn:            conn,
+		bodyIdleTimeout: bodyIdle,
+		closeConn:       closeConn,
+		stopCancel:      stopCancel,
+		waitStdin:       waitStdin,
 	}
 
 	return &http.Response{
@@ -591,30 +602,73 @@ func (t *Transport) RoundTripTo(req *http.Request, target *url.URL) (*http.Respo
 }
 
 type responseBody struct {
-	br         *bufio.Reader
-	sr         *stdoutReader
-	closeConn  func()
-	stopCancel func()
-	waitStdin  func()
-	closeOnce  sync.Once
+	br              *bufio.Reader
+	sr              *stdoutReader
+	conn            net.Conn
+	bodyIdleTimeout time.Duration
+	closeConn       func()
+	stopCancel      func()
+	waitStdin       func()
+
+	mu        sync.RWMutex
+	closed    atomic.Bool
+	closeOnce sync.Once
 }
 
 func (b *responseBody) Read(p []byte) (int, error) {
-	return b.br.Read(p)
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if b.closed.Load() {
+		return 0, net.ErrClosed
+	}
+	if b.bodyIdleTimeout > 0 && b.conn != nil && b.br.Buffered() == 0 {
+		_ = b.conn.SetReadDeadline(time.Now().Add(b.bodyIdleTimeout))
+	}
+	n, err := b.br.Read(p)
+	if errors.Is(err, io.EOF) && b.bodyIdleTimeout > 0 && b.conn != nil {
+		_ = b.conn.SetReadDeadline(time.Time{})
+	}
+	return n, err
 }
 
 func (b *responseBody) Close() error {
 	b.closeOnce.Do(func() {
+		b.closed.Store(true)
 		b.stopCancel()
 		b.closeConn()
 		b.waitStdin()
+		b.mu.Lock()
 		b.sr.flushStderr()
+		b.mu.Unlock()
 	})
 	return nil
 }
 
+func isEventStreamHeader(hdr http.Header) bool {
+	ct := hdr.Get("Content-Type")
+	if semi := strings.IndexByte(ct, ';'); semi >= 0 {
+		ct = ct[:semi]
+	}
+	return strings.EqualFold(strings.TrimSpace(ct), "text/event-stream")
+}
+
 type clientIPKey struct{}
 type bodyAbortKey struct{}
+type streamKey struct{}
+
+// WithStream marks ctx as a long-lived stream request (such as -stream-paths),
+// exempting the FastCGI response body from per-chunk idle read deadlines.
+func WithStream(ctx context.Context) context.Context {
+	return context.WithValue(ctx, streamKey{}, true)
+}
+
+func isStreamFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	v, _ := ctx.Value(streamKey{}).(bool)
+	return v
+}
 
 // WithBodyAbort attaches an abort callback (typically calling
 // http.ResponseController.SetReadDeadline(time.Now())) so FastCGI can

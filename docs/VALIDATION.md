@@ -10,7 +10,7 @@ The update arrived as a source archive with its own report: 175 Go tests and 11 
 | --- | --- |
 | `gofmt -l .` | No files. |
 | `go vet ./...` | Passed. |
-| `go build -buildvcs=false ./...` | Passed. `concert` and `concert-client` also cross-compiled with `CGO_ENABLED=0` for Linux arm64, Darwin amd64/arm64 and Windows amd64/arm64 (journal locking has per-platform code). |
+| `make dist` (Linux release packaging) | Passed: 10 static Linux binaries + 6 Linux FIPS 140-3 binaries packaged as `.tar.gz` tarballs in `dist/` with per-edition CycloneDX 1.5 SBOMs and `SHA256SUMS.txt`. |
 | `go test -race -count=1 ./...` | Passed: 230 top-level Go tests (272 with subtests). |
 | `go mod verify` | All modules verified. |
 | `govulncheck ./...` | **Not run.** The build environment's egress policy denied `vuln.go.dev` (HTTP 403). Run it before deployment. |

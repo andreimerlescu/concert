@@ -1,6 +1,6 @@
 # Concert Enterprise Hardening & Compliance Guide
 
-> **Edition Note (`v0.3.0`+):** All enterprise features documented in this guide (RBAC/MFA/SSO, hash-chained audit logs, `-enterprise-hardened`, Redis HA ban sync, edge/leaf mesh + mTLS, email digests, and x402 Fast-Lane) ship in the **`econcert`** binary (`go build -tags "wordpress,enterprise" ./cmd/econcert`). Core `concert` and `wpconcert` compile without these packages or their transitive dependencies.
+> **Edition Note (`v0.3.0`+):** All enterprise features documented in this guide (RBAC/MFA/SSO, hash-chained audit logs, `-enterprise-hardened`, Redis HA ban sync, edge/leaf mesh + mTLS, email digests, and 4-chain x402 / NFT Fast-Lane) ship in the open-source **`econcert`** binary (`go build -tags "wordpress,enterprise" ./cmd/econcert`) under Apache-2.0 with no license keys. Core `concert` and `wpconcert` compile without these packages or their transitive dependencies.
 
 This guide documents Concert's enterprise security, observability, high-availability, and privacy controls and maps them to common enterprise frameworks (SOC 2 Type II, ISO/IEC 27001, PCI DSS v4.0.1, HIPAA, GDPR/CCPA, and FIPS 140-3).
 
@@ -30,7 +30,7 @@ For immutable / GitOps deployments, also enable `-read-only-settings` (`CONCERT_
 | Role | Permissions |
 | --- | --- |
 | `viewer` | Read-only overview, queue, bans, history, settings, `/_room/stats`, `/_room/metrics` (internal `upstream` URL is hidden when `-stats-auth=true`) |
-| `operator` | All `viewer` permissions + queue promote/kick (`POST /_room/promote`), capacity updates (`POST /_room/cap`), temporary single-IP bans, lifting bans |
+| `operator` | All `viewer` permissions + queue promote/kick (`POST /_room/promote`, `POST /api/queue/promote`, `POST /api/queue/kick`), queue clear (`POST /_room/queue/clear`, `POST /api/queue/clear`), capacity updates (`POST /_room/cap`), temporary single-IP bans, lifting bans |
 | `admin` | All `operator` permissions + permanent bans, CIDR range bans, live settings changes, drained leaf re-benchmarking (`POST /_room/rebench`, `POST /api/topology/rebench`), zero-downtime fast-lane reconciliation (`POST /_room/fastlane/reconcile`, `POST /api/fastlane/reconcile`), GDPR/CCPA DSAR export & erasure |
 
 ### Multi-User Portal Accounts with Argon2id + TOTP MFA
@@ -112,7 +112,7 @@ CONCERT_ADMIT_SECRET_FILE=/run/secrets/concert/admit_secret \
 - **Multi-Upstream Load Balancing & Circuit Breaker:** Pass comma-separated URLs to `-upstream`, configure active health checks (`-upstream-health-path=/healthz`, `-upstream-health-interval=10s`), and enable circuit breaking (`-upstream-cb-failures=5`, `-upstream-cb-cooldown=15s`).
 - **Kubernetes Readiness & Graceful Drain:** Point `livenessProbe` at `/_room/healthz` and `readinessProbe` at `/_room/readyz` (returns `503` immediately on `SIGTERM` drain or when all upstreams are unhealthy). See `deploy/k8s/deployment.yaml`.
 - **Multi-Node Ban Synchronization & Alert Deduplication:** Set `-redis-addr`, `-redis-tls=true`, and `CONCERT_REDIS_PASSWORD_FILE` to replicate bans/unbans in real time via Redis/Valkey Pub/Sub + state hydration and deduplicate shared cluster email alerts (`-email-cluster-dedupe=true`, default; counter `concert_email_cluster_deduped_total`) via non-blocking fail-open `SET NX PX` leases.
-- **Prometheus Metrics:** Scrape `/_room/metrics` (with a `viewer` bearer token when `-stats-auth=true`) for gauges, counters, and upstream latency histograms (`concert_upstream_duration_seconds`, `concert_room_cap_draining`, `concert_leaf_hop_replayed_total`, `concert_leaf_hop_replay_evictions_total`, `concert_leaf_hop_mtls_rejected_total`, `concert_leaf_rebench_total`, `concert_fastlane_records_used`, `concert_fastlane_records_max`, `concert_fastlane_unresolved`, `concert_email_cluster_deduped_total`).
+- **Prometheus Metrics:** Scrape `/_room/metrics` (with a `viewer` bearer token when `-stats-auth=true`) for gauges, counters, and upstream latency histograms (`concert_upstream_duration_seconds`, `concert_room_cap_draining`, `concert_room_rejected_503_total`, `concert_room_cleared_total`, `concert_upstream_body_idle_timeouts_total`, `concert_leaf_hop_replayed_total`, `concert_leaf_hop_replay_evictions_total`, `concert_leaf_hop_mtls_rejected_total`, `concert_leaf_rebench_total`, `concert_fastlane_records_used`, `concert_fastlane_records_max`, `concert_fastlane_unresolved`, `concert_email_cluster_deduped_total`). See [docs/OPERATIONS.md](OPERATIONS.md) for alert rules and live queue recovery procedures.
 - **Structured JSON Logging & Tracing:** Set `-log-format=json` for SIEM-ready access logs carrying `request_id` (`X-Request-ID`) and W3C `trace_id` (`traceparent`).
 
 ---

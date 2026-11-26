@@ -46,6 +46,7 @@ func roundTripFCGI(*fcgiTransport, *http.Request, *url.URL) (*http.Response, err
 
 func withFastCGIClientIP(req *http.Request, _ string) *http.Request       { return req }
 func withFastCGIBodyAbort(req *http.Request, _ func() bool) *http.Request { return req }
+func withFastCGIStream(req *http.Request) *http.Request                   { return req }
 
 func maybeGzipFastCGI(*http.Request, *http.Response) {}
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math/big"
 	"strings"
+	"time"
 )
 
 // TokenBalance returns the validated balance of asset ("XRP" in drops, or
@@ -97,6 +98,13 @@ func (s *Scheme) MeetsMinBalance(ctx context.Context, address, asset, minAmount 
 // delivered_amount >= minAmount of `asset` ("XRP" drops or "CURRENCY:ISSUER").
 // Returns the validated transaction hash and payer address when found.
 func (s *Scheme) FindDirectPayment(ctx context.Context, from, to, asset, minAmount string, destTag uint32, requireTag bool, memoText string, minLedger uint32) (txHash, payer string, err error) {
+	return s.FindDirectPaymentSince(ctx, from, to, asset, minAmount, destTag, requireTag, memoText, minLedger, time.Time{})
+}
+
+// FindDirectPaymentSince is like FindDirectPayment, and additionally ignores
+// transactions whose validated ledger close time predates `since` (with a 30s
+// clock-skew grace matching Stellar, Hedera, and Solana).
+func (s *Scheme) FindDirectPaymentSince(ctx context.Context, from, to, asset, minAmount string, destTag uint32, requireTag bool, memoText string, minLedger uint32, since time.Time) (txHash, payer string, err error) {
 	if !ValidAddress(to) || (from != "" && !ValidAddress(from)) {
 		return "", "", errors.New("invalid XRPL address")
 	}
@@ -117,6 +125,9 @@ func (s *Scheme) FindDirectPayment(ctx context.Context, from, to, asset, minAmou
 	}
 	for _, e := range entries {
 		if !e.Validated || e.Result != "tesSUCCESS" || e.TxType != "Payment" {
+			continue
+		}
+		if !since.IsZero() && !e.Date.IsZero() && e.Date.Before(since.Add(-30*time.Second)) {
 			continue
 		}
 		if e.Destination != to || e.Flags&tfPartialPayment != 0 {

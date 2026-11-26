@@ -419,6 +419,7 @@
               <dt class="col-8">Moved to the front</dt><dd class="col-4 text-end" data-stat="promoted_total">–</dd>
               <dt class="col-8">Abandoned tickets reaped</dt><dd class="col-4 text-end" data-stat="evicted_total">–</dd>
               <dt class="col-8">Gave up before admission</dt><dd class="col-4 text-end" data-stat="timeouts_total">–</dd>
+              <dt class="col-8">Queue full rejections (503)</dt><dd class="col-4 text-end" data-stat="rejected_503_total">–</dd>
               <dt class="col-8">Removed by bans and admins</dt><dd class="col-4 text-end" data-stat="removed_total">–</dd>
               <dt class="col-8">Removed, still blocked</dt><dd class="col-4 text-end" data-stat="kicked_active">–</dd>
             </dl>
@@ -613,7 +614,11 @@
           <input class="form-check-input" type="checkbox" role="switch" id="queue-live" checked>
           <label class="form-check-label small" for="queue-live">Live</label>
         </div>
-        <button type="button" class="btn btn-sm btn-outline-secondary ms-auto" id="queue-refresh"><i aria-hidden="true" class="bi bi-arrow-clockwise"></i> Refresh</button>
+        <div class="ms-auto d-flex flex-wrap align-items-center gap-2">
+          <button type="button" class="btn btn-sm btn-outline-warning" id="queue-clear-stale" title="Evict idle/abandoned tickets older than idle_poll_ttl (default 30s)"><i aria-hidden="true" class="bi bi-eraser"></i> Flush stale</button>
+          <button type="button" class="btn btn-sm btn-outline-danger" id="queue-clear-all" title="Clear every waiting ticket from the queue immediately"><i aria-hidden="true" class="bi bi-trash"></i> Clear queue</button>
+          <button type="button" class="btn btn-sm btn-outline-secondary" id="queue-refresh"><i aria-hidden="true" class="bi bi-arrow-clockwise"></i> Refresh</button>
+        </div>
       </div>
       <div class="card stat-card">
         <div class="table-responsive">

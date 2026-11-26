@@ -124,6 +124,14 @@ func (vm *vhostManager) Reload() error {
 	}
 	vm.snap.Swap(next)
 	if prev != nil {
+		// Suppress post-swap queue snapshots from replaced apps so an orphaned
+		// queue.snapshot is not written to disk after replacement sites have
+		// already started serving. Real shutdown (vm.Close) still saves queues.
+		for _, sr := range prev.sites {
+			if sr.app != nil {
+				sr.app.skipQueueSave.Store(true)
+			}
+		}
 		prev.closeApps()
 	}
 	log.Printf("config: reloaded %s (%d site(s))", vm.configPath, len(next.sites))
@@ -160,6 +168,13 @@ func (vm *vhostManager) loadSnapshot(prev *vhostSnapshot) (*vhostSnapshot, error
 		acmeHosts: make(map[string]bool),
 	}
 	fail := func(err error) (*vhostSnapshot, error) {
+		if prev != nil {
+			for _, sr := range snap.sites {
+				if sr.app != nil {
+					sr.app.skipQueueSave.Store(true)
+				}
+			}
+		}
 		snap.closeApps()
 		return nil, err
 	}
@@ -277,6 +292,16 @@ func sanitizeHostDir(host string) string {
 	return out
 }
 
+// parseDurationOrOff parses a Go duration string, treating "0" and "off"
+// (case-insensitive) as 0 so declarative configs can disable timers cleanly.
+func parseDurationOrOff(raw string) (time.Duration, error) {
+	s := strings.TrimSpace(raw)
+	if s == "0" || strings.EqualFold(s, "off") {
+		return 0, nil
+	}
+	return time.ParseDuration(s)
+}
+
 func buildSiteConfig(base config, gf configfile.GlobalConfig, sc configfile.SiteConfig) (config, error) {
 	cfg := base
 	cfg.configFile = ""
@@ -337,7 +362,7 @@ func buildSiteConfig(base config, gf configfile.GlobalConfig, sc configfile.Site
 		cfg.roomVerifyKeys = gf.RoomVerifyKeys
 	}
 	if gf.RoomSignedMaxTTL != "" {
-		d, err := time.ParseDuration(gf.RoomSignedMaxTTL)
+		d, err := parseDurationOrOff(gf.RoomSignedMaxTTL)
 		if err != nil {
 			return config{}, fmt.Errorf("invalid global room_signed_max_ttl %q: %w", gf.RoomSignedMaxTTL, err)
 		}
@@ -346,26 +371,105 @@ func buildSiteConfig(base config, gf configfile.GlobalConfig, sc configfile.Site
 	if gf.RoomLeaseFraction != nil {
 		cfg.roomLeaseFraction = *gf.RoomLeaseFraction
 	}
+	if gf.TokenTTL != "" {
+		d, err := parseDurationOrOff(gf.TokenTTL)
+		if err != nil {
+			return config{}, fmt.Errorf("invalid global token_ttl %q: %w", gf.TokenTTL, err)
+		}
+		cfg.tokenTTL = d
+	}
+	if gf.FirstPollGrace != "" {
+		d, err := parseDurationOrOff(gf.FirstPollGrace)
+		if err != nil {
+			return config{}, fmt.Errorf("invalid global first_poll_grace %q: %w", gf.FirstPollGrace, err)
+		}
+		cfg.firstPollGrace = d
+	}
+	if gf.ReadyGrace != "" {
+		d, err := parseDurationOrOff(gf.ReadyGrace)
+		if err != nil {
+			return config{}, fmt.Errorf("invalid global ready_grace %q: %w", gf.ReadyGrace, err)
+		}
+		cfg.readyGrace = d
+	}
+	if gf.IdlePollTTL != "" {
+		d, err := parseDurationOrOff(gf.IdlePollTTL)
+		if err != nil {
+			return config{}, fmt.Errorf("invalid global idle_poll_ttl %q: %w", gf.IdlePollTTL, err)
+		}
+		cfg.idlePollTTL = d
+	}
+	if gf.Reaper != "" {
+		d, err := parseDurationOrOff(gf.Reaper)
+		if err != nil {
+			return config{}, fmt.Errorf("invalid global reaper %q: %w", gf.Reaper, err)
+		}
+		cfg.reaper = d
+	}
+	if gf.RetryAfter > 0 {
+		cfg.retryAfter = gf.RetryAfter
+	}
+	if gf.BusyHTML != "" {
+		if strings.EqualFold(strings.TrimSpace(gf.BusyHTML), "off") {
+			cfg.busyHTMLFile = ""
+		} else {
+			cfg.busyHTMLFile = gf.BusyHTML
+		}
+	}
+	if gf.ClearQueueOnStart != nil {
+		cfg.clearQueueOnStart = *gf.ClearQueueOnStart
+	}
 	if gf.BodyReadIdleTimeout != "" {
-		d, err := time.ParseDuration(gf.BodyReadIdleTimeout)
+		d, err := parseDurationOrOff(gf.BodyReadIdleTimeout)
 		if err != nil {
 			return config{}, fmt.Errorf("invalid global body_read_idle_timeout %q: %w", gf.BodyReadIdleTimeout, err)
 		}
 		cfg.bodyReadIdleTimeout = d
 	}
 	if gf.MaxUploadTime != "" {
-		d, err := time.ParseDuration(gf.MaxUploadTime)
+		d, err := parseDurationOrOff(gf.MaxUploadTime)
 		if err != nil {
 			return config{}, fmt.Errorf("invalid global max_upload_time %q: %w", gf.MaxUploadTime, err)
 		}
 		cfg.maxUploadTime = d
 	}
 	if gf.UpstreamTimeout != "" {
-		d, err := time.ParseDuration(gf.UpstreamTimeout)
+		d, err := parseDurationOrOff(gf.UpstreamTimeout)
 		if err != nil {
 			return config{}, fmt.Errorf("invalid global upstream_timeout %q: %w", gf.UpstreamTimeout, err)
 		}
 		cfg.headerTimeout = d
+	}
+	if gf.UpstreamBodyIdleTimeout != "" {
+		d, err := parseDurationOrOff(gf.UpstreamBodyIdleTimeout)
+		if err != nil {
+			return config{}, fmt.Errorf("invalid global upstream_body_idle_timeout %q: %w", gf.UpstreamBodyIdleTimeout, err)
+		}
+		cfg.upstreamBodyIdleTimeout = d
+	}
+	if gf.UpstreamCBFailures != nil {
+		cfg.upstreamCBFailures = *gf.UpstreamCBFailures
+	}
+	if gf.UpstreamCBCooldown != "" {
+		d, err := parseDurationOrOff(gf.UpstreamCBCooldown)
+		if err != nil {
+			return config{}, fmt.Errorf("invalid global upstream_cb_cooldown %q: %w", gf.UpstreamCBCooldown, err)
+		}
+		cfg.upstreamCBCooldown = d
+	}
+	if gf.UpstreamHealthPath != "" {
+		if strings.EqualFold(strings.TrimSpace(gf.UpstreamHealthPath), "off") {
+			cfg.upstreamHealthPath = ""
+		} else {
+			cfg.upstreamHealthPath = gf.UpstreamHealthPath
+		}
+	}
+	if gf.UpstreamHealthInterval != "" {
+		d, err := parseDurationOrOff(gf.UpstreamHealthInterval)
+		if err != nil {
+			return config{}, fmt.Errorf("invalid global upstream_health_interval %q: %w", gf.UpstreamHealthInterval, err)
+		}
+		cfg.upstreamHealthInterval = d
 	}
 	// Global networks_config can be shared across sites, whereas fastlane_config is
 	// per-site (or global fallback when a single site is declared) so origins stay distinct.
@@ -451,8 +555,8 @@ func buildSiteConfig(base config, gf configfile.GlobalConfig, sc configfile.Site
 	if sc.FCGIDenyPaths != "" {
 		cfg.fcgiDenyPaths = sc.FCGIDenyPaths
 	}
-	if sc.MicroCache != "" && !strings.EqualFold(sc.MicroCache, "off") && sc.MicroCache != "0" {
-		d, err := time.ParseDuration(sc.MicroCache)
+	if sc.MicroCache != "" {
+		d, err := parseDurationOrOff(sc.MicroCache)
 		if err != nil {
 			return config{}, fmt.Errorf("invalid micro_cache %q: %w", sc.MicroCache, err)
 		}
@@ -481,7 +585,7 @@ func buildSiteConfig(base config, gf configfile.GlobalConfig, sc configfile.Site
 		cfg.roomScope = sc.Hosts[0]
 	}
 	if sc.RoomSignedMaxTTL != "" {
-		d, err := time.ParseDuration(sc.RoomSignedMaxTTL)
+		d, err := parseDurationOrOff(sc.RoomSignedMaxTTL)
 		if err != nil {
 			return config{}, fmt.Errorf("invalid room_signed_max_ttl %q: %w", sc.RoomSignedMaxTTL, err)
 		}
@@ -490,26 +594,105 @@ func buildSiteConfig(base config, gf configfile.GlobalConfig, sc configfile.Site
 	if sc.RoomLeaseFraction != nil {
 		cfg.roomLeaseFraction = *sc.RoomLeaseFraction
 	}
+	if sc.TokenTTL != "" {
+		d, err := parseDurationOrOff(sc.TokenTTL)
+		if err != nil {
+			return config{}, fmt.Errorf("invalid token_ttl %q: %w", sc.TokenTTL, err)
+		}
+		cfg.tokenTTL = d
+	}
+	if sc.FirstPollGrace != "" {
+		d, err := parseDurationOrOff(sc.FirstPollGrace)
+		if err != nil {
+			return config{}, fmt.Errorf("invalid first_poll_grace %q: %w", sc.FirstPollGrace, err)
+		}
+		cfg.firstPollGrace = d
+	}
+	if sc.ReadyGrace != "" {
+		d, err := parseDurationOrOff(sc.ReadyGrace)
+		if err != nil {
+			return config{}, fmt.Errorf("invalid ready_grace %q: %w", sc.ReadyGrace, err)
+		}
+		cfg.readyGrace = d
+	}
+	if sc.IdlePollTTL != "" {
+		d, err := parseDurationOrOff(sc.IdlePollTTL)
+		if err != nil {
+			return config{}, fmt.Errorf("invalid idle_poll_ttl %q: %w", sc.IdlePollTTL, err)
+		}
+		cfg.idlePollTTL = d
+	}
+	if sc.Reaper != "" {
+		d, err := parseDurationOrOff(sc.Reaper)
+		if err != nil {
+			return config{}, fmt.Errorf("invalid reaper %q: %w", sc.Reaper, err)
+		}
+		cfg.reaper = d
+	}
+	if sc.RetryAfter > 0 {
+		cfg.retryAfter = sc.RetryAfter
+	}
+	if sc.BusyHTML != "" {
+		if strings.EqualFold(strings.TrimSpace(sc.BusyHTML), "off") {
+			cfg.busyHTMLFile = ""
+		} else {
+			cfg.busyHTMLFile = sc.BusyHTML
+		}
+	}
+	if sc.ClearQueueOnStart != nil {
+		cfg.clearQueueOnStart = *sc.ClearQueueOnStart
+	}
 	if sc.BodyReadIdleTimeout != "" {
-		d, err := time.ParseDuration(sc.BodyReadIdleTimeout)
+		d, err := parseDurationOrOff(sc.BodyReadIdleTimeout)
 		if err != nil {
 			return config{}, fmt.Errorf("invalid body_read_idle_timeout %q: %w", sc.BodyReadIdleTimeout, err)
 		}
 		cfg.bodyReadIdleTimeout = d
 	}
 	if sc.MaxUploadTime != "" {
-		d, err := time.ParseDuration(sc.MaxUploadTime)
+		d, err := parseDurationOrOff(sc.MaxUploadTime)
 		if err != nil {
 			return config{}, fmt.Errorf("invalid max_upload_time %q: %w", sc.MaxUploadTime, err)
 		}
 		cfg.maxUploadTime = d
 	}
 	if sc.UpstreamTimeout != "" {
-		d, err := time.ParseDuration(sc.UpstreamTimeout)
+		d, err := parseDurationOrOff(sc.UpstreamTimeout)
 		if err != nil {
 			return config{}, fmt.Errorf("invalid upstream_timeout %q: %w", sc.UpstreamTimeout, err)
 		}
 		cfg.headerTimeout = d
+	}
+	if sc.UpstreamBodyIdleTimeout != "" {
+		d, err := parseDurationOrOff(sc.UpstreamBodyIdleTimeout)
+		if err != nil {
+			return config{}, fmt.Errorf("invalid upstream_body_idle_timeout %q: %w", sc.UpstreamBodyIdleTimeout, err)
+		}
+		cfg.upstreamBodyIdleTimeout = d
+	}
+	if sc.UpstreamCBFailures != nil {
+		cfg.upstreamCBFailures = *sc.UpstreamCBFailures
+	}
+	if sc.UpstreamCBCooldown != "" {
+		d, err := parseDurationOrOff(sc.UpstreamCBCooldown)
+		if err != nil {
+			return config{}, fmt.Errorf("invalid upstream_cb_cooldown %q: %w", sc.UpstreamCBCooldown, err)
+		}
+		cfg.upstreamCBCooldown = d
+	}
+	if sc.UpstreamHealthPath != "" {
+		if strings.EqualFold(strings.TrimSpace(sc.UpstreamHealthPath), "off") {
+			cfg.upstreamHealthPath = ""
+		} else {
+			cfg.upstreamHealthPath = sc.UpstreamHealthPath
+		}
+	}
+	if sc.UpstreamHealthInterval != "" {
+		d, err := parseDurationOrOff(sc.UpstreamHealthInterval)
+		if err != nil {
+			return config{}, fmt.Errorf("invalid upstream_health_interval %q: %w", sc.UpstreamHealthInterval, err)
+		}
+		cfg.upstreamHealthInterval = d
 	}
 	if sc.FastlaneConfig != "" {
 		cfg.fastlaneFile = sc.FastlaneConfig
@@ -878,6 +1061,12 @@ func runVhost(ctx context.Context, baseCfg config) error {
 	}
 	log.Printf("%s multi-vhost listening on %s (%d site(s): %s, config=%s, http3=%v)",
 		Edition(), ln.Addr(), len(snap.sites), strings.Join(hosts, " | "), vm.configPath, gf.HTTP3)
+	for _, sr := range snap.sites {
+		if sr.app != nil {
+			scfg := sr.app.current().cfg
+			logStartupDiagnostics("site "+sr.primaryHost, scfg, hasCapacityFile(scfg.dataDir))
+		}
+	}
 
 	mainEP.serveOn(ln, listenAddr)
 	err = awaitShutdown(ctx, mainEP, portalEP, httpRedirectEP)

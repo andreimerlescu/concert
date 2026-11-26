@@ -60,7 +60,7 @@ Concert caps the number of concurrent page requests that reach your origin. Ever
 | --- | --- | --- |
 | **`concert`** | `go build ./cmd/concert` | Lean HTTP/HTTPS waiting-room front-door: FIFO waiting room (`room`), `sema` capacity + asset/stream tiers, `Concert-Priority`, `os.Root` local static serving + `.br`/`.gz`/gzip, ACME TLS + `:80→:443` redirect + opt-in `-http3`, declarative `-config` (`Concertfile`/`.json`) multi-vhost with `SIGHUP` hot-reload, abuse registry, single-password Portal (with multi-vhost site switcher), Prometheus `/metrics`, `bench` |
 | **`wpconcert`** | `go build -tags wordpress ./cmd/wpconcert` | Everything in `concert` **+** pure-stdlib FastCGI (`fcgi://`, `fcgi+unix://`), WordPress/WooCommerce `preset wordpress`, bounded in-memory anonymous GET micro-cache with `singleflight` stampede collapse (`-micro-cache-ttl`), and `wpconcert doctor` / `wpconcert init` PHP-FPM pool sizing tools — **zero** blockchain/gRPC/enterprise mesh deps |
-| **`econcert`** | `go build -tags "wordpress,enterprise" ./cmd/econcert` | Complete enterprise superset: `concert` + `wpconcert` **+** two-tier edge/leaf hop mesh (`Concert-Hop` nonces + native leaf mTLS + traffic-weighted multi-edge + drained remote re-benchmarking), Redis HA cluster sync & alert dedupe, RBAC/SSO + tamper-evident audit log + `-enterprise-hardened`, transactional email digest mailer, and x402 Fast-Lane (`reconcile`, `archive-receipts`) |
+| **`econcert`** | `go build -tags "wordpress,enterprise" ./cmd/econcert` | Complete open-source enterprise superset: `concert` + `wpconcert` **+** two-tier edge/leaf hop mesh (`Concert-Hop` nonces + native leaf mTLS + traffic-weighted multi-edge + drained remote re-benchmarking), Redis HA cluster sync & alert dedupe, RBAC/SSO + tamper-evident audit log + `-enterprise-hardened`, transactional email digest mailer, and 4-chain x402 / Direct QR / NFT & token-gated Fast-Lane (`reconcile`, `archive-receipts`) |
 
 ## Install
 
@@ -68,14 +68,14 @@ Concert caps the number of concurrent page requests that reach your origin. Ever
     go install -tags wordpress github.com/andreimerlescu/concert/cmd/wpconcert@latest
     go install -tags "wordpress,enterprise" github.com/andreimerlescu/concert/cmd/econcert@latest
 
-Or build all 24 cross-platform binaries and per-edition CycloneDX SBOMs from source:
+Or build the Linux static binaries, FIPS builds, release tarballs, and per-edition CycloneDX SBOMs from source:
 
     git clone https://github.com/andreimerlescu/concert.git
     cd concert
     make build
-    make sbom
+    make dist
 
-`make build` writes static binaries for Linux, macOS and Windows on amd64 and arm64 to `bin/`. Requires Go 1.27.3 or newer (`room v1.8.0` / `sema v1.3.0`).
+`make build` writes static Linux binaries (`linux/amd64` and `linux/arm64`) for `concert`, `wpconcert`, `econcert`, `bench-concert`, and `concert-client` to `bin/`. `make dist` packages Linux release `.tar.gz` tarballs (including FIPS 140-3 builds), CycloneDX 1.5 SBOMs, and `SHA256SUMS.txt` into `dist/`. For local development on another OS, build directly with `go build ./cmd/concert`. Requires Go 1.27.3 or newer (`room v1.9.0` / `sema v1.3.0`).
 
 On RHEL, Alma, Rocky, CentOS Stream or Fedora, `installer.sh` installs a prebuilt binary as a confined systemd service under SELinux enforcing mode, downloads the IPtoASN database for IP details, and schedules its daily refresh. See the comments at the top of the script.
 
@@ -126,9 +126,13 @@ Every option can be set with a flag or an environment variable. A flag overrides
 | `-wp-preset` | `CONCERT_WP_PRESET` | `false` | `wpconcert`/`econcert`: apply WordPress/WooCommerce asset gating, `/xmlrpc.php` block, and uploads PHP denial |
 | `-cap` | `CONCERT_CAPACITY` | `434` | Max concurrent page requests allowed through to the origin |
 | `-max-queue` | `CONCERT_MAX_QUEUE` | `369` | Reject new arrivals with 503 beyond this queue depth (0 = unlimited) |
-| `-reaper` | `CONCERT_REAPER` | `36s` | How often abandoned tickets are cleaned up |
+| `-reaper` | `CONCERT_REAPER` | `10s` | How often abandoned tickets are cleaned up (`5s`–`24h`) |
 | `-token-ttl` | `CONCERT_TOKEN_TTL` | `0` (room default, 5m) | Sliding lifetime of a queued ticket, 30s–24h |
 | `-first-poll-grace` | `CONCERT_FIRST_POLL_GRACE` | `30s` | Reclaim a new ticket whose visitor never polls (0 = off) |
+| `-ready-grace` | `CONCERT_READY_GRACE` | `30s` | Reclaim a ticket inside the serving window that is not claimed in time, `5s`–`10m` (0 = off) |
+| `-idle-poll-ttl` | `CONCERT_IDLE_POLL_TTL` | `45s` | Evict a queued ticket with no client contact for longer than this time, `10s`–`24h` (0 = off) |
+| `-busy-html` | `CONCERT_BUSY_HTML` | *(empty)* | Custom HTML file served when the waiting room is full (`503`), empty for built-in busy page |
+| `-clear-queue-on-start` | `CONCERT_CLEAR_QUEUE_ON_START` | `false` | Discard any saved `queue.snapshot` on startup instead of restoring it (restart to change) |
 | `-secure-cookie` | `CONCERT_SECURE_COOKIE` | `false` | Mark cookies `Secure` (only if browsers reach you over HTTPS) |
 | `-cookie-path` | `CONCERT_COOKIE_PATH` | `/` | Path attribute of cookies |
 | `-cookie-domain` | `CONCERT_COOKIE_DOMAIN` | *(empty)* | Domain attribute of cookies |
@@ -167,7 +171,8 @@ Every option can be set with a flag or an environment variable. A flag overrides
 | `-pass` | `CONCERT_PASS_DURATION` | `0` | VIP pass lifetime after paying to skip (0 disables passes) |
 | `-agent-queue` | `CONCERT_AGENT_QUEUE` | `false` | With wallet access on, a valid `Concert-Session` header keeps one place in line per session, with no cookies; see [AI agents in the line](#ai-agents-in-the-line) |
 | `-agent-places` | `CONCERT_AGENT_PLACES` | `4` | Places in line one client address (IPv6: its /64) may hold through `Concert-Session`; past it, 429 and a strike |
-| `-upstream-timeout` | `CONCERT_UPSTREAM_TIMEOUT` | `30s` | How long to wait for the origin's response headers |
+| `-upstream-timeout` | `CONCERT_UPSTREAM_TIMEOUT` | `60s` | How long to wait for the origin's response headers (`90s` in WordPress preset) |
+| `-upstream-body-idle-timeout` | `CONCERT_UPSTREAM_BODY_IDLE_TIMEOUT` | `30s` | Max idle pause between upstream response body chunks on non-stream requests, `1s`–`24h` (0 disables; exempts `-stream-paths`, SSE, and `101`) |
 | `-api-json` | `CONCERT_API_JSON` | `true` | Answer queued non-browser clients with JSON 429 instead of HTML |
 | `-retry-after` | `CONCERT_RETRY_AFTER` | `5` | `Retry-After` seconds sent to queued API clients |
 | `-tls-domains` | `CONCERT_TLS_DOMAINS` | *(empty)* | Hostnames to get Let's Encrypt certificates for; enables TLS on `-listen` |
@@ -189,7 +194,7 @@ Every option can be set with a flag or an environment variable. A flag overrides
 | | `NADDR_DATA_POLL` | `30s` | How often `NADDR_DATA` is checked for changes; `off` disables reloading |
 | | `NADDR_ADDR` | *(empty)* | A running naddr service (`host:port` or URL), used when `NADDR_DATA` is empty or unusable |
 
-The settings for running Concert as an edge in front of leaf Concerts (`-role`, `-node-id`, `-hop-*`, `-host-cap`, `-upstream-retries`, `-bench-*` and `CONCERT_HOP_SECRET`) are listed in [docs/TOPOLOGY.md](docs/TOPOLOGY.md#configuration). For running WordPress/WooCommerce directly on Concert + `php-fpm` without Caddy, Nginx, or Apache, see [docs/WORDPRESS.md](docs/WORDPRESS.md).
+The settings for running Concert as an edge in front of leaf Concerts (`-role`, `-node-id`, `-hop-*`, `-host-cap`, `-upstream-retries`, `-bench-*` and `CONCERT_HOP_SECRET`) are listed in [docs/TOPOLOGY.md](docs/TOPOLOGY.md#configuration). For running WordPress/WooCommerce directly on Concert + `php-fpm` without Caddy, Nginx, or Apache, see [docs/WORDPRESS.md](docs/WORDPRESS.md). For production baselines, capacity calibration, live queue recovery (`POST /_room/queue/clear`), and alerting, see [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 Secrets are environment-only on purpose: command-line arguments are visible in `ps` output and shell history.
 
@@ -226,7 +231,7 @@ Set `CONCERT_PORTAL_PASS` and the portal listens on `-portal-listen` (default `1
 | Tab | Shows |
 |---|---|
 | Overview | Page, asset, stream, priority, abuse, and live Edge/Leaf tier views (with drained re-benchmarking and `draining` shrink badge) |
-| Queue | Visitors waiting in line, with actions to move to the front, remove, or remove and ban |
+| Queue | Visitors waiting in line, with actions to move to the front, remove, remove and ban, flush stale tickets, or clear the queue |
 | Bans | Active bans and ranges; create, change or lift a ban, temporary or permanent |
 | Visitors | Every client the history recorded, with its requests and the bans covering it |
 | Ban log | Every ban in the history: when it began and ends, what started it, and what the banned network requested while blocked |
@@ -517,12 +522,16 @@ These are never queued, so they keep answering even when the room is full. Banne
 | Endpoint | Purpose |
 |---|---|
 | `GET /_room/healthz` | Liveness check; returns `ok` |
-| `GET /_room/stats` | Page, asset, stream and abuse counters |
-| `POST /_room/cap` | Change page capacity at runtime and save it to `settings.json` (admin) |
-| `GET /_room/abuse` | List banned clients and ranges (admin) |
-| `DELETE /_room/abuse?client=…` | Unban a client or range and forget its history (admin) |
+| `GET /_room/readyz` | Readiness check; returns `503` while draining, when all upstreams are unhealthy, or on an edge with no usable leaf |
+| `GET /_room/stats` | Page, asset, stream, abuse, and liveness counters (`viewer` when `-stats-auth=true`) |
+| `GET /_room/metrics` | Prometheus text exposition (`viewer` when `-stats-auth=true`) |
+| `POST /_room/cap` | Change page capacity at runtime and save it to `settings.json` (`operator`) |
+| `POST /_room/promote` | Move a queued ticket or client to the front of the line (`operator`) |
+| `POST /_room/queue/clear` | Flush stale tickets (`{"mode":"stale"}`) or clear the entire waiting line (`{"mode":"all"}`) without blocking visitors (`operator`) |
+| `GET /_room/abuse` | List banned clients and ranges (`viewer`) |
+| `DELETE /_room/abuse?client=…` | Unban a client or range and forget its history (`operator`) |
 
-Admin endpoints require `Authorization: Bearer $CONCERT_ADMIN_TOKEN` and return 404 when the token is unset. Wrong tokens earn strikes.
+Admin endpoints require `Authorization: Bearer $CONCERT_ADMIN_TOKEN` (or scoped `CONCERT_ADMIN_TOKENS` in `econcert`) and return 404 when no token is configured. Wrong tokens earn strikes.
 
 `live_queue_depth` counts only clients still holding a ticket, so it is the better number for dashboards than `queue_depth`, which briefly includes abandoned tickets. `asset_users` is the number of passes with an active per-user pool.
 
@@ -536,14 +545,19 @@ Listing and lifting bans:
 
 IPv6 clients appear and are unbanned as their `/64`, for example `client=2001:db8:1:2::/64`; ranges as their CIDR, for example `client=203.0.0.0/16`.
 
-Raising page capacity during an event:
+Raising page capacity or flushing stale tickets during an event:
 
     curl -X POST https://example.com/_room/cap \
          -H "Authorization: Bearer $CONCERT_ADMIN_TOKEN" \
          -H "Content-Type: application/json" \
          -d '{"cap": 80}'
 
-Expose `/_room/*` only on a trusted network, or block it at your TLS terminator.
+    curl -X POST https://example.com/_room/queue/clear \
+         -H "Authorization: Bearer $CONCERT_ADMIN_TOKEN" \
+         -H "Content-Type: application/json" \
+         -d '{"mode": "stale"}'
+
+See [docs/OPERATIONS.md](docs/OPERATIONS.md) for the full live queue recovery runbook and Prometheus alert rules. Expose `/_room/*` only on a trusted network, or block it at your TLS terminator.
 
 ## Reserved paths
 
@@ -551,9 +565,14 @@ Concert answers these paths itself, and they never reach your origin:
 
     /queue/status
     /queue/status/{id}
+    /_concert/*
     /_room/healthz
+    /_room/readyz
     /_room/stats
+    /_room/metrics
     /_room/cap
+    /_room/promote
+    /_room/queue/clear
     /_room/abuse
 
 ## Priority: customers, members and staff
@@ -725,8 +744,11 @@ It writes `capacity.json`, which a leaf uses as its host capacity. With `-bench-
 
 ## Development
 
-    make all                    # vet, clean, test, race tests, benchmarks, cross-platform build
-    make build                  # concert and bench-concert for linux, darwin, windows × amd64, arm64 in bin/
+    make all                    # vet, clean, test, race tests, benchmarks, Linux build & checksums
+    make build                  # static Linux (amd64, arm64) binaries in bin/
+    make dist                   # Linux release tarballs (incl. FIPS), CycloneDX SBOMs & SHA256SUMS.txt in dist/
+    make docker                 # distroless container images: concert, wpconcert, econcert (see deploy/docker/)
+    make docker-buildx          # multi-arch Linux (amd64, arm64) container images via Buildx
     go test -race -count=1 ./...
 
 The test suite runs the real waiting room, asset tier, abuse registry, portal and history against a fake origin. It covers:

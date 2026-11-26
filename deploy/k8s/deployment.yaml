@@ -1,15 +1,19 @@
+# Hardened Enterprise Edition (econcert) Kubernetes Deployment.
+# Uses econcert-only controls: CONCERT_HARDENED, CONCERT_ADMIN_TOKENS_FILE,
+# CONCERT_PORTAL_USERS_FILE, and optional Redis HA / x402 Fast-Lane.
+# For the Apache-2.0 Core Edition (concert), see deploy/k8s/concert-deployment.yaml.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: concert
+  name: econcert
   labels:
-    app.kubernetes.io/name: concert
+    app.kubernetes.io/name: econcert
     app.kubernetes.io/component: waiting-room-proxy
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app.kubernetes.io/name: concert
+      app.kubernetes.io/name: econcert
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -18,9 +22,9 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: concert
+        app.kubernetes.io/name: econcert
     spec:
-      serviceAccountName: concert
+      serviceAccountName: econcert
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 45
       securityContext:
@@ -31,8 +35,8 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: concert
-          image: ghcr.io/andreimerlescu/concert:latest
+        - name: econcert
+          image: ghcr.io/andreimerlescu/econcert:v0.3.0
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -117,8 +121,13 @@ spec:
               mountPath: /run/certs/portal
               readOnly: true
       volumes:
+        # Persistent volume so tamper-evident audit.jsonl, bans.json, and queue
+        # snapshots survive pod restarts under CONCERT_HARDENED=true. For
+        # multi-replica deployments with local Fast-Lane journals, convert to a
+        # StatefulSet with volumeClaimTemplates (one ReadWriteOnce PVC per pod).
         - name: data
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: econcert-data
         - name: secrets
           secret:
             secretName: concert-secrets
@@ -131,12 +140,12 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: concert
+  name: econcert
   labels:
-    app.kubernetes.io/name: concert
+    app.kubernetes.io/name: econcert
 spec:
   selector:
-    app.kubernetes.io/name: concert
+    app.kubernetes.io/name: econcert
   sessionAffinity: ClientIP
   ports:
     - name: http
@@ -146,21 +155,21 @@ spec:
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: concert
+  name: econcert
 spec:
   minAvailable: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: concert
+      app.kubernetes.io/name: econcert
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: concert
+  name: econcert
 spec:
   selector:
     matchLabels:
-      app.kubernetes.io/name: concert
+      app.kubernetes.io/name: econcert
   endpoints:
     - port: http
       path: /_room/metrics

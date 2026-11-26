@@ -64,6 +64,12 @@ type edgeState struct {
 	pollErrors   atomic.Int64
 	pushes       atomic.Int64
 	pushErrors   atomic.Int64
+
+	// Guarded by roundMu: rate-limits warnings when effectivePriorityCap() >= TotalLeafSlots.
+	prioCollapseActive    bool
+	prioCollapseLastTotal int
+	prioCollapseLastLane  int
+	prioCollapseWarnAt    time.Time
 }
 
 // leafLink is what an edge knows about one leaf.
@@ -273,6 +279,19 @@ func (a *app) edgeRound(ctx context.Context) capacity.Plan {
 	e.planner.SetLimits(cfg.capacity, cfg.effectivePriorityCap())
 	plan := e.planner.Plan(reports, now)
 	e.lastPlan.Store(&plan)
+	prioCap := cfg.effectivePriorityCap()
+	if cfg.hopAutoCap && plan.Leaves > 0 && plan.Total > 0 && prioCap >= plan.Total {
+		if !e.prioCollapseActive || e.prioCollapseLastTotal != plan.Total || e.prioCollapseLastLane != prioCap || now.Sub(e.prioCollapseWarnAt) >= 5*time.Minute {
+			log.Printf("edge: WARNING priority lane (%d slots) >= total leaf slots (%d across %d leaf(s)), clamping waiting room cap to 1; lower -cap or set an explicit -priority-cap",
+				prioCap, plan.Total, plan.Leaves)
+			e.prioCollapseActive = true
+			e.prioCollapseLastTotal = plan.Total
+			e.prioCollapseLastLane = prioCap
+			e.prioCollapseWarnAt = now
+		}
+	} else {
+		e.prioCollapseActive = false
+	}
 	if plan.Leaves > 0 && !e.everUsable.Swap(true) {
 		log.Printf("edge: %d leaf(s) usable, %d page slot(s); admitting up to %d", plan.Leaves, plan.Total, plan.Cap)
 	} else if plan.Leaves == 0 && e.everUsable.Load() {

@@ -48,9 +48,22 @@ type GlobalConfig struct {
 	RoomVerifyKeys           string            `json:"room_verify_keys,omitempty"`
 	RoomSignedMaxTTL         string            `json:"room_signed_max_ttl,omitempty"`
 	RoomLeaseFraction        *float64          `json:"room_lease_fraction,omitempty"`
+	TokenTTL                 string            `json:"token_ttl,omitempty"`
+	FirstPollGrace           string            `json:"first_poll_grace,omitempty"`
+	ReadyGrace               string            `json:"ready_grace,omitempty"`
+	IdlePollTTL              string            `json:"idle_poll_ttl,omitempty"`
+	Reaper                   string            `json:"reaper,omitempty"`
+	RetryAfter               int               `json:"retry_after,omitempty"`
+	BusyHTML                 string            `json:"busy_html,omitempty"`
+	ClearQueueOnStart        *bool             `json:"clear_queue_on_start,omitempty"`
 	BodyReadIdleTimeout      string            `json:"body_read_idle_timeout,omitempty"`
 	MaxUploadTime            string            `json:"max_upload_time,omitempty"`
 	UpstreamTimeout          string            `json:"upstream_timeout,omitempty"`
+	UpstreamBodyIdleTimeout  string            `json:"upstream_body_idle_timeout,omitempty"`
+	UpstreamCBFailures       *int              `json:"upstream_cb_failures,omitempty"`
+	UpstreamCBCooldown       string            `json:"upstream_cb_cooldown,omitempty"`
+	UpstreamHealthPath       string            `json:"upstream_health_path,omitempty"`
+	UpstreamHealthInterval   string            `json:"upstream_health_interval,omitempty"`
 	FastlaneConfig           string            `json:"fastlane_config,omitempty"`
 	NetworksConfig           string            `json:"networks_config,omitempty"`
 	FastlaneLockDestinations *bool             `json:"fastlane_lock_destinations,omitempty"`
@@ -90,9 +103,22 @@ type SiteConfig struct {
 	RoomScope                string            `json:"room_scope,omitempty"`
 	RoomSignedMaxTTL         string            `json:"room_signed_max_ttl,omitempty"`
 	RoomLeaseFraction        *float64          `json:"room_lease_fraction,omitempty"`
+	TokenTTL                 string            `json:"token_ttl,omitempty"`
+	FirstPollGrace           string            `json:"first_poll_grace,omitempty"`
+	ReadyGrace               string            `json:"ready_grace,omitempty"`
+	IdlePollTTL              string            `json:"idle_poll_ttl,omitempty"`
+	Reaper                   string            `json:"reaper,omitempty"`
+	RetryAfter               int               `json:"retry_after,omitempty"`
+	BusyHTML                 string            `json:"busy_html,omitempty"`
+	ClearQueueOnStart        *bool             `json:"clear_queue_on_start,omitempty"`
 	BodyReadIdleTimeout      string            `json:"body_read_idle_timeout,omitempty"`
 	MaxUploadTime            string            `json:"max_upload_time,omitempty"`
 	UpstreamTimeout          string            `json:"upstream_timeout,omitempty"`
+	UpstreamBodyIdleTimeout  string            `json:"upstream_body_idle_timeout,omitempty"`
+	UpstreamCBFailures       *int              `json:"upstream_cb_failures,omitempty"`
+	UpstreamCBCooldown       string            `json:"upstream_cb_cooldown,omitempty"`
+	UpstreamHealthPath       string            `json:"upstream_health_path,omitempty"`
+	UpstreamHealthInterval   string            `json:"upstream_health_interval,omitempty"`
 	FastlaneConfig           string            `json:"fastlane_config,omitempty"`
 	NetworksConfig           string            `json:"networks_config,omitempty"`
 	FastlaneLockDestinations *bool             `json:"fastlane_lock_destinations,omitempty"`
@@ -201,6 +227,12 @@ func (f *File) NormalizeAndValidate() error {
 				return fmt.Errorf("site %s: invalid max_upload_time %q", s.Hosts[0], s.MaxUploadTime)
 			}
 		}
+		if err := validateCommonTimers("site "+s.Hosts[0],
+			s.TokenTTL, s.FirstPollGrace, s.ReadyGrace, s.IdlePollTTL, s.Reaper, s.RetryAfter,
+			s.UpstreamTimeout, s.UpstreamBodyIdleTimeout, s.UpstreamCBFailures, s.UpstreamCBCooldown,
+			s.UpstreamHealthPath, s.UpstreamHealthInterval); err != nil {
+			return err
+		}
 		if (s.TLSCert == "") != (s.TLSKey == "") {
 			return fmt.Errorf("site %s: tls_cert and tls_key must both be set", s.Hosts[0])
 		}
@@ -226,11 +258,85 @@ func (f *File) NormalizeAndValidate() error {
 			return fmt.Errorf("global: invalid max_upload_time %q", f.Global.MaxUploadTime)
 		}
 	}
+	if err := validateCommonTimers("global",
+		f.Global.TokenTTL, f.Global.FirstPollGrace, f.Global.ReadyGrace, f.Global.IdlePollTTL, f.Global.Reaper, f.Global.RetryAfter,
+		f.Global.UpstreamTimeout, f.Global.UpstreamBodyIdleTimeout, f.Global.UpstreamCBFailures, f.Global.UpstreamCBCooldown,
+		f.Global.UpstreamHealthPath, f.Global.UpstreamHealthInterval); err != nil {
+		return err
+	}
 	if (f.Global.TLSCert == "") != (f.Global.TLSKey == "") {
 		return errors.New("global: tls_cert and tls_key must both be set")
 	}
 	if f.Global.HSTSMaxAge < 0 {
 		return errors.New("global: hsts_max_age must not be negative")
+	}
+	return nil
+}
+
+func validateDurationField(scope, name, raw string, allowOff bool, minD, maxD time.Duration) error {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return nil
+	}
+	if allowOff && (s == "0" || strings.EqualFold(s, "off")) {
+		return nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return fmt.Errorf("%s: invalid %s %q", scope, name, raw)
+	}
+	if allowOff && d == 0 {
+		return nil
+	}
+	if d < 0 || (minD > 0 && d < minD) || (maxD > 0 && d > maxD) {
+		return fmt.Errorf("%s: invalid %s %q", scope, name, raw)
+	}
+	return nil
+}
+
+func validateCommonTimers(
+	scope string,
+	tokenTTL, firstPollGrace, readyGrace, idlePollTTL, reaper string,
+	retryAfter int,
+	upstreamTimeout, upstreamBodyIdleTimeout string,
+	upstreamCBFailures *int,
+	upstreamCBCooldown, upstreamHealthPath, upstreamHealthInterval string,
+) error {
+	if err := validateDurationField(scope, "token_ttl", tokenTTL, true, 30*time.Second, 24*time.Hour); err != nil {
+		return err
+	}
+	if err := validateDurationField(scope, "first_poll_grace", firstPollGrace, true, 10*time.Second, 24*time.Hour); err != nil {
+		return err
+	}
+	if err := validateDurationField(scope, "ready_grace", readyGrace, true, 5*time.Second, 10*time.Minute); err != nil {
+		return err
+	}
+	if err := validateDurationField(scope, "idle_poll_ttl", idlePollTTL, true, 10*time.Second, 24*time.Hour); err != nil {
+		return err
+	}
+	if err := validateDurationField(scope, "reaper", reaper, false, 5*time.Second, 24*time.Hour); err != nil {
+		return err
+	}
+	if retryAfter < 0 {
+		return fmt.Errorf("%s: retry_after must not be negative", scope)
+	}
+	if err := validateDurationField(scope, "upstream_timeout", upstreamTimeout, true, 0, 0); err != nil {
+		return err
+	}
+	if err := validateDurationField(scope, "upstream_body_idle_timeout", upstreamBodyIdleTimeout, true, time.Second, 24*time.Hour); err != nil {
+		return err
+	}
+	if upstreamCBFailures != nil && *upstreamCBFailures < 0 {
+		return fmt.Errorf("%s: upstream_cb_failures must not be negative", scope)
+	}
+	if err := validateDurationField(scope, "upstream_cb_cooldown", upstreamCBCooldown, false, time.Second, 0); err != nil {
+		return err
+	}
+	if hp := strings.TrimSpace(upstreamHealthPath); hp != "" && !strings.EqualFold(hp, "off") && !strings.HasPrefix(hp, "/") {
+		return fmt.Errorf("%s: invalid upstream_health_path %q (must start with / or be off)", scope, upstreamHealthPath)
+	}
+	if err := validateDurationField(scope, "upstream_health_interval", upstreamHealthInterval, false, time.Second, 0); err != nil {
+		return err
 	}
 	return nil
 }
@@ -648,6 +754,45 @@ func (p *parser) parseGlobalBlock(g *GlobalConfig) error {
 				return fmt.Errorf("Concertfile:%d:%d: directive %q invalid number %q", dir.line, dir.col, dir.val, s)
 			}
 			g.RoomLeaseFraction = &v
+		case "token_ttl":
+			if g.TokenTTL, err = requireOneArg(dir, args); err != nil {
+				return err
+			}
+		case "first_poll_grace":
+			if g.FirstPollGrace, err = requireOneArg(dir, args); err != nil {
+				return err
+			}
+		case "ready_grace":
+			if g.ReadyGrace, err = requireOneArg(dir, args); err != nil {
+				return err
+			}
+		case "idle_poll_ttl":
+			if g.IdlePollTTL, err = requireOneArg(dir, args); err != nil {
+				return err
+			}
+		case "reaper":
+			if g.Reaper, err = requireOneArg(dir, args); err != nil {
+				return err
+			}
+		case "retry_after":
+			v, err := parseIntArg(dir, args)
+			if err != nil {
+				return err
+			}
+			if v < 1 {
+				return fmt.Errorf("Concertfile:%d:%d: directive %q must be at least 1", dir.line, dir.col, dir.val)
+			}
+			g.RetryAfter = v
+		case "busy_html":
+			if g.BusyHTML, err = requireOneArg(dir, args); err != nil {
+				return err
+			}
+		case "clear_queue_on_start":
+			b, err := parseBoolArg(dir, args)
+			if err != nil {
+				return err
+			}
+			g.ClearQueueOnStart = &b
 		case "body_read_idle_timeout":
 			if g.BodyReadIdleTimeout, err = requireOneArg(dir, args); err != nil {
 				return err
@@ -658,6 +803,28 @@ func (p *parser) parseGlobalBlock(g *GlobalConfig) error {
 			}
 		case "upstream_timeout":
 			if g.UpstreamTimeout, err = requireOneArg(dir, args); err != nil {
+				return err
+			}
+		case "upstream_body_idle_timeout":
+			if g.UpstreamBodyIdleTimeout, err = requireOneArg(dir, args); err != nil {
+				return err
+			}
+		case "upstream_cb_failures":
+			v, err := parseIntArg(dir, args)
+			if err != nil {
+				return err
+			}
+			g.UpstreamCBFailures = &v
+		case "upstream_cb_cooldown":
+			if g.UpstreamCBCooldown, err = requireOneArg(dir, args); err != nil {
+				return err
+			}
+		case "upstream_health_path":
+			if g.UpstreamHealthPath, err = requireOneArg(dir, args); err != nil {
+				return err
+			}
+		case "upstream_health_interval":
+			if g.UpstreamHealthInterval, err = requireOneArg(dir, args); err != nil {
 				return err
 			}
 		case "fastlane_config":
@@ -846,6 +1013,45 @@ body:
 				return s, fmt.Errorf("Concertfile:%d:%d: directive %q invalid number %q", dir.line, dir.col, dir.val, arg)
 			}
 			s.RoomLeaseFraction = &v
+		case "token_ttl":
+			if s.TokenTTL, err = requireOneArg(dir, args); err != nil {
+				return s, err
+			}
+		case "first_poll_grace":
+			if s.FirstPollGrace, err = requireOneArg(dir, args); err != nil {
+				return s, err
+			}
+		case "ready_grace":
+			if s.ReadyGrace, err = requireOneArg(dir, args); err != nil {
+				return s, err
+			}
+		case "idle_poll_ttl":
+			if s.IdlePollTTL, err = requireOneArg(dir, args); err != nil {
+				return s, err
+			}
+		case "reaper":
+			if s.Reaper, err = requireOneArg(dir, args); err != nil {
+				return s, err
+			}
+		case "retry_after":
+			v, err := parseIntArg(dir, args)
+			if err != nil {
+				return s, err
+			}
+			if v < 1 {
+				return s, fmt.Errorf("Concertfile:%d:%d: directive %q must be at least 1", dir.line, dir.col, dir.val)
+			}
+			s.RetryAfter = v
+		case "busy_html":
+			if s.BusyHTML, err = requireOneArg(dir, args); err != nil {
+				return s, err
+			}
+		case "clear_queue_on_start":
+			b, err := parseBoolArg(dir, args)
+			if err != nil {
+				return s, err
+			}
+			s.ClearQueueOnStart = &b
 		case "body_read_idle_timeout":
 			if s.BodyReadIdleTimeout, err = requireOneArg(dir, args); err != nil {
 				return s, err
@@ -856,6 +1062,28 @@ body:
 			}
 		case "upstream_timeout":
 			if s.UpstreamTimeout, err = requireOneArg(dir, args); err != nil {
+				return s, err
+			}
+		case "upstream_body_idle_timeout":
+			if s.UpstreamBodyIdleTimeout, err = requireOneArg(dir, args); err != nil {
+				return s, err
+			}
+		case "upstream_cb_failures":
+			v, err := parseIntArg(dir, args)
+			if err != nil {
+				return s, err
+			}
+			s.UpstreamCBFailures = &v
+		case "upstream_cb_cooldown":
+			if s.UpstreamCBCooldown, err = requireOneArg(dir, args); err != nil {
+				return s, err
+			}
+		case "upstream_health_path":
+			if s.UpstreamHealthPath, err = requireOneArg(dir, args); err != nil {
+				return s, err
+			}
+		case "upstream_health_interval":
+			if s.UpstreamHealthInterval, err = requireOneArg(dir, args); err != nil {
 				return s, err
 			}
 		case "fastlane_config":
@@ -901,7 +1129,11 @@ func FormatConcertfile(f *File) string {
 		g.TLSStaging || g.TLSCert != "" || g.HTTP3 || g.PortalListen != "" || g.DataDir != "" ||
 		g.TrustedProxies != "" || g.LogFormat != "" || g.LogLevel != "" || g.HSTSMaxAge > 0 ||
 		g.RoomVerifyKeys != "" || g.RoomSignedMaxTTL != "" || g.RoomLeaseFraction != nil ||
-		g.BodyReadIdleTimeout != "" || g.MaxUploadTime != ""
+		g.TokenTTL != "" || g.FirstPollGrace != "" || g.ReadyGrace != "" || g.IdlePollTTL != "" ||
+		g.Reaper != "" || g.RetryAfter > 0 || g.BusyHTML != "" || g.ClearQueueOnStart != nil ||
+		g.BodyReadIdleTimeout != "" || g.MaxUploadTime != "" || g.UpstreamTimeout != "" ||
+		g.UpstreamBodyIdleTimeout != "" || g.UpstreamCBFailures != nil || g.UpstreamCBCooldown != "" ||
+		g.UpstreamHealthPath != "" || g.UpstreamHealthInterval != ""
 	if hasGlobal {
 		b.WriteString("{\n")
 		if g.Listen != "" {
@@ -944,11 +1176,53 @@ func FormatConcertfile(f *File) string {
 		if g.RoomLeaseFraction != nil {
 			fmt.Fprintf(&b, "    room_lease_fraction %g\n", *g.RoomLeaseFraction)
 		}
+		if g.TokenTTL != "" {
+			fmt.Fprintf(&b, "    token_ttl %s\n", quote(g.TokenTTL))
+		}
+		if g.FirstPollGrace != "" {
+			fmt.Fprintf(&b, "    first_poll_grace %s\n", quote(g.FirstPollGrace))
+		}
+		if g.ReadyGrace != "" {
+			fmt.Fprintf(&b, "    ready_grace %s\n", quote(g.ReadyGrace))
+		}
+		if g.IdlePollTTL != "" {
+			fmt.Fprintf(&b, "    idle_poll_ttl %s\n", quote(g.IdlePollTTL))
+		}
+		if g.Reaper != "" {
+			fmt.Fprintf(&b, "    reaper %s\n", quote(g.Reaper))
+		}
+		if g.RetryAfter > 0 {
+			fmt.Fprintf(&b, "    retry_after %d\n", g.RetryAfter)
+		}
+		if g.BusyHTML != "" {
+			fmt.Fprintf(&b, "    busy_html %s\n", quote(g.BusyHTML))
+		}
+		if g.ClearQueueOnStart != nil {
+			fmt.Fprintf(&b, "    clear_queue_on_start %v\n", *g.ClearQueueOnStart)
+		}
 		if g.BodyReadIdleTimeout != "" {
 			fmt.Fprintf(&b, "    body_read_idle_timeout %s\n", quote(g.BodyReadIdleTimeout))
 		}
 		if g.MaxUploadTime != "" {
 			fmt.Fprintf(&b, "    max_upload_time %s\n", quote(g.MaxUploadTime))
+		}
+		if g.UpstreamTimeout != "" {
+			fmt.Fprintf(&b, "    upstream_timeout %s\n", quote(g.UpstreamTimeout))
+		}
+		if g.UpstreamBodyIdleTimeout != "" {
+			fmt.Fprintf(&b, "    upstream_body_idle_timeout %s\n", quote(g.UpstreamBodyIdleTimeout))
+		}
+		if g.UpstreamCBFailures != nil {
+			fmt.Fprintf(&b, "    upstream_cb_failures %d\n", *g.UpstreamCBFailures)
+		}
+		if g.UpstreamCBCooldown != "" {
+			fmt.Fprintf(&b, "    upstream_cb_cooldown %s\n", quote(g.UpstreamCBCooldown))
+		}
+		if g.UpstreamHealthPath != "" {
+			fmt.Fprintf(&b, "    upstream_health_path %s\n", quote(g.UpstreamHealthPath))
+		}
+		if g.UpstreamHealthInterval != "" {
+			fmt.Fprintf(&b, "    upstream_health_interval %s\n", quote(g.UpstreamHealthInterval))
 		}
 		b.WriteString("}\n\n")
 	}
@@ -1007,11 +1281,53 @@ func FormatConcertfile(f *File) string {
 		if s.RoomLeaseFraction != nil {
 			fmt.Fprintf(&b, "    room_lease_fraction %g\n", *s.RoomLeaseFraction)
 		}
+		if s.TokenTTL != "" {
+			fmt.Fprintf(&b, "    token_ttl %s\n", quote(s.TokenTTL))
+		}
+		if s.FirstPollGrace != "" {
+			fmt.Fprintf(&b, "    first_poll_grace %s\n", quote(s.FirstPollGrace))
+		}
+		if s.ReadyGrace != "" {
+			fmt.Fprintf(&b, "    ready_grace %s\n", quote(s.ReadyGrace))
+		}
+		if s.IdlePollTTL != "" {
+			fmt.Fprintf(&b, "    idle_poll_ttl %s\n", quote(s.IdlePollTTL))
+		}
+		if s.Reaper != "" {
+			fmt.Fprintf(&b, "    reaper %s\n", quote(s.Reaper))
+		}
+		if s.RetryAfter > 0 {
+			fmt.Fprintf(&b, "    retry_after %d\n", s.RetryAfter)
+		}
+		if s.BusyHTML != "" {
+			fmt.Fprintf(&b, "    busy_html %s\n", quote(s.BusyHTML))
+		}
+		if s.ClearQueueOnStart != nil {
+			fmt.Fprintf(&b, "    clear_queue_on_start %v\n", *s.ClearQueueOnStart)
+		}
 		if s.BodyReadIdleTimeout != "" {
 			fmt.Fprintf(&b, "    body_read_idle_timeout %s\n", quote(s.BodyReadIdleTimeout))
 		}
 		if s.MaxUploadTime != "" {
 			fmt.Fprintf(&b, "    max_upload_time %s\n", quote(s.MaxUploadTime))
+		}
+		if s.UpstreamTimeout != "" {
+			fmt.Fprintf(&b, "    upstream_timeout %s\n", quote(s.UpstreamTimeout))
+		}
+		if s.UpstreamBodyIdleTimeout != "" {
+			fmt.Fprintf(&b, "    upstream_body_idle_timeout %s\n", quote(s.UpstreamBodyIdleTimeout))
+		}
+		if s.UpstreamCBFailures != nil {
+			fmt.Fprintf(&b, "    upstream_cb_failures %d\n", *s.UpstreamCBFailures)
+		}
+		if s.UpstreamCBCooldown != "" {
+			fmt.Fprintf(&b, "    upstream_cb_cooldown %s\n", quote(s.UpstreamCBCooldown))
+		}
+		if s.UpstreamHealthPath != "" {
+			fmt.Fprintf(&b, "    upstream_health_path %s\n", quote(s.UpstreamHealthPath))
+		}
+		if s.UpstreamHealthInterval != "" {
+			fmt.Fprintf(&b, "    upstream_health_interval %s\n", quote(s.UpstreamHealthInterval))
 		}
 		if s.TLSCert != "" {
 			fmt.Fprintf(&b, "    tls_cert %s\n", quote(s.TLSCert))

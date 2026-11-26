@@ -2,7 +2,6 @@ package server
 
 import (
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -37,11 +36,7 @@ func buildRouter(g *generation) (engine *gin.Engine, err error) {
 	r.HandleMethodNotAllowed = false
 	_ = r.SetTrustedProxies(nil) // concert resolves client IPs itself
 
-	r.Use(gin.CustomRecoveryWithWriter(io.Discard, func(c *gin.Context, _ any) {
-		// Never dump payment authorizations, wallet sessions or cookies.
-		log.Printf("request panic on %s", clip(c.Request.URL.Path, 256))
-		c.AbortWithStatus(http.StatusInternalServerError)
-	}))
+	r.Use(concertRecovery())
 	r.Use(correlateMiddleware)
 	r.Use(g.mainSecurityHeaders)
 	r.Use(g.identify) // before the logger: banned requests are never logged
@@ -234,7 +229,9 @@ func (g *generation) proxyForward(c *gin.Context) {
 	} else if ip := clientIPFrom(c); ip.IsValid() {
 		req = withFastCGIClientIP(req, ip.String())
 	}
-	if !c.GetBool(ctxIsStream) && req.Body != nil && req.Body != http.NoBody && req.ContentLength != 0 {
+	if c.GetBool(ctxIsStream) {
+		req = withReqIsStream(req)
+	} else if req.Body != nil && req.Body != http.NoBody && req.ContentLength != 0 {
 		db := newDeadlineBody(c.Writer, req.Body, g.cfg.bodyReadIdleTimeout, g.cfg.maxUploadTime)
 		defer db.Finish()
 		r2 := req.Clone(req.Context())
@@ -242,6 +239,26 @@ func (g *generation) proxyForward(c *gin.Context) {
 		req = withFastCGIBodyAbort(r2, db.Abort)
 	}
 	g.proxy.ServeHTTP(c.Writer, req)
+}
+
+// concertRecovery catches unexpected request panics while re-panicking
+// http.ErrAbortHandler so net/http (HTTP/1.1, HTTP/2) and quic-go/http3 reset
+// the client connection or stream instead of finishing with a silently
+// truncated 200 OK when httputil.ReverseProxy aborts a stalled upstream body.
+func concertRecovery() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				if rec == http.ErrAbortHandler {
+					panic(http.ErrAbortHandler)
+				}
+				// Never dump payment authorizations, wallet sessions or cookies.
+				log.Printf("request panic on %s", clip(c.Request.URL.Path, 256))
+				c.AbortWithStatus(http.StatusInternalServerError)
+			}
+		}()
+		c.Next()
+	}
 }
 
 func janitorInterval(d time.Duration) time.Duration {

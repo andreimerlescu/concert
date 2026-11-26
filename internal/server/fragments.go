@@ -336,8 +336,19 @@ type queueRow struct {
 	SeenMS   int64
 }
 
-func newQueueRow(o occupantView) queueRow {
-	r := queueRow{occupantView: o, PosLabel: "—", Idle: !o.Ready && o.IdleSeconds > 15,
+func queueIdleThreshold(idlePollTTL time.Duration) int {
+	thresh := 15
+	if ttl := int(idlePollTTL.Seconds()); ttl > 0 {
+		thresh = max(5, min(15, ttl/3))
+	}
+	return thresh
+}
+
+func newQueueRow(o occupantView, idleThresh int) queueRow {
+	if idleThresh <= 0 {
+		idleThresh = 15
+	}
+	r := queueRow{occupantView: o, PosLabel: "—", Idle: !o.Ready && o.IdleSeconds > idleThresh,
 		JoinedMS: unixMS(o.Joined), SeenMS: unixMS(o.LastSeen)}
 	if o.Position > 0 {
 		r.PosLabel = "#" + strconv.FormatInt(o.Position, 10)
@@ -393,8 +404,12 @@ func windowAddrs(ws ...banWindowView) []netip.Addr {
 
 // fragVisitors is one page of the Visitors tab.
 func (p *portal) fragVisitors(c *gin.Context) {
+	a, ok := p.targetApp(c)
+	if !ok {
+		return
+	}
 	now := time.Now()
-	g := p.a.current()
+	g := a.current()
 	q := strings.ToLower(strings.TrimSpace(c.Query("q")))
 	all := p.history.sortedClients(q, c.Query("flagged") == "1", g.abuse, now)
 	page, size := pageParams(c)
@@ -406,7 +421,7 @@ func (p *portal) fragVisitors(c *gin.Context) {
 		rows = append(rows, newVisitorRow(v))
 		addrs = append(addrs, v.addr)
 	}
-	p.a.ipinfo.warm(addrs)
+	a.ipinfo.warm(addrs)
 
 	summary := fmt.Sprintf("%s of %s matching · %s addresses recorded",
 		rangeText(start, end, len(all)), fmtCount(len(all)), fmtCount(p.history.count.Load()))
@@ -422,6 +437,10 @@ func (p *portal) fragVisitors(c *gin.Context) {
 // fragVisitor is one client's expanded row: what ess knows, its bans, and a
 // page of its requests.
 func (p *portal) fragVisitor(c *gin.Context) {
+	a, ok := p.targetApp(c)
+	if !ok {
+		return
+	}
 	ip, err := netip.ParseAddr(strings.TrimSpace(c.Query("client")))
 	if err != nil {
 		jsonError(c, http.StatusBadRequest, "client must be an IP address")
@@ -434,11 +453,11 @@ func (p *portal) fragVisitor(c *gin.Context) {
 		jsonError(c, http.StatusNotFound, "no requests recorded from that address")
 		return
 	}
-	v.setBan(p.a.current().abuse, now)
+	v.setBan(a.current().abuse, now)
 	page, size := pageParams(c)
 	start, end, page, pages := paginate(len(entries), page, size)
 	bans := p.history.windowsFor(ip, now)
-	p.a.ipinfo.warm(append([]netip.Addr{ip}, windowAddrs(bans...)...))
+	a.ipinfo.warm(append([]netip.Addr{ip}, windowAddrs(bans...)...))
 
 	data := visitorDetail{
 		Client: newVisitorRow(v), UAs: uas, Bans: bans, Entries: entries[start:end],
@@ -449,20 +468,28 @@ func (p *portal) fragVisitor(c *gin.Context) {
 
 // fragBanLog is one page of the Ban log tab.
 func (p *portal) fragBanLog(c *gin.Context) {
+	a, ok := p.targetApp(c)
+	if !ok {
+		return
+	}
 	now := time.Now()
 	q := strings.ToLower(strings.TrimSpace(c.Query("q")))
 	page, size := pageParams(c)
 	views, total, page, pages, where := p.history.windowPage(q, now, page, size, c.Query("keys"))
-	p.a.ipinfo.warm(windowAddrs(views...))
+	a.ipinfo.warm(windowAddrs(views...))
 	p.fragment(c, "banlog-rows", views, fragResponse{
 		Total: total, Page: page, Pages: pages, Size: size, Where: where,
 		Summary: fmt.Sprintf("%s of %s bans", rangeText((page-1)*size, (page-1)*size+len(views), total), fmtCount(total)),
-		Flags:   map[string]bool{"abuse_enabled": p.a.current().abuse != nil},
+		Flags:   map[string]bool{"abuse_enabled": a.current().abuse != nil},
 	})
 }
 
 // fragBan is one ban's expanded row with every path and address it blocked.
 func (p *portal) fragBan(c *gin.Context) {
+	a, ok := p.targetApp(c)
+	if !ok {
+		return
+	}
 	id, err := strconv.ParseUint(c.Query("id"), 10, 64)
 	if err != nil {
 		jsonError(c, http.StatusBadRequest, "id is required")
@@ -473,15 +500,19 @@ func (p *portal) fragBan(c *gin.Context) {
 		jsonError(c, http.StatusNotFound, "that ban is no longer in the history")
 		return
 	}
-	p.a.ipinfo.warm(windowAddrs(v))
+	a.ipinfo.warm(windowAddrs(v))
 	p.fragment(c, "ban-window", v, fragResponse{Total: 1, Page: 1, Pages: 1})
 }
 
 // fragQueue is one page of the Queue tab, from the front of the line.
 func (p *portal) fragQueue(c *gin.Context) {
+	a, ok := p.targetApp(c)
+	if !ok {
+		return
+	}
 	now := time.Now()
 	q := strings.ToLower(strings.TrimSpace(c.Query("q")))
-	list := p.queueViews(now)
+	list := p.queueViewsFor(a, now)
 	if q != "" {
 		kept := list[:0]
 		for _, o := range list {
@@ -494,28 +525,33 @@ func (p *portal) fragQueue(c *gin.Context) {
 	}
 	page, size := pageParams(c)
 	start, end, page, pages := paginate(len(list), page, size)
+	idleThresh := queueIdleThreshold(a.room.IdlePollTTL())
 	rows := make([]queueRow, 0, end-start)
 	var addrs []netip.Addr
 	for _, o := range list[start:end] {
-		rows = append(rows, newQueueRow(o))
-		if a, ok := addrOf(o.Client); ok {
-			addrs = append(addrs, a)
+		rows = append(rows, newQueueRow(o, idleThresh))
+		if addr, ok := addrOf(o.Client); ok {
+			addrs = append(addrs, addr)
 		}
 	}
-	p.a.ipinfo.warm(addrs)
+	a.ipinfo.warm(addrs)
 	p.fragment(c, "queue-rows", rows, fragResponse{
 		Total: len(list), Page: page, Pages: pages, Size: size,
 		Summary: fmt.Sprintf("%s of %s listed · %s waiting · %s removed",
 			rangeText(start, end, len(list)), fmtCount(len(list)),
-			fmtCount(p.a.room.LiveQueueDepth()), fmtCount(p.kicked.count())),
+			fmtCount(a.room.LiveQueueDepth()), fmtCount(p.kicked.count())),
 		Where: wherePages(c.Query("keys"), size, len(list), func(i int) string { return list[i].ID }),
 	})
 }
 
 // fragBans is one page of the Bans tab.
 func (p *portal) fragBans(c *gin.Context) {
+	a, ok := p.targetApp(c)
+	if !ok {
+		return
+	}
 	now := time.Now()
-	reg := p.a.current().abuse
+	reg := a.current().abuse
 	list := reg.bans(now)
 	page, size := pageParams(c)
 	start, end, page, pages := paginate(len(list), page, size)
@@ -523,16 +559,16 @@ func (p *portal) fragBans(c *gin.Context) {
 	var addrs []netip.Addr
 	for _, b := range list[start:end] {
 		rows = append(rows, newBanRow(b))
-		if a, ok := addrOf(b.Client); ok {
-			addrs = append(addrs, a)
+		if addr, ok := addrOf(b.Client); ok {
+			addrs = append(addrs, addr)
 		}
 	}
-	p.a.ipinfo.warm(addrs)
+	a.ipinfo.warm(addrs)
 	p.fragment(c, "ban-rows", bansData{Rows: rows, AbuseOn: reg != nil}, fragResponse{
 		Total: len(list), Page: page, Pages: pages, Size: size,
 		Summary: fmt.Sprintf("%s of %s active bans · %s clients tracked · %s ranges",
 			rangeText(start, end, len(list)), fmtCount(len(list)), fmtCount(reg.tracked()), fmtCount(reg.rangeCount())),
 		Where: wherePages(c.Query("keys"), size, len(list), func(i int) string { return list[i].Client }),
-		Flags: map[string]bool{"enabled": reg != nil, "persisted": p.a.bansPath != ""},
+		Flags: map[string]bool{"enabled": reg != nil, "persisted": a.bansPath != ""},
 	})
 }
